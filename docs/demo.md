@@ -8,12 +8,18 @@ docker compose up --build
 
 `seed exited with code 0` satırını görünce hazır. Tarayıcıda **http://localhost:5174** açılır: aynı bankanın
 uygulamasında iki müşteri, solda Ayşe, sağda Mehmet. Tahta her parite için 14 işlemlik geçmiş ve iki taraflı
-emir defteriyle dolu gelir. Stack yeniden başlatılınca demo baştan başlar.
+emir defteriyle dolu gelir; ardından emir botları (`bots` servisi) sürekli emir girip iptal ederek ve kendi
+aralarında işlem yaparak tahtayı canlı tutar. Botlar müşteri emrini hiçbir zaman kendileri almaz (müşteri
+botun emrini alabilir). Stack yeniden başlatılınca demo baştan başlar.
 
 ## 1. Uygulama içinde uygulama (1 dk)
 
-- Bankanın kendi uygulaması (mavi bar) içinde "Döviz Pazarı" açık. Giriş yok: banka kısa ömürlü imzalı bir
-  token verir, P2P platformu onu oturuma çevirir.
+- Bankanın kendi uygulaması (mavi bar) içinde "Döviz Pazarı" açık. Ayrı giriş yok: banka backend'i oturum
+  açmış müşteri için kendi anahtarıyla imzalı, en fazla 60 sn geçerli, tek kullanımlık bir token üretir; P2P
+  platformu imzayı doğrulayıp 30 dakikalık oturuma çevirir.
+- Dışarıdan erişim yok: http://localhost:5173 adresini doğrudan tarayıcıda açın, uygulama "yalnızca
+  bankanızın mobil uygulaması içinden açılabilir" der ve API'ye hiç gitmez. Başka bir sitenin içine
+  gömülmeye çalışılırsa tarayıcı da reddeder (`frame-ancestors`).
 - Telefonların altındaki **Köprü mesajları**: banka uygulaması ile gömülü uygulama arasındaki mesajlar
   (`ready`, `init`, geri tuşu, kapat). Native SDK'nın yapacağı iş bu.
 - Sağ üstte **Banka markası** → Yıldız Bank: aynı build, başka bankanın renkleri. Her banka kendi kurulumunu
@@ -22,7 +28,8 @@ emir defteriyle dolu gelir. Stack yeniden başlatılınca demo baştan başlar.
 ## 2. Tahta (1 dk)
 
 Mehmet'te **Tahta**: son işlem ve günlük değişim, açılış/en yüksek/en düşük, hacim, derinlik merdiveni,
-derinlik grafiği, son işlemler. Banka kuru 49,15; en iyi alış 49,11, en iyi satış 49,20.
+derinlik grafiği, son işlemler. Banka kuru 49,15; en iyi alış ve satış 49,11 ile 49,20 civarında, botlar
+oynattıkça değişir.
 
 ## 3. İşlem (3 dk)
 

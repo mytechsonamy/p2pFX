@@ -19,6 +19,7 @@
     "build:web": "pnpm --filter @p2p/web build",
     "demo": "docker compose up --build",
     "demo:seed": "node --env-file=.env --import tsx scripts/seed-market.ts",
+    "demo:bots": "node --env-file=.env --import tsx scripts/market-bots.ts",
     "demo:walkthrough": "node --env-file=.env --import tsx scripts/demo-walkthrough.ts"
   },
   "devDependencies": {

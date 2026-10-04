@@ -17,7 +17,10 @@ commission, tax, settlement status and dekont), **Hesaplarım** (core-banking ac
 - Money is never handled as floats for display or comparisons (`src/format.ts`); the API computes all amounts.
 
 Environment (build time): `VITE_API_BASE` (default: same origin), `VITE_HOST_ORIGINS` (comma-separated parent
-origins allowed when embedded in an iframe), `VITE_BRANDING_PREVIEW=1` lets the host override branding (the
-demo host uses it; always on in dev).
+origins allowed when embedded in an iframe; required outside development), `VITE_BRANDING_PREVIEW=1` lets the
+host override branding (the demo host uses it; always on in dev). Server: `FRAME_ANCESTORS` sets the
+`frame-ancestors` header on the dev and preview servers.
 
-Standalone in a browser without a host: open `http://localhost:5173/#token=$(pnpm -s dev:token demo-ayse)`.
+The app runs only inside the bank app (`src/guard.ts`): opened directly in a browser it shows a message and
+never calls the API. For local debugging only, a build with `VITE_ALLOW_URL_TOKEN=1` accepts a launch token in
+the URL: `http://localhost:5173/#token=$(pnpm -s dev:token demo-ayse)`.

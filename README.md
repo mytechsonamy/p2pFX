@@ -30,8 +30,9 @@ docker compose up --build      # or: pnpm demo
 ```
 
 Open **http://localhost:5174**: the demo bank app with Ayşe and Mehmet side by side. The stack generates
-its own demo keys, starts Postgres, the mock core banking service, the API and the web app, and seeds every
-pair with a trade history and a resting order book. Then, in a second terminal, the scripted end-to-end
+its own demo keys, starts Postgres, the mock core banking service, the API and the web app, seeds every
+pair with a trade history and a resting order book, and runs order bots that keep the board moving (they post,
+cancel and trade among themselves, never taking a customer's order). Then, in a second terminal, the scripted end-to-end
 trade (narrated in Turkish) while the phones update live:
 
 ```sh
@@ -44,7 +45,7 @@ script is in [docs/demo.md](docs/demo.md).
 | | |
 |---|---|
 | http://localhost:5174 | demo bank app (two phones, bank brand switch, bridge message log) |
-| http://localhost:5173 | the embeddable web app on its own |
+| http://localhost:5173 | the embeddable web app: opened directly it refuses to start (bank app only) |
 | http://localhost:4000 | P2P API |
 | http://localhost:4100 | mock core banking (`/admin/bank-accounts`, `/admin/notifications`, `/admin/faults`) |
 
@@ -71,8 +72,17 @@ In the demo, sell USD as Ayşe and tap her offer in Mehmet's order book to buy i
 shows the same build in a second bank's colours. See [apps/web/README.md](apps/web/README.md) and
 [packages/sdk-bridge/README.md](packages/sdk-bridge/README.md).
 
-`pnpm demo:seed` fills the board with market-maker orders and trades, and `pnpm demo:walkthrough` runs the
-scripted trade, both against this local setup.
+`pnpm demo:seed` fills the board with market-maker orders and trades, `pnpm demo:bots` keeps it moving and
+`pnpm demo:walkthrough` runs the scripted trade, all against this local setup.
+
+## Access
+
+The marketplace only opens inside the bank's app. The bank backend mints a launch token for its logged-in
+customer (RS256 with the bank's key, audience `p2pfx`, at most 60 seconds, one-time `jti`) and the bank app
+hands it over the bridge; the API exchanges it for a 30-minute session held in memory only. The web app
+refuses to start when opened from a link in a browser (no host bridge) or framed by a page outside
+`VITE_HOST_ORIGINS`, and the server sends `Content-Security-Policy: frame-ancestors` (`FRAME_ANCESTORS`) so
+browsers refuse other embedders. Without a bank-signed token the API answers nothing.
 
 Try a trade by hand (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`; `demo-mm-1` to `demo-mm-6` are the seeder's market makers):
 

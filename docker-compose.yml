@@ -5,6 +5,7 @@
 #   mock-core  mock core banking: customer accounts, holds, FX postings, dekont, reference rates
 #   api        the P2P platform API, matching and settlement
 #   seed       one-off: fills the board with a trade history and resting orders, then exits
+#   bots       demo order bots: keep posting, cancelling and trading among themselves so the board stays alive
 #   web        the embeddable customer UI (http://localhost:5173)
 #   demo-host  the fake bank app with two phones side by side (http://localhost:5174)
 #
@@ -66,12 +67,24 @@ services:
     depends_on:
       api: { condition: service_healthy }
 
+  bots:
+    <<: *node
+    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/market-bots.ts"]
+    environment:
+      <<: *clients
+      BOT_INTERVAL_MS: "1500"
+    depends_on:
+      seed: { condition: service_completed_successfully }
+
   web:
     <<: *node
     working_dir: /app/apps/web
     command: ["node", "node_modules/vite/bin/vite.js"]
     environment:
       API_URL: http://api:4000
+      # Only the demo bank app may embed the marketplace; opened directly in a browser it refuses to start.
+      VITE_HOST_ORIGINS: http://localhost:5174
+      FRAME_ANCESTORS: http://localhost:5174
     ports: ["5173:5173"]
     depends_on:
       api: { condition: service_healthy }

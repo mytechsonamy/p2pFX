@@ -132,7 +132,8 @@ const tr = {
   'error.generic': 'Bir sorun oluştu. Lütfen tekrar deneyin.',
   'error.network': 'Bağlantı kurulamadı. İnternet bağlantınızı kontrol edin.',
   'error.session': 'Oturumunuz sona erdi. Yenileniyor…',
-  'error.noToken': 'Uygulama banka uygulamanız üzerinden açılmalıdır.',
+  'error.noToken': 'Döviz Pazarı yalnızca bankanızın mobil uygulaması içinden açılabilir.',
+  'error.untrustedHost': 'Bu sayfa yetkisiz bir uygulama içinde açıldı. Döviz Pazarı\'nı bankanızın mobil uygulamasından açın.',
   'error.INSUFFICIENT_BALANCE': 'Bakiyeniz bu emir için yetersiz.',
   'error.CORE_UNAVAILABLE': 'Bankacılık sistemine şu an ulaşılamıyor. Lütfen biraz sonra tekrar deneyin.',
   'error.MARKET_CLOSED': 'Piyasa kapalı olduğu için emir alınamadı.',
@@ -268,7 +269,8 @@ const en: Partial<Record<StringKey, string>> = {
   'accounts.available': 'Available',
   'error.generic': 'Something went wrong. Please try again.',
   'error.network': 'Cannot connect. Check your internet connection.',
-  'error.noToken': 'Open this from your bank app.',
+  'error.noToken': 'The FX marketplace can only be opened from your bank\'s mobile app.',
+  'error.untrustedHost': 'This page was opened inside an app that is not allowed. Open the FX marketplace from your bank\'s mobile app.',
 };
 
 export type Translate = (key: StringKey, vars?: Record<string, string | number>) => string;
