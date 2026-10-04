@@ -97,15 +97,21 @@ export class PositionKeeper {
   ) {}
 
   async position(pair: PairConfig): Promise<Position> {
-    // Customer BUY → the bank sells. Only settled deals change the position.
+    // Customer BUY → the bank sells. Only settled deals change the position. P2P fills where the bank's own
+    // account (its ladder in the book) was a side count too; other P2P fills are back-to-back and do not.
     const { rows } = await this.db.query(
       `select at, side, qty, rate from (
          select created_at as at, seq, case side when 'BUY' then 'SELL' else 'BUY' end as side, qty, rate, 0 as src
            from bank_deals where pair = $1 and status = 'SETTLED'
          union all
          select created_at, seq, side, qty, rate, 1 from hedges where pair = $1
+         union all
+         select f.created_at, f.seq, o.side, f.qty, f.book_price, 2 from fills f
+           join orders o on o.id in (f.buy_order_id, f.sell_order_id)
+           join customers c on c.id = o.customer_id
+          where f.pair = $1 and c.customer_ref = $2
        ) t order by at, src, seq`,
-      [pair.symbol],
+      [pair.symbol, this.config.get().data.bankBook.customerRef],
     );
     return positionOf(pair, rows.map((r) => ({ side: r.side, qty: BigInt(r.qty), rate: parsePrice(r.rate) })));
   }

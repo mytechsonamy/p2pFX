@@ -32,6 +32,11 @@ for (const [i, pair] of (config.pairs as { symbol: string; base: string }[]).ent
   let p = ref - 0.22;
   for (let k = 0; k < HISTORY; k++) {
     p = k === HISTORY - 1 ? ref - 0.01 : Math.min(ref + 0.12, Math.max(ref - 0.3, p + between(-0.05, 0.08)));
+    // Stay inside the current best bid and offer (the bank's own ladder among them), so the history trades
+    // are between the two market makers and never take resting liquidity.
+    const top = await api('GET', `/v1/pairs/${pair.symbol}/book`, a);
+    if (top.bids[0]) p = Math.max(p, Math.floor(Number(top.bids[0].price) * 100) / 100 + 0.01);
+    if (top.asks[0]) p = Math.min(p, Math.ceil(Number(top.asks[0].price) * 100) / 100 - 0.01);
     const qty = lot(small ? 100 : 200, small ? 1500 : 4000, 50);
     const [seller, buyer] = k % 2 ? [a, b] : [b, a];
     const sellFirst = k % 3 !== 0;

@@ -83,6 +83,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
       positions: await positions.snapshot(),
       deals: await dealing.recentDeals(),
       hedges: await positions.recentHedges(),
+      bankBook: { enabled: c.bankBook.enabled, orders: await ctx.bankBook.snapshot() },
     };
   });
 

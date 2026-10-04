@@ -245,6 +245,46 @@ const SECTIONS: Section[] = [
     ],
   },
   {
+    id: 'bankBook',
+    title: 'Banka emirleri (tahta)',
+    intro:
+      "Bankanın kendi hesabından tahtaya girdiği kademeli emirler. Satış kademeleri seçilen segmentin banka satış kurunun %x yukarısından, alış kademeleri banka alış kurunun %x aşağısından başlar; her kademe bir öncekinden adım kadar uzaktadır. LP fiyatı oynadıkça emirler yeniden fiyatlanır, müşterinin aldığı kademe yeniden doldurulur. Gerçekleşen işlemler bankanın pozisyonuna yazılır ve hedge kuralına tabidir.",
+    assumptions: ['bankBook'],
+    groups: (c) => [
+      {
+        title: 'Genel',
+        fields: [
+          { kind: 'bool', path: ['bankBook', 'enabled'], label: 'Banka emirleri tahtada' },
+          { kind: 'text', path: ['bankBook', 'customerRef'], label: 'Bankanın işlem hesabı', help: 'Core banking müşteri no' },
+          {
+            kind: 'select',
+            path: ['bankBook', 'anchorSegment'],
+            label: 'Baz alınan banka kuru',
+            options: [['default', segName('default')], ...segmentsOf(c, ['dealing', 'margins', 'segments']).map((s) => [s, segName(s)] as [string, string])],
+          },
+          {
+            kind: 'bool',
+            path: ['bankBook', 'includeCommission'],
+            label: 'Komisyonu hesaba kat',
+            help: 'Açıkken kademe fiyatına müşteri komisyonu eklendiğinde banka kurundan daha iyi bir fiyat oluşmaz',
+          },
+          { kind: 'int', path: ['bankBook', 'repriceBips'], label: 'Yeniden fiyatlama eşiği', unit: 'bip kur hareketi', min: 1 },
+        ],
+      },
+      ...Object.keys(c.bankBook.pairs).flatMap((pair) =>
+        (['asks', 'bids'] as const).map((side) => ({
+          title: `${pair.slice(0, 3)}/${pair.slice(3)} ${side === 'asks' ? 'satış kademeleri' : 'alış kademeleri'}`,
+          fields: [
+            { kind: 'bool', path: ['bankBook', 'pairs', pair, side, 'enabled'], label: 'Açık' },
+            { kind: 'decimal', path: ['bankBook', 'pairs', pair, side, 'startPct'], label: 'Banka kurundan uzaklık', unit: '%' },
+            { kind: 'decimal', path: ['bankBook', 'pairs', pair, side, 'stepPct'], label: 'Kademe aralığı', unit: '%' },
+            { kind: 'list', path: ['bankBook', 'pairs', pair, side, 'levels'], label: `Kademe tutarları (${pair.slice(0, 3)})`, help: 'Her satıra bir kademe, en iyi fiyattan dışa doğru' },
+          ] as Field[],
+        })),
+      ),
+    ],
+  },
+  {
     id: 'operations',
     title: 'Oturum ve settlement',
     intro: 'Müşteri oturum süresi ve core banking kayıtlarının yeniden deneme politikası.',

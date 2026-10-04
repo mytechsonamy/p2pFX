@@ -45,7 +45,11 @@ export class OrderEntry {
     return toBreakdown(pair, priceSide(qty, price, params), params);
   }
 
-  async place(session: Session, body: PlaceOrderRequest, idempotencyKey: string | undefined) {
+  /**
+   * `house`: the bank's own order (its market-making ladder). It pays no commission or tax to itself and is not
+   * subject to customer segment limits.
+   */
+  async place(session: Session, body: PlaceOrderRequest, idempotencyKey: string | undefined, opts: { house?: boolean } = {}) {
     if (!idempotencyKey || idempotencyKey.length > 200) throw badRequest('IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key header is required');
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
 
@@ -59,7 +63,7 @@ export class OrderEntry {
     const { data: config, version } = this.config.get();
     const now = this.clock();
     const { pair, qty, price } = await this.validatePriceAndQty(config, body);
-    const params = pricingParams(config, pair, body.side);
+    const params = opts.house ? { ...pricingParams(config, pair, body.side), commissionPerUnit: 0n, taxRate: 0n } : pricingParams(config, pair, body.side);
     const pricing = priceSide(qty, price, params);
 
     if (!config.validity.options.includes(body.validity)) {
@@ -69,7 +73,7 @@ export class OrderEntry {
     const open = isMarketOpen(now, config.tradingHours);
     if (!open && config.tradingHours.outsideHours === 'reject') throw unprocessable('MARKET_CLOSED', 'the market is closed');
 
-    await this.checkLimits(config, session, pricing.notional, pair, now);
+    if (!opts.house) await this.checkLimits(config, session, pricing.notional, pair, now);
 
     const accounts = await this.core.getAccounts(session.customerRef);
     const fxAccount = pickAccount(accounts, pair.base, body.fxAccountId);

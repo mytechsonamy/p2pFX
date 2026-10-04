@@ -18,6 +18,7 @@ duruyor, değişiklik yeniden başlatma olmadan geçerli oluyor.
 | Limitler | segment bazında tek emir ve günlük toplam tutar; segment eklenip kaldırılabilir |
 | Banka satırı fiyatlama | banka satırı açık/kapalı, kotasyon süresi, LP fiyat tazeliği, tek işlem üst sınırı, segment marjları |
 | Pozisyon ve hedge | otomatik hedge, pozisyon limitleri, hedef seviye, parça büyüklüğü, LP dağıtımı |
+| Banka emirleri (tahta) | açık/kapalı, bankanın işlem hesabı, baz alınan segment kuru, komisyonu hesaba katma, yeniden fiyatlama eşiği; parite ve yön bazında banka kurundan uzaklık (%), kademe aralığı (%), kademe tutarları |
 | Oturum ve settlement | müşteri oturum süresi, core banking yeniden deneme sayısı ve beklemesi |
 | Demo botlar | açık/kapalı, hız, emir sayısı, referanstan uzaklık (bip), emir büyüklükleri, bot müşterileri |
 | Marka | banka ve ürün adı, renkler, köşe yuvarlaklığı |

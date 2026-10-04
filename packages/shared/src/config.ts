@@ -117,6 +117,47 @@ const BotsSchema = z.object({
 });
 export type BotsConfig = z.infer<typeof BotsSchema>;
 
+/** One side of the bank's ladder in a pair: levels moving away from the bank's own rate. */
+const LadderSchema = z.object({
+  enabled: z.boolean(),
+  /** Distance of the first level from the bank's rate, in percent ("0.02" = 0.02 %). */
+  startPct: decimalString,
+  /** Distance between consecutive levels, in percent. */
+  stepPct: decimalString,
+  /** Quantity of each level from the best price outwards (t1, t2, … tz); the length is the number of levels. */
+  levels: z.array(decimalString).min(1).max(20),
+});
+
+/** The bank's own orders in the P2P book, priced off its published rate and repriced as the LPs move. */
+const BankBookSchema = z.object({
+  enabled: z.boolean(),
+  /** The bank's own trading account in core banking that the orders are entered for. */
+  customerRef: z.string().min(1),
+  /** Segment whose bank-row rate anchors the ladder (asks above its buy rate, bids below its sell rate). */
+  anchorSegment: z.string().min(1),
+  /** Price levels so that, once the customer's commission is added, no level beats the bank's own rate. */
+  includeCommission: z.boolean(),
+  /** Reprice a side when its anchor rate has moved at least this many bips (of the pair's bipSize). */
+  repriceBips: z.number().int().min(1),
+  /** Per pair symbol; a pair without an entry has no bank orders. */
+  pairs: z.record(z.object({ asks: LadderSchema, bids: LadderSchema })),
+});
+export type BankBookConfig = z.infer<typeof BankBookSchema>;
+
+const ladder = (levels: string[]) => ({ enabled: true, startPct: '0.02', stepPct: '0.02', levels });
+export const DEFAULT_BANK_BOOK: BankBookConfig = {
+  enabled: true,
+  customerRef: 'bank-desk',
+  anchorSegment: 'default',
+  includeCommission: true,
+  repriceBips: 2,
+  pairs: {
+    USDTRY: { asks: ladder(['5000', '10000', '20000']), bids: ladder(['5000', '10000', '20000']) },
+    EURTRY: { asks: ladder(['5000', '10000', '20000']), bids: ladder(['5000', '10000', '20000']) },
+    GBPTRY: { asks: ladder(['2000', '5000', '10000']), bids: ladder(['2000', '5000', '10000']) },
+  },
+};
+
 export const DEFAULT_SESSION = { ttlMinutes: 30 };
 export const DEFAULT_SETTLEMENT = { attempts: 3, baseDelayMs: 500 };
 export const DEFAULT_BOTS: BotsConfig = {
@@ -173,6 +214,7 @@ export const BankConfigSchema = z.object({
   session: SessionSchema.default(DEFAULT_SESSION),
   settlement: SettlementSchema.default(DEFAULT_SETTLEMENT),
   bots: BotsSchema.default(DEFAULT_BOTS),
+  bankBook: BankBookSchema.default(DEFAULT_BANK_BOOK),
 });
 export type BankConfig = z.infer<typeof BankConfigSchema>;
 
@@ -229,6 +271,7 @@ export const DEFAULT_CONFIG: BankConfig = {
   session: DEFAULT_SESSION,
   settlement: DEFAULT_SETTLEMENT,
   bots: DEFAULT_BOTS,
+  bankBook: DEFAULT_BANK_BOOK,
 };
 
 /**
@@ -248,6 +291,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bots', label: 'Demo piyasa yapıcı botlar', paths: ['bots'] },
+  { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler', paths: ['bankBook'] },
 ];
 
 export interface ConfigChange {
