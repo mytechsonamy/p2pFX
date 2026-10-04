@@ -2,9 +2,11 @@
 //   1. Ayşe sells 1,000 USD at 49.15; Mehmet sees the all-in price (49.20), confirms and buys it.
 //      The bank buys from Ayşe and sells to Mehmet, both legs post to their core banking accounts,
 //      each gets a dekont, and the bank earns 50 TRY commission per side.
-//   2. With balance blocking turned off, an order the customer can no longer cover at match time
+//   2. Mehmet (premium segment) buys from the bank's own rate instead: a firm quote, one FX transaction,
+//      and the bank's position and P&L on the dealer screen.
+//   3. With balance blocking turned off, an order the customer can no longer cover at match time
 //      is cancelled instead of settling.
-//   3. When core banking is down, the fill waits for operations review; a retry settles it.
+//   4. When core banking is down, the fill waits for operations review; a retry settles it.
 // Open the demo bank app (http://localhost:5174) next to it to watch the board and both phones update.
 // Usage: pnpm demo:walkthrough
 import { api, core, login, ops, placeOrder, waitFor, waitForApi } from './lib/demo-client.js';
@@ -32,7 +34,7 @@ async function fillIn(status: string, token: string, orderId: string) {
 const settledFill = (token: string, orderId: string) => fillIn('SETTLED', token, orderId);
 
 await waitForApi();
-const [ayse, mehmet] = await Promise.all([login('demo-ayse'), login('demo-mehmet')]);
+const [ayse, mehmet] = await Promise.all([login('demo-ayse'), login('demo-mehmet', 'premium')]);
 
 step(1, 'Piyasa');
 const rate = await api('GET', `/v1/pairs/${PAIR}/rate`, ayse);
@@ -89,7 +91,22 @@ const usd = revenue.find((r) => r.pair === PAIR);
 if (usd) line(`Bugünkü toplam (${PAIR})`, `${usd.fills} eşleşme, ${tl(usd.commission.total)} TL komisyon`);
 await pause();
 
-step(7, 'Bloke kapalıyken bakiye eşleşme anında yetersizse emir iptal olur');
+step(7, 'Mehmet aynı anda bankanın kendi kurundan da alabilir');
+const ayseRates = await api('GET', `/v1/bank/rates/${PAIR}`, ayse);
+const mehmetRates = await api('GET', `/v1/bank/rates/${PAIR}`, mehmet);
+line('Banka kuru, bireysel (Ayşe)', `alış ${ayseRates.sell} / satış ${ayseRates.buy}`);
+line('Banka kuru, premium (Mehmet)', `alış ${mehmetRates.sell} / satış ${mehmetRates.buy}`);
+const bq = await api('POST', '/v1/bank/quotes', mehmet, { pair: PAIR, side: 'BUY', qty: '500' });
+line('Kesin fiyat (10 sn geçerli)', `${bq.qty} USD @ ${bq.rate}, vergi ${tl(bq.tax)} TL, toplam ${tl(bq.total)} TL`);
+const deal = await api('POST', '/v1/bank/deals', mehmet, { quoteId: bq.id });
+line('Banka işlemi', `${deal.settlementStatus}, tek döviz işlemi, dekont hazır`);
+const desk = await ops('GET', '/ops/dealing');
+const pos = desk.positions.find((p: any) => p.pair === PAIR);
+line('Bankanın USD pozisyonu', `${pos.qty} (ort. ${pos.avgRate}), marj geliri ${tl(pos.marginEarned)} TL`);
+line('FX masası', 'http://localhost:5174/dealer.html');
+await pause();
+
+step(8, 'Bloke kapalıyken bakiye eşleşme anında yetersizse emir iptal olur');
 const cfg = await ops('GET', '/ops/config');
 await ops('PUT', '/ops/config', { ...cfg.data, balanceMode: 'no_block' });
 line('Banka ayarı', 'balanceMode = no_block (girişte sadece kontrol, bloke yok)');
@@ -121,7 +138,7 @@ try {
 
 await pause();
 
-step(8, 'Çekirdek bankacılık yanıt vermezse eşleşme operasyon kuyruğuna düşer, tekrar denenince tamamlanır');
+step(9, 'Çekirdek bankacılık yanıt vermezse eşleşme operasyon kuyruğuna düşer, tekrar denenince tamamlanır');
 const zeynep = await login('demo-zeynep');
 await core('POST', '/admin/faults', { failNextPostings: 3 });
 line('Mock çekirdek bankacılık', 'sonraki 3 kayıt denemesi hata verecek');

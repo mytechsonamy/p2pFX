@@ -1,0 +1,251 @@
+import { findPair, formatDecimal, formatPrice, isMarketOpen, parseDecimal, parsePrice, type PairConfig } from '@p2p/shared';
+import { priceSide, pricingParams } from '@p2p/pricing';
+import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
+import type { FastifyBaseLogger } from 'fastify';
+import { z } from 'zod';
+import type { Db } from '../db/pool.js';
+import type { Session } from '../auth.js';
+import type { ConfigService } from '../config-service.js';
+import type { EventBus } from '../events.js';
+import type { SettlementOptions } from '../settlement.js';
+import { ApiError, badRequest, conflict, notFound, unprocessable } from '../errors.js';
+import { audit } from '../audit.js';
+import { segmentRates, type PriceEngine } from './price-engine.js';
+import type { PositionKeeper } from './positions.js';
+
+export const BankQuoteRequestSchema = z.object({
+  pair: z.string(),
+  side: z.enum(['BUY', 'SELL']),
+  qty: z.string().regex(/^\d+(\.\d+)?$/),
+});
+export const BankDealRequestSchema = z.object({ quoteId: z.string().uuid() });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The customer's deals with the bank: a firm quote at the segment rate (valid a few seconds), then
+ * execution as one core banking FX transaction and a position update (with auto-hedge).
+ */
+export class DealingService {
+  constructor(
+    private readonly db: Db,
+    private readonly core: CoreBankingAdapter,
+    private readonly config: ConfigService,
+    private readonly prices: PriceEngine,
+    private readonly positions: PositionKeeper,
+    private readonly events: EventBus,
+    private readonly clock: () => Date,
+    private readonly log: FastifyBaseLogger,
+    private readonly settlement: SettlementOptions,
+  ) {}
+
+  /** The customer's segment rates, for the bank row on the board. */
+  async rates(session: Session, pairSymbol: string) {
+    const { pair, config } = this.pair(pairSymbol);
+    const agg = await this.prices.current(pair.symbol);
+    const r = segmentRates(config, pair, agg, session.segment);
+    return { pair: pair.symbol, buy: formatPrice(r.buy), sell: formatPrice(r.sell), at: agg.at.toISOString() };
+  }
+
+  async quote(session: Session, body: z.infer<typeof BankQuoteRequestSchema>) {
+    const { pair, config, version } = this.pair(body.pair);
+    const now = this.clock();
+    if (!isMarketOpen(now, config.tradingHours)) throw unprocessable('MARKET_CLOSED', 'the market is closed');
+    let qty: bigint;
+    try {
+      qty = parseDecimal(body.qty, pair.baseDecimals);
+    } catch {
+      throw badRequest('INVALID_QTY', `quantity must have at most ${pair.baseDecimals} decimals`);
+    }
+    if (qty < parseDecimal(pair.minQty, pair.baseDecimals)) throw badRequest('QTY_TOO_SMALL', `minimum quantity is ${pair.minQty}`);
+    const max = config.dealing.maxDealQty[pair.base];
+    if (max && qty > parseDecimal(max, pair.baseDecimals)) throw unprocessable('DEAL_TOO_LARGE', `the bank deals up to ${max} ${pair.base} at once`);
+
+    const agg = await this.prices.current(pair.symbol);
+    const r = segmentRates(config, pair, agg, session.segment);
+    const rate = body.side === 'BUY' ? r.buy : r.sell;
+    const lpRate = body.side === 'BUY' ? agg.ask : agg.bid;
+    const s = priceSide(qty, rate, { ...pricingParams(config, pair, body.side), commissionPerUnit: 0n });
+    const limits = config.limits.segments[session.segment] ?? config.limits.default;
+    if (s.notional > parseDecimal(limits.maxOrderNotional, pair.quoteDecimals)) {
+      throw unprocessable('ORDER_LIMIT_EXCEEDED', `deal value exceeds the limit of ${limits.maxOrderNotional} ${pair.quote}`);
+    }
+    const expiresAt = new Date(now.getTime() + config.dealing.quoteTtlSeconds * 1000);
+    const { rows } = await this.db.query(
+      `insert into bank_quotes (customer_id, pair, side, qty, rate, lp_rate, segment, margin_bips, notional, tax, total, status, expires_at, config_version)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'OPEN', $12, $13) returning *`,
+      [session.customerId, pair.symbol, body.side, qty, formatPrice(rate), formatPrice(lpRate), session.segment,
+        body.side === 'BUY' ? r.buyBips : r.sellBips, s.notional, s.tax, s.total, expiresAt, version],
+    );
+    return quoteView(rows[0], pair, config.tax[body.side === 'BUY' ? 'buyRate' : 'sellRate']);
+  }
+
+  async execute(session: Session, quoteId: string) {
+    const now = this.clock();
+    const { rows } = await this.db.query(
+      `update bank_quotes set status = 'EXECUTED' where id = $1 and customer_id = $2 and status = 'OPEN' and expires_at > $3 returning *`,
+      [quoteId, session.customerId, now],
+    );
+    const q = rows[0];
+    if (!q) {
+      const { rows: any } = await this.db.query('select status, expires_at from bank_quotes where id = $1 and customer_id = $2', [quoteId, session.customerId]);
+      if (!any.length) throw notFound('quote not found');
+      if (any[0].status === 'EXECUTED') throw conflict('QUOTE_USED', 'this quote has already been executed');
+      throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
+    }
+    const { pair } = this.pair(q.pair);
+    const accounts = await this.core.getAccounts(session.customerRef);
+    const fx = pick(accounts, pair.base);
+    const tl = pick(accounts, pair.quote);
+    const margin = marginOf(pair, BigInt(q.qty), parsePrice(q.rate), parsePrice(q.lp_rate));
+    const { rows: deals } = await this.db.query(
+      `insert into bank_deals (quote_id, customer_id, pair, side, qty, rate, lp_rate, notional, tax, total, margin, fx_account_id, try_account_id, status)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'PENDING') returning *`,
+      [q.id, session.customerId, q.pair, q.side, q.qty, q.rate, q.lp_rate, q.notional, q.tax, q.total, margin, fx.id, tl.id],
+    );
+    const deal = deals[0];
+    await audit(this.db, `customer:${session.customerId}`, 'dealing.deal', { dealId: deal.id, quoteId: q.id, pair: q.pair, side: q.side, rate: q.rate });
+    const settled = await this.settle(deal, session.customerRef, pair);
+    if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
+    const view = dealView(settled, pair);
+    await this.events.publish({ type: 'fill', customerId: session.customerId, fill: view });
+    if (settled.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
+    return view;
+  }
+
+  /** Posts the deal to core banking: the bank sells to a buyer (BANK_SELL) or buys from a seller (BANK_BUY). */
+  private async settle(deal: Record<string, any>, customerRef: string, pair: PairConfig) {
+    const buyer = deal.side === 'BUY';
+    let lastError = '';
+    for (let attempt = 1; attempt <= this.settlement.attempts; attempt++) {
+      if (attempt > 1) await sleep(this.settlement.baseDelayMs * 2 ** (attempt - 2));
+      try {
+        const res = await this.core.postFxTransaction({
+          leg: buyer ? 'BANK_SELL' : 'BANK_BUY',
+          customerRef,
+          fxAccountId: deal.fx_account_id,
+          tryAccountId: deal.try_account_id,
+          currency: pair.base,
+          quoteCurrency: pair.quote,
+          qty: BigInt(deal.qty),
+          bookPrice: formatPrice(parsePrice(deal.rate)),
+          effectivePrice: formatPrice(parsePrice(deal.rate)),
+          notional: BigInt(deal.notional),
+          commission: 0n,
+          tax: BigInt(deal.tax),
+          customerAmount: BigInt(deal.total),
+          holdIds: [],
+          idempotencyKey: `deal:${deal.id}`,
+          reference: `BNK-${String(deal.seq).padStart(8, '0')}`,
+        });
+        return this.update(deal.id, 'SETTLED', null, res.txnRef, res.receiptRef);
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        this.log.warn({ dealId: deal.id, attempt, err: lastError }, 'bank deal posting failed');
+        if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') return this.update(deal.id, 'REJECTED', lastError);
+        if (err instanceof CoreBankingError && err.code !== 'UNAVAILABLE') break;
+      }
+    }
+    await audit(this.db, 'system', 'dealing.failed', { dealId: deal.id, error: lastError });
+    return this.update(deal.id, 'FAILED_NEEDS_REVIEW', lastError);
+  }
+
+  private async update(id: string, status: string, error: string | null, txnRef?: string, receiptRef?: string) {
+    const { rows } = await this.db.query(
+      `update bank_deals set status = $2, last_error = $3, core_txn_ref = coalesce($4, core_txn_ref), receipt_ref = coalesce($5, receipt_ref),
+         updated_at = now() where id = $1 returning *`,
+      [id, status, error, txnRef ?? null, receiptRef ?? null],
+    );
+    return rows[0];
+  }
+
+  /** Operations: posts a deal that failed with core banking down again (same idempotency key). */
+  async retry(dealId: string, actor: string) {
+    const { rows } = await this.db.query(
+      `select d.*, c.customer_ref from bank_deals d join customers c on c.id = d.customer_id where d.id = $1`,
+      [dealId],
+    );
+    const d = rows[0];
+    if (!d) throw notFound('deal not found');
+    if (d.status !== 'FAILED_NEEDS_REVIEW') throw conflict('NOT_RETRYABLE', `deal is ${d.status}`);
+    await audit(this.db, actor, 'dealing.retry', { dealId });
+    const { pair } = this.pair(d.pair);
+    const settled = await this.settle(d, d.customer_ref, pair);
+    if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
+    return dealView(settled, pair);
+  }
+
+  async recentDeals(limit = 20) {
+    const c = this.config.get().data;
+    const { rows } = await this.db.query(
+      `select d.*, c.customer_ref, c.segment from bank_deals d join customers c on c.id = d.customer_id order by d.seq desc limit $1`,
+      [limit],
+    );
+    return rows.map((r) => {
+      const pair = findPair(c, r.pair)!;
+      return { ...dealView(r, pair), customerRef: r.customer_ref, segment: r.segment, lpRate: formatPrice(parsePrice(r.lp_rate)), margin: formatDecimal(BigInt(r.margin), pair.quoteDecimals) };
+    });
+  }
+
+  private pair(symbol: string) {
+    const { data: config, version } = this.config.get();
+    if (!config.dealing.enabled) throw new ApiError(404, 'DEALING_DISABLED', 'the bank does not quote in this deployment');
+    const pair = findPair(config, symbol);
+    if (!pair || !pair.enabled) throw badRequest('UNKNOWN_PAIR', `pair ${symbol} is not available`);
+    return { pair, config, version };
+  }
+}
+
+/** The bank's margin: |deal rate − LP rate| × qty, quote minor units. */
+function marginOf(pair: PairConfig, qty: bigint, rate: bigint, lpRate: bigint) {
+  const diff = rate > lpRate ? rate - lpRate : lpRate - rate;
+  return priceSide(qty, diff, { side: 'BUY', baseDecimals: pair.baseDecimals, quoteDecimals: pair.quoteDecimals, commissionPerUnit: 0n, taxRate: 0n, taxBase: 'book', rounding: 'HALF_UP' }).notional;
+}
+
+function pick(accounts: CoreAccount[], currency: string) {
+  const acc = accounts.find((a) => a.currency === currency);
+  if (!acc) throw unprocessable('ACCOUNT_NOT_FOUND', `no ${currency} account for this customer`);
+  return acc;
+}
+
+function quoteView(r: Record<string, any>, pair: PairConfig, taxRate: string) {
+  const money = (v: unknown) => formatDecimal(BigInt(v as string), pair.quoteDecimals);
+  return {
+    id: r.id,
+    pair: r.pair,
+    side: r.side,
+    qty: formatDecimal(BigInt(r.qty), pair.baseDecimals),
+    rate: formatPrice(parsePrice(r.rate)),
+    notional: money(r.notional),
+    taxRate,
+    tax: money(r.tax),
+    total: money(r.total),
+    currency: pair.quote,
+    expiresAt: new Date(r.expires_at).toISOString(),
+  };
+}
+
+/** A bank deal in the customer's trade list, shaped like a P2P fill with the bank as counterparty. */
+export function dealView(r: Record<string, any>, pair: PairConfig) {
+  const money = (v: unknown) => formatDecimal(BigInt(v as string), pair.quoteDecimals);
+  const rate = formatPrice(parsePrice(r.rate));
+  return {
+    id: r.id,
+    pair: r.pair,
+    side: r.side,
+    orderId: null,
+    liquidity: 'BANK' as const,
+    counterparty: 'BANK' as const,
+    qty: formatDecimal(BigInt(r.qty), pair.baseDecimals),
+    bookPrice: rate,
+    effectivePrice: rate,
+    notional: money(r.notional),
+    commission: formatDecimal(0n, pair.quoteDecimals),
+    tax: money(r.tax),
+    total: money(r.total),
+    currency: pair.quote,
+    settlementStatus: r.status,
+    receiptRef: r.receipt_ref ?? undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+  };
+}

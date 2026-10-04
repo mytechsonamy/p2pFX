@@ -3,7 +3,7 @@ import type { WebBridge, WebMessage } from '@p2p/sdk-bridge';
 import { Api, ApiError } from './api';
 import { Stream, type StreamMessage } from './stream';
 import { createTranslator, hasKey, type Translate } from './i18n';
-import type { Account, AppConfig, Book, Branding, Fill, Order, PairStats, Rate, Side, Trade } from './types';
+import type { Account, AppConfig, BankRates, Book, Branding, Fill, Order, PairStats, Rate, Side, Trade } from './types';
 import { addDecimal, compareDecimal, formatDecimal, formatPrice } from './format';
 
 export type Tab = 'trade' | 'board' | 'orders' | 'fills' | 'accounts';
@@ -50,6 +50,13 @@ export interface Exchange {
   fills: Fill[];
   books: Record<string, Book>;
   rates: Record<string, Rate>;
+  /** The bank's live rates for this customer's segment, when the bank deals. */
+  bankRates: Record<string, BankRates>;
+  /** Opens the deal-with-the-bank sheet. */
+  bankDeal: { side: Side; qty?: string } | null;
+  openBankDeal: (d: { side: Side; qty?: string } | null) => void;
+  /** Adds a fill (or bank deal) the customer just made. */
+  addFill: (f: Fill) => void;
   /** Recent trades per pair, newest first. */
   trades: Record<string, Trade[]>;
   stats: Record<string, PairStats>;
@@ -94,6 +101,9 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
   const [fills, setFills] = useState<Fill[]>([]);
   const [books, setBooks] = useState<Record<string, Book>>({});
   const [rates, setRates] = useState<Record<string, Rate>>({});
+  const [bankRates, setBankRates] = useState<Record<string, BankRates>>({});
+  const [bankDeal, setBankDeal] = useState<{ side: Side; qty?: string } | null>(null);
+  const dealing = !!config.dealing?.enabled;
   const [trades, setTrades] = useState<Record<string, Trade[]>>({});
   const [stats, setStats] = useState<Record<string, PairStats>>({});
   const [pick, setPick] = useState<Pick | null>(null);
@@ -187,7 +197,10 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
   const loadRates = useCallback(async () => {
     const rs = await Promise.all(config.pairs.map((p) => api.rate(p.symbol).catch(() => undefined)));
     setRates((cur) => ({ ...cur, ...Object.fromEntries(rs.filter((r): r is Rate => !!r).map((r) => [r.pair, r])) }));
-  }, [api, config.pairs]);
+    if (!dealing) return;
+    const bs = await Promise.all(config.pairs.map((p) => api.bankRates(p.symbol).catch(() => undefined)));
+    setBankRates((cur) => ({ ...Object.fromEntries(bs.filter((r): r is BankRates => !!r).map((r) => [r.pair, r])), ...cur }));
+  }, [api, config.pairs, dealing]);
 
   // Latest handlers for the stream callbacks, which are created once.
   const handlers = useRef({ toast, refreshAccounts, refreshFills, refreshStats, upsertOrder, t, locale, loadAll });
@@ -205,7 +218,10 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
       () => api.sessionToken,
       (m: StreamMessage) => {
         const h = handlers.current;
-        if (m.channel.startsWith('book:')) {
+        if (m.channel.startsWith('bank:')) {
+          const r = m.data as BankRates;
+          setBankRates((cur) => ({ ...cur, [r.pair]: r }));
+        } else if (m.channel.startsWith('book:')) {
           const b = m.data as Book;
           setBooks((cur) => ({ ...cur, [b.pair]: b }));
         } else if (m.channel.startsWith('trades:')) {
@@ -243,13 +259,17 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
       // Any authenticated call renews the session through the host, then the socket reconnects.
       () => api.config().then(() => stream.restart(), () => {}),
     );
-    stream.subscribe('orders', 'fills', ...config.pairs.flatMap((p) => [`book:${p.symbol}`, `trades:${p.symbol}`]));
+    stream.subscribe(
+      'orders',
+      'fills',
+      ...config.pairs.flatMap((p) => [`book:${p.symbol}`, `trades:${p.symbol}`, ...(dealing ? [`bank:${p.symbol}`] : [])]),
+    );
     stream.connect();
     return () => {
       clearInterval(rateTimer);
       stream.close();
     };
-  }, [api, config.pairs, loadAll, loadRates, toast, errorText]);
+  }, [api, config.pairs, dealing, loadAll, loadRates, toast, errorText]);
 
   const value: Exchange = {
     api,
@@ -263,6 +283,13 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
     fills,
     books,
     rates,
+    bankRates,
+    bankDeal,
+    openBankDeal: setBankDeal,
+    addFill: (f: Fill) => {
+      setFills((cur) => (cur.some((x) => x.id === f.id) ? cur : [f, ...cur]));
+      refreshAccounts();
+    },
     trades,
     stats,
     pick,

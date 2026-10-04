@@ -4,6 +4,7 @@ import { Breakdown, Row, Segmented, Sheet } from '../components';
 import { compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
 import { endOfDay, localDate } from '../time';
 import { newIdempotencyKey, type PlaceOrder } from '../api';
+import { BankRow, BetterAtBank } from '../bank';
 import type { BookLevel, PairInfo, QuoteBreakdown, Side, Validity } from '../types';
 
 interface Draft {
@@ -40,6 +41,7 @@ export function TradeScreen() {
   return (
     <div className="trade">
       <RateStrip pair={pair} />
+      <BankRow pair={pair} />
       <OrderBook
         pair={pair}
         onPick={(level, side) => setDraft((d) => ({ ...d, side, price: level.price, priceTouched: true }))}
@@ -270,6 +272,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
       )}
 
       {quote && qty && price && <Breakdown q={quote} pair={pair} compact />}
+      {quote && qty && price && <BetterAtBank side={draft.side} effectivePrice={quote.effectivePrice} qty={qty} />}
 
       {missingAccount && (
         <div className="notice">

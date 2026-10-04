@@ -29,12 +29,13 @@ function FillCard({ fill: f }: { fill: Fill }) {
       <header>
         <SideBadge side={f.side} />
         <strong>{buy ? t('fills.bought', { qty }) : t('fills.sold', { qty })}</strong>
+        {f.liquidity === 'BANK' && <span className="pill">{t('fills.bank')}</span>}
         {settlement && <span className={`status s-${(f.settlementStatus ?? '').toLowerCase()}`}>{settlement}</span>}
       </header>
       <div className="breakdown">
-        <Row label={t('quote.bookPrice')} value={formatPrice(f.bookPrice, locale)} />
+        {f.liquidity !== 'BANK' && <Row label={t('quote.bookPrice')} value={formatPrice(f.bookPrice, locale)} />}
         <Row label={t('quote.effectivePrice')} value={formatPrice(f.effectivePrice, locale)} strong />
-        <Row label={t('quote.commissionTotal')} value={money(f.commission)} />
+        {f.liquidity !== 'BANK' && <Row label={t('quote.commissionTotal')} value={money(f.commission)} />}
         <Row label={t('fills.tax')} value={money(f.tax)} />
         <Row label={buy ? t('quote.totalBuy') : t('quote.totalSell')} value={money(f.total)} strong />
       </div>

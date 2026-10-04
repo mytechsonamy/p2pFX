@@ -1,4 +1,4 @@
-import type { Account, AppConfig, Book, Fill, Order, PairStats, QuoteBreakdown, Rate, Receipt, Side, Trade, Validity } from './types';
+import type { Account, AppConfig, BankQuote, BankRates, Book, Fill, Order, PairStats, QuoteBreakdown, Rate, Receipt, Side, Trade, Validity } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -59,6 +59,9 @@ export class Api {
   cancel = (id: string) => this.request<Order>('DELETE', `/v1/orders/${id}`);
   fills = () => this.request<Fill[]>('GET', '/v1/fills?limit=200');
   receipt = (fillId: string) => this.request<Receipt>('GET', `/v1/fills/${fillId}/receipt`);
+  bankRates = (pair: string) => this.request<BankRates>('GET', `/v1/bank/rates/${pair}`);
+  bankQuote = (q: { pair: string; side: Side; qty: string }) => this.request<BankQuote>('POST', '/v1/bank/quotes', q);
+  bankDeal = (quoteId: string) => this.request<Fill>('POST', '/v1/bank/deals', { quoteId });
   place = (o: PlaceOrder, idempotencyKey: string) =>
     this.request<Order>('POST', '/v1/orders', o, { headers: { 'idempotency-key': idempotencyKey } });
 

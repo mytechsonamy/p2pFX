@@ -97,6 +97,12 @@ export class MockCoreBank implements CoreBankingAdapter {
     return r;
   }
 
+  /** Current reference rate as a number, for the simulated LPs. */
+  referenceRate(pair: string): number | undefined {
+    const r = this.rates.get(pair);
+    return r ? Number(r.rate) : undefined;
+  }
+
   bankAccounts(): CoreAccount[] {
     return [...this.accounts.values()].filter((a) => a.customerRef === BANK_REF).map((a) => this.view(a));
   }

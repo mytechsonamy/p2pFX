@@ -45,6 +45,7 @@ script is in [docs/demo.md](docs/demo.md).
 | | |
 |---|---|
 | http://localhost:5174 | demo bank app (two phones, bank brand switch, bridge message log) |
+| http://localhost:5174/dealer.html | the bank's FX desk: LP prices, segment rates, positions and P&L, hedges |
 | http://localhost:5173 | the embeddable web app: opened directly it refuses to start (bank app only) |
 | http://localhost:4000 | P2P API |
 | http://localhost:4100 | mock core banking (`/admin/bank-accounts`, `/admin/notifications`, `/admin/faults`) |
@@ -118,9 +119,15 @@ Customer (session bearer token from `POST /v1/session`):
 | `POST /v1/orders` | place an order (`Idempotency-Key` header required) |
 | `GET /v1/orders`, `GET /v1/orders/:id`, `DELETE /v1/orders/:id` | list, read, cancel |
 | `GET /v1/fills`, `GET /v1/fills/:id/receipt` | fills from the customer's side, dekont |
-| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `orders`, `fills` |
+| `GET /v1/bank/rates/:pair` | the bank's buy/sell rate for the customer's segment (LP price + segment margin) |
+| `POST /v1/bank/quotes`, `POST /v1/bank/deals` | firm quote with expiry, then instant deal with the bank |
+| `GET /v1/pairs/:pair/history?minutes=` | LP price history |
+| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `bank:<pair>`, `orders`, `fills` |
 
-Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`.
+Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`.
+
+Bank dealing (the bank's own FX desk next to the P2P book: LP aggregation, segment margins, positions,
+auto-hedge) is described in [docs/bank-dealing.md](docs/bank-dealing.md).
 
 ## Tests
 

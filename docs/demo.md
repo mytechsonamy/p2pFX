@@ -44,7 +44,22 @@ oynattıkça değişir.
 Mesaj: banka 1.000 USD'lik eşleşmeden 50 TL alış, 50 TL satış komisyonu kazandı ve iki taraftan kambiyo
 vergisini tahsil etti; fiyat riski almadı.
 
-## 4. Senaryolu demo (2 dk)
+## 4. Bankanın kendi kuru ve FX masası (2 dk)
+
+1. Tahtanın ve emir defterinin üstünde **Banka** satırı: bankanın LP'lerden aldığı en iyi fiyat + müşterinin
+   segment marjı. Ayşe bireysel (10 bip), Mehmet premium (4 bip) segmentte: aynı anda iki telefonda farklı
+   kur görünür, LP fiyatı oynadıkça canlı değişir.
+2. Mehmet: **Bankadan al** → 1.000 USD → **Fiyat al**. 10 saniyelik kesin fiyat, vergi ve toplam; geri sayım
+   bitince yeniden fiyat ister. Onayla: tek bir döviz işlemi, anında dekont, **İşlemlerim**'de "Banka" etiketi.
+   Emir girerken bankanın kuru P2P'den iyiyse bilet bunu söyler.
+3. Yeni sekmede **http://localhost:5174/dealer.html** (Banka FX masası): üç LP'nin fiyatı ve en iyileri,
+   segment kurları, USD pozisyonu (−1.000, kısa), ortalama maliyet, gerçekleşmemiş/gerçekleşen K/Z, marj
+   geliri. **Kapat** pozisyonu en iyi LP ile kapatır. Limit (USD 100.000) aşılırsa sistem kendisi hedge eder.
+
+Mesaj: P2P eşleşmede banka risk almadan komisyon kazanır; kendi kurunda marj kazanır ve pozisyonu yönetir.
+İkisi aynı uygulamada, müşteri iyi olanı seçer.
+
+## 5. Senaryolu demo (2 dk)
 
 Telefonlar açıkken ikinci terminalde:
 
@@ -69,6 +84,7 @@ Betik her çalıştırmada yeni bir müşteri açar, istediğiniz kadar tekrar �
 |---|---|
 | Komisyon, vergi oranı, bloke, geçerlilik, işlem saatleri | `GET/PUT /ops/config` (banka parametresi, anında geçerli) |
 | Bankanın geliri | `GET /ops/revenue` |
-| Bankanın döviz pozisyonu | http://localhost:4100/admin/bank-accounts (eşleşmede banka pozisyonu sıfır kalır) |
+| Bankanın döviz pozisyonu | http://localhost:5174/dealer.html (yalnız banka işlemleri pozisyon yaratır; P2P eşleşmede sıfır kalır) |
+| Segment marjları, kesin fiyat süresi, limitler, otomatik hedge | `dealing` ayarı, [bank-dealing.md](bank-dealing.md) |
 | Müşteri bildirimleri | http://localhost:4100/admin/notifications |
 | Mimari | [architecture.md](architecture.md) |

@@ -28,16 +28,17 @@ const BRANDS: Brand[] = [
 ];
 
 const CUSTOMERS = [
-  { ref: 'demo-ayse', name: 'Ayşe' },
-  { ref: 'demo-mehmet', name: 'Mehmet' },
-  { ref: 'demo-zeynep', name: 'Zeynep' },
-  { ref: 'demo-ali', name: 'Ali' },
+  { ref: 'demo-ayse', name: 'Ayşe', segment: 'default' },
+  { ref: 'demo-mehmet', name: 'Mehmet', segment: 'premium' },
+  { ref: 'demo-zeynep', name: 'Zeynep', segment: 'default' },
+  { ref: 'demo-ali', name: 'Ali', segment: 'premium' },
 ];
 
 let brand = BRANDS[0];
 
 async function launchToken(customer: string) {
-  const res = await fetch(`/bank/launch-token?customer=${encodeURIComponent(customer)}`);
+  const segment = CUSTOMERS.find((c) => c.ref === customer)?.segment ?? 'default';
+  const res = await fetch(`/bank/launch-token?customer=${encodeURIComponent(customer)}&segment=${segment}`);
   if (!res.ok) throw new Error(await res.text());
   return ((await res.json()) as { launchToken: string }).launchToken;
 }

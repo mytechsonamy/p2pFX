@@ -39,6 +39,32 @@ export interface AppConfig {
   tradingHours: { timezone: string; days: number[]; open: string; close: string; outsideHours: 'reject' | 'queue' };
   marketOpen: boolean;
   limits: { maxOrderNotional: string; maxDailyNotional: string };
+  dealing?: { enabled: boolean; quoteTtlSeconds: number; maxDealQty: Record<string, string> };
+}
+
+/** The bank's own rates for the customer's segment (LP price plus margin), live. */
+export interface BankRates {
+  pair: string;
+  /** The customer buys from the bank at this rate. */
+  buy: string;
+  /** The customer sells to the bank at this rate. */
+  sell: string;
+  at: string;
+}
+
+/** A firm bank quote, executable until `expiresAt`. */
+export interface BankQuote {
+  id: string;
+  pair: string;
+  side: Side;
+  qty: string;
+  rate: string;
+  notional: string;
+  taxRate: string;
+  tax: string;
+  total: string;
+  currency: string;
+  expiresAt: string;
 }
 
 export interface Account {
@@ -119,8 +145,10 @@ export interface Fill {
   id: string;
   pair: string;
   side: Side;
-  orderId: string;
-  liquidity: 'MAKER' | 'TAKER';
+  /** Null for a deal with the bank. */
+  orderId: string | null;
+  liquidity: 'MAKER' | 'TAKER' | 'BANK';
+  counterparty?: 'BANK';
   qty: string;
   bookPrice: string;
   effectivePrice: string;

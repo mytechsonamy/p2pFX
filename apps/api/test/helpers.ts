@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { SignJWT, exportSPKI, generateKeyPair } from 'jose';
-import { MockCoreBank } from '@p2p/core-adapter';
+import { MockCoreBank, MockLiquidity } from '@p2p/core-adapter';
 import { DEFAULT_CONFIG, parseDecimal, type BankConfig } from '@p2p/shared';
 import { buildApp } from '../src/app.js';
 
@@ -21,6 +21,8 @@ export interface Harness {
   ctx: Awaited<ReturnType<typeof buildApp>>['ctx'];
   close: () => Promise<void>;
   bank: MockCoreBank;
+  /** Frozen LPs quoting around the bank's reference rate. */
+  liquidity: MockLiquidity;
   clock: { now: Date };
   login: (customerRef: string, segment?: string) => Promise<string>;
   launchToken: (customerRef: string, segment?: string) => Promise<string>;
@@ -44,9 +46,11 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     bank.setReferenceRate('EURTRY', '53.40');
   }
   const clock = { now: new Date('2026-10-05T09:00:00Z') };
+  const liquidity = new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), volatility: 0, clock: () => clock.now.getTime() });
   const { app, ctx, close } = await buildApp({
     databaseUrl: DATABASE_URL,
     core: bank,
+    liquidity,
     bankPublicKeyPem: await exportSPKI(publicKey),
     sessionSecret: 'test-session-secret-0123456789abcdef',
     opsToken: OPS,
@@ -98,7 +102,7 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     if (res.status !== 200) throw new Error(`config update failed: ${JSON.stringify(res.body)}`);
   };
 
-  return { app, ctx, close, bank, clock, login, launchToken, customer, balance, req, place, setConfig };
+  return { app, ctx, close, bank, liquidity, clock, login, launchToken, customer, balance, req, place, setConfig };
 }
 
 /** Minor units helper: tl('49001.80') === 4900180n */

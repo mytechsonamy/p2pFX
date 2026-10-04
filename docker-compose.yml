@@ -94,12 +94,15 @@ services:
     working_dir: /app/apps/demo-host
     # The browser loads the web app from the host machine, hence localhost.
     command: ["node", "--env-file=/keys/.env", "node_modules/vite/bin/vite.js"]
+    # /dealer.html is the bank's FX desk; it calls the API's /ops endpoints server-side with OPS_TOKEN.
     environment:
       WEB_APP_URL: http://localhost:5173
+      API_URL: http://api:4000
     ports: ["5174:5174"]
     depends_on:
       keys: { condition: service_completed_successfully }
       web: { condition: service_started }
+      api: { condition: service_healthy }
 
   walkthrough:
     <<: *node

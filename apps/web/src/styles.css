@@ -269,3 +269,21 @@ h2, h3 { margin: 0; }
 @keyframes up { from { transform: translateY(16px); opacity: 0; } }
 @keyframes fade { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+
+/* Bank dealing: the bank's live rates for this customer, above the book. */
+.bank-row { border-color: var(--c-primary); }
+.bank-row .card-head { flex-direction: column; align-items: flex-start; gap: 2px; }
+.bank-row h3 { display: flex; align-items: center; gap: 6px; }
+.pill { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: var(--c-primary-soft); color: var(--c-primary); text-transform: uppercase; letter-spacing: 0.02em; }
+.bank-prices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.bank-price { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 0; border-radius: calc(var(--radius) * 0.75); padding: 10px 12px; text-align: left; color: var(--c-text); }
+.bank-price.buy { background: var(--c-buy-soft); }
+.bank-price.sell { background: var(--c-sell-soft); }
+.bank-price small { font-size: 12px; font-weight: 600; }
+.bank-price.buy small, .bank-price.buy strong { color: var(--c-buy); }
+.bank-price.sell small, .bank-price.sell strong { color: var(--c-sell); }
+.bank-price strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.bank-price:disabled { opacity: 0.5; }
+.bank-better { margin-top: 8px; }
+.countdown { font-size: 13px; color: var(--c-muted); text-align: right; }
+.countdown.urgent { color: var(--c-sell); font-weight: 600; }

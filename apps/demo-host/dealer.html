@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Banka FX masası</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/host.css" />
+  </head>
+  <body class="dealer">
+    <header class="toolbar">
+      <div>
+        <h1>Banka FX masası</h1>
+        <p>LP fiyatları, segment bazlı banka kurları, pozisyonlar ve hedge işlemleri. Saniyede bir yenilenir.</p>
+      </div>
+      <span id="status" class="status-dot">bağlanıyor…</span>
+    </header>
+    <main id="dealer"></main>
+    <script type="module" src="/src/dealer.ts"></script>
+  </body>
+</html>

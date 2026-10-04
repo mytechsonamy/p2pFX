@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { CoreBankingError, MockCoreBank, fxRequestFromWire, toWire } from '@p2p/core-adapter';
+import { CoreBankingError, LiquidityError, MockCoreBank, MockLiquidity, fxRequestFromWire, toWire, type LpExecutionRequest } from '@p2p/core-adapter';
 import { parseDecimal } from '@p2p/shared';
 
 const STATUS: Record<string, number> = { INSUFFICIENT_FUNDS: 422, NOT_FOUND: 404, INVALID_REQUEST: 400, UNAVAILABLE: 503 };
@@ -8,10 +8,16 @@ const STATUS: Record<string, number> = { INSUFFICIENT_FUNDS: 422, NOT_FOUND: 404
  * HTTP facade over MockCoreBank. The routes mirror CoreBankingAdapter; /admin routes
  * are for seeding and demos (create customers, statements, bank accounts, fault injection).
  */
-export function buildMockCore(bank = new MockCoreBank(), opts: { logger?: boolean } = {}): FastifyInstance {
+export function buildMockCore(
+  bank = new MockCoreBank(),
+  opts: { logger?: boolean; liquidity?: MockLiquidity } = {},
+): FastifyInstance {
   const app = Fastify({ logger: opts.logger ?? false });
+  // Simulated LPs quote around the bank's reference rate.
+  const liquidity = opts.liquidity ?? new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair) });
 
   app.setErrorHandler((err, _req, reply) => {
+    if (err instanceof LiquidityError) return reply.status(503).send({ code: 'UNAVAILABLE', message: err.message });
     if (err instanceof CoreBankingError) {
       return reply.status(STATUS[err.code] ?? 500).send({ code: err.code, message: (err as Error).message });
     }
@@ -53,6 +59,11 @@ export function buildMockCore(bank = new MockCoreBank(), opts: { logger?: boolea
     await bank.notify(req.body.customerRef, req.body.event);
     return { ok: true };
   });
+
+  // ---- liquidity providers (simulated) ----
+
+  app.get<{ Params: { pair: string } }>('/lp/quotes/:pair', async (req) => liquidity.quotes(req.params.pair));
+  app.post<{ Body: LpExecutionRequest }>('/lp/executions', async (req) => liquidity.execute(req.body));
 
   // ---- admin (prototype only) ----
 

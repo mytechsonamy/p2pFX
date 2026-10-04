@@ -11,6 +11,7 @@ import { BoardScreen } from './screens/Board';
 import { FillsScreen } from './screens/Fills';
 import { AccountsScreen } from './screens/Accounts';
 import { closeTopSheet } from './components';
+import { BankDealSheet } from './bank';
 import { checkEmbedding, parentOrigin } from './guard';
 
 const allowedOrigins = (import.meta.env.VITE_HOST_ORIGINS ?? '').split(',').filter(Boolean);
@@ -105,7 +106,7 @@ const TABS: { id: Tab; icon: string }[] = [
 ];
 
 function Shell() {
-  const { branding, config, t, tab, setTab, pair, setPair, bridge, connected, toasts, track } = useExchange();
+  const { branding, config, t, tab, setTab, pair, setPair, bridge, connected, toasts, track, bankDeal } = useExchange();
 
   useEffect(() => track('screen_view', { screen: tab }), [tab, track]);
 
@@ -167,6 +168,7 @@ function Shell() {
         ))}
       </nav>
 
+      {bankDeal && <BankDealSheet key={`${bankDeal.side}:${bankDeal.qty ?? ''}`} />}
       <div className="toasts" aria-live="polite">
         {toasts.map((x) => (
           <div key={x.id} className={`toast ${x.tone}`}>{x.text}</div>

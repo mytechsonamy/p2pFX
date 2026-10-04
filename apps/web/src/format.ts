@@ -33,6 +33,8 @@ export function formatDecimal(value: string, locale: string, minFraction = 2, ma
 
 /** Prices: 2 to 4 fraction digits (tick size is 0.0001). */
 export const formatPrice = (value: string, locale: string) => formatDecimal(value, locale, 2, 4);
+/** Bank dealing rates always carry four decimals so the live price does not jump in width. */
+export const formatBankRate = (value: string, locale: string) => formatDecimal(value, locale, 4);
 
 export function formatMoney(value: string, currency: string, locale: string, decimals = 2) {
   return `${formatDecimal(value, locale, decimals)} ${currencySymbol(currency)}`;
