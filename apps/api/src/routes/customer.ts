@@ -42,6 +42,7 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
           tickSize: p.tickSize,
           minQty: p.minQty,
           priceBandPct: p.priceBandPct,
+          bipSize: p.bipSize,
           commissionPerUnit: {
             buy: formatPrice(BigInt(p.commission.buyBips) * parsePrice(p.bipSize)),
             sell: formatPrice(BigInt(p.commission.sellBips) * parsePrice(p.bipSize)),

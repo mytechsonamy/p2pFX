@@ -10,11 +10,14 @@ See [docs/architecture.md](docs/architecture.md) for the architecture and MVP sc
 apps/
   api/          Fastify API: sessions, order entry, matching workers, settlement saga, scheduler, WebSocket, ops API
   mock-core/    Mock core banking service (accounts, holds, FX postings, receipts, reference rates)
+  web/          Embeddable customer UI (React + Vite) that runs in the bank app's WebView
+  demo-host/    Fake bank app: two phones side by side, mints launch tokens, shows bridge messages
 packages/
   shared/       Config schema, API schemas, fixed-point money helpers, trading-hours helpers
   pricing/      Commission and kambiyo vergisi maths (pure)
   matching/     Order book and price-time matching (pure)
   core-adapter/ CoreBankingAdapter interface, in-memory MockCoreBank, HTTP client
+  sdk-bridge/   postMessage protocol between the bank app and the web app; native SDK stubs in its README
 db/migrations/  Postgres schema
 ```
 
@@ -30,7 +33,18 @@ pnpm dev:mock-core       # :4100, seeded with demo customers and rates
 pnpm dev:api             # :4000, migrates the database on start
 ```
 
-Or everything in Docker: `pnpm dev:keys && docker compose up --build`.
+Then the UI, in two more terminals:
+
+```sh
+pnpm dev:web             # :5173, proxies /v1 to the API
+pnpm dev:demo-host       # :5174, open this: the demo bank app with Ayşe and Mehmet side by side
+```
+
+In the demo, sell USD as Ayşe and tap her offer in Mehmet's order book to buy it. The bank brand switch
+shows the same build in a second bank's colours. See [apps/web/README.md](apps/web/README.md) and
+[packages/sdk-bridge/README.md](packages/sdk-bridge/README.md).
+
+Or the backend in Docker: `pnpm dev:keys && docker compose up --build`.
 
 Try a trade (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`):
 

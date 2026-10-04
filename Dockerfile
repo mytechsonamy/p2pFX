@@ -9,6 +9,9 @@ COPY packages/shared/package.json packages/shared/
 COPY packages/pricing/package.json packages/pricing/
 COPY packages/matching/package.json packages/matching/
 COPY packages/core-adapter/package.json packages/core-adapter/
+COPY packages/sdk-bridge/package.json packages/sdk-bridge/
+COPY apps/web/package.json apps/web/
+COPY apps/demo-host/package.json apps/demo-host/
 RUN pnpm install --frozen-lockfile
 COPY . .
 CMD ["node", "--import", "tsx", "apps/api/src/main.ts"]

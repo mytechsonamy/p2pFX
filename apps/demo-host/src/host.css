@@ -1,0 +1,24 @@
+body { margin: 0; font-family: system-ui, sans-serif; background: #e5e7eb; color: #111827; }
+.toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; padding: 20px 32px; background: #fff; border-bottom: 1px solid #d1d5db; flex-wrap: wrap; }
+.toolbar h1 { margin: 0 0 4px; font-size: 20px; }
+.toolbar p { margin: 0; color: #4b5563; max-width: 640px; }
+.toolbar label, .who { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #4b5563; font-weight: 600; }
+select { font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid #d1d5db; }
+#phones { display: flex; gap: 40px; justify-content: center; padding: 24px; flex-wrap: wrap; }
+.phone-col { display: flex; flex-direction: column; gap: 10px; width: 390px; }
+.phone { position: relative; width: 390px; height: 800px; border-radius: 48px; background: #111; padding: 12px; box-shadow: 0 20px 50px rgb(0 0 0 / 0.25); display: flex; flex-direction: column; overflow: hidden; }
+.notch { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); width: 120px; height: 26px; background: #111; border-radius: 0 0 16px 16px; z-index: 2; }
+.shell-bar { display: flex; align-items: center; gap: 8px; padding: 34px 12px 10px; color: #fff; border-radius: 36px 36px 0 0; font-weight: 600; }
+.back { border: 0; background: none; color: inherit; font-size: 28px; line-height: 1; padding: 0 6px; cursor: pointer; }
+.screen { flex: 1; background: #fff; border-radius: 0 0 36px 36px; overflow: hidden; display: flex; }
+.screen iframe { border: 0; width: 100%; height: 100%; }
+.home { flex: 1; padding: 24px; }
+.home p { font-size: 18px; font-weight: 600; }
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tile { border: 0; border-radius: 16px; background: #f3f4f6; padding: 24px 12px; font: inherit; font-weight: 600; text-align: center; color: #374151; }
+.tile.launch { background: #111827; color: #fff; cursor: pointer; }
+.host-toast { position: absolute; left: 24px; right: 24px; top: 90px; background: #111827; color: #fff; padding: 10px 12px; border-radius: 12px; font-size: 13px; z-index: 3; }
+details { font-size: 12px; background: #fff; border-radius: 12px; padding: 8px 12px; }
+summary { cursor: pointer; font-weight: 600; color: #4b5563; }
+.log { margin: 8px 0 0; padding-left: 0; list-style: none; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-family: ui-monospace, monospace; font-size: 11px; }
+.log code { color: #6b7280; word-break: break-all; }
