@@ -325,3 +325,37 @@ export function pathMatches(path: string, pattern: string): boolean {
   const q = pattern.split('.');
   return q.length <= p.length && q.every((seg, i) => seg === '*' || seg === p[i]);
 }
+
+/** A semantic problem in an otherwise well-formed configuration, shaped like a zod issue for the back office. */
+export interface ConfigIssue {
+  path: (string | number)[];
+  message: string;
+}
+
+const positive = (v: string) => /[1-9]/.test(v);
+
+/**
+ * Cross-field rules the schema cannot express: values that must be positive (a zero tick size or bip size
+ * would break pricing), pair symbols that must match their currencies, and no duplicate pairs.
+ */
+export function configIssues(c: BankConfig): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  const seen = new Set<string>();
+  c.pairs.forEach((p, i) => {
+    const at = (field: string) => ['pairs', i, field];
+    if (p.symbol !== `${p.base}${p.quote}`) issues.push({ path: at('symbol'), message: `must be ${p.base}${p.quote} (base + quote)` });
+    if (seen.has(p.symbol)) issues.push({ path: at('symbol'), message: `${p.symbol} appears more than once` });
+    seen.add(p.symbol);
+    for (const f of ['tickSize', 'minQty', 'bipSize', 'priceBandPct'] as const) {
+      if (!positive(p[f])) issues.push({ path: at(f), message: 'must be greater than zero' });
+    }
+    const tickDecimals = p.tickSize.split('.')[1]?.length ?? 0;
+    if (tickDecimals > 8) issues.push({ path: at('tickSize'), message: 'at most 8 decimals' });
+    const minDecimals = p.minQty.split('.')[1]?.length ?? 0;
+    if (minDecimals > p.baseDecimals) issues.push({ path: at('minQty'), message: `at most ${p.baseDecimals} decimals` });
+  });
+  for (const [seg, l] of Object.entries({ default: c.limits.default, ...c.limits.segments })) {
+    if (!positive(l.maxOrderNotional)) issues.push({ path: ['limits', seg, 'maxOrderNotional'], message: 'must be greater than zero' });
+  }
+  return issues;
+}

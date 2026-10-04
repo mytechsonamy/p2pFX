@@ -74,6 +74,9 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
   async releaseHold(holdId: string) {
     await this.call('DELETE', `/holds/${holdId}`);
   }
+  findHolds(ref: string) {
+    return this.call<string[]>('GET', `/holds?ref=${encodeURIComponent(ref)}`);
+  }
   postFxTransaction(req: FxTransactionRequest) {
     return this.call<FxTransactionResult>('POST', '/fx-transactions', req);
   }

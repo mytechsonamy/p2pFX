@@ -127,6 +127,18 @@ Customer (session bearer token from `POST /v1/session`):
 
 Operations (a back office operator's session from `POST /ops/login`, or the `OPS_TOKEN` service bearer): `GET/PUT /ops/config` (with a reason, as a new version), `GET /ops/config/versions`, `POST /ops/config/revert`, `GET /ops/config/assumptions`, `POST /ops/config/assumptions/confirm`, `GET /ops/audit`, `GET/POST/PATCH /ops/users`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`, `GET /ops/instruments` (what the LPs quote, configured or not), `POST /ops/pairs` (add a quoted pair, closed for trading).
 
+Health: `GET /health` (liveness) and `GET /ready` (database, event stream, matching running, LP prices fresh, plus
+settlements needing review, the oldest pending settlement, open deals, unresolved hedge clips and queued hold changes).
+
+**One matching instance per database.** Each API instance with matching on keeps the order books in memory, so only
+one may run: it holds a Postgres advisory lock and a second one refuses to start. Extra instances for reads and
+WebSocket fan-out run with `MATCHING=0` (order entry there answers 503 `MATCHING_UNAVAILABLE`).
+
+**Unknown outcomes.** A core banking posting or LP trade that times out is never assumed failed: it is looked up by its
+idempotency key or LP reference first (`findFxTransaction`, `findExecution` in the adapters). Until a lookup answers,
+the settlement leg is `UNKNOWN_OUTCOME` and the hedge clip `UNKNOWN`; nothing is re-sent under a new key or to
+another LP. The Docker Compose stack is demo-only and publishes its ports on 127.0.0.1.
+
 Bank dealing (the bank's own FX desk next to the P2P book: LP aggregation, segment margins, positions,
 auto-hedge) is described in [docs/bank-dealing.md](docs/bank-dealing.md).
 

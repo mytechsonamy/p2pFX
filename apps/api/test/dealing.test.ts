@@ -45,8 +45,10 @@ describe('bank dealing', () => {
     expect(await h.balance('ayse', 'USD')).toMatchObject({ balance: units('1000') });
     expect(await h.balance('ayse', 'TRY')).toMatchObject({ balance: units('50645.59') });
 
-    // Executed once.
-    expect((await h.req('POST', '/v1/bank/deals', ayse, { quoteId: quote.id })).status).toBe(409);
+    // Executed once: a repeated execute returns the same deal and moves no money.
+    const again = await h.req('POST', '/v1/bank/deals', ayse, { quoteId: quote.id });
+    expect(again.body).toMatchObject({ id: d.body.id, settlementStatus: 'SETTLED' });
+    expect(await h.balance('ayse', 'USD')).toMatchObject({ balance: units('1000') });
 
     const fills = (await h.req('GET', '/v1/fills', ayse)).body;
     expect(fills[0]).toMatchObject({ id: d.body.id, counterparty: 'BANK' });

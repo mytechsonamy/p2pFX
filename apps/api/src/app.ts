@@ -71,27 +71,41 @@ export interface AppContext {
 
 export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance; ctx: AppContext; close: () => Promise<void> }> {
   const clock = opts.clock ?? (() => new Date());
-  const app = Fastify({ logger: opts.logger ?? false });
+  // Session tokens travel in the WebSocket URL (?token=): they are cut out of every logged URL.
+  const app = Fastify({
+    logger: opts.logger
+      ? {
+          serializers: {
+            req: (req: { method: string; url: string; hostname?: string; ip?: string }) => ({
+              method: req.method,
+              url: redactUrl(req.url),
+              hostname: req.hostname,
+              remoteAddress: req.ip,
+            }),
+          },
+        }
+      : false,
+  });
   await app.register(websocket);
 
-  const db = createPool(opts.databaseUrl);
+  const db = createPool(opts.databaseUrl, (err) => app.log.error({ err }, 'idle database connection lost'));
   await migrate(db);
 
   const config = new ConfigService(db);
   await config.init(opts.initialConfig);
-  await config.listen(opts.databaseUrl);
-  const events = new EventBus(db);
+  await config.listen(opts.databaseUrl, app.log);
+  const events = new EventBus(db, app.log);
   await events.start(opts.databaseUrl);
   const auth = new AuthService(db, { bankPublicKeyPem: opts.bankPublicKeyPem, sessionSecret: opts.sessionSecret, opsToken: opts.opsToken, clock, config });
   await auth.bootstrapAdmin(opts.opsAdminPassword);
   const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
   const exchange = new Exchange(db, opts.core, config, settlement, events, app.log, clock);
   const entry = new OrderEntry(db, opts.core, config, exchange, clock);
-  const scheduler = new Scheduler(db, exchange, settlement, config, clock, app.log);
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
   const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);
   const bankBook = new BankBook(db, config, entry, exchange, prices, positions, app.log);
+  const scheduler = new Scheduler(db, exchange, settlement, dealing, config, clock, app.log);
 
   // Per-customer order entry rate limit (sliding window, in memory).
   const hits = new Map<string, number[]>();
@@ -118,7 +132,34 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     return reply.status(500).send({ error: 'INTERNAL', message: 'internal error' });
   });
 
+  // Liveness: the process answers.
   app.get('/health', async () => ({ ok: true, configVersion: config.get().version }));
+  // Readiness: the database answers, events flow and (on the matching instance) matching runs; plus the
+  // numbers operations should alert on.
+  app.get('/ready', async (_req, reply) => {
+    const checks: Record<string, unknown> = {};
+    let ok = true;
+    try {
+      const { rows } = await db.query(
+        `select
+           (select count(*)::int from settlements where status in ('FAILED_NEEDS_REVIEW', 'UNKNOWN_OUTCOME')) as settlements_needing_review,
+           (select extract(epoch from now() - min(updated_at))::int from settlements where status = 'PENDING') as oldest_pending_settlement_s,
+           (select count(*)::int from bank_deals where status in ('PENDING', 'FAILED_NEEDS_REVIEW')) as deals_open,
+           (select count(*)::int from hedges where status in ('PENDING', 'UNKNOWN')) as hedges_unresolved,
+           (select count(*)::int from hold_tasks where not done) as hold_tasks_open`,
+      );
+      Object.assign(checks, { database: true }, rows[0]);
+    } catch {
+      ok = false;
+      checks.database = false;
+    }
+    checks.events = events.connected;
+    checks.matching = exchange.running;
+    if (!events.connected || ((opts.matching ?? true) && !exchange.running)) ok = false;
+    const c = config.get().data;
+    checks.lpPricesFresh = c.dealing.enabled ? c.pairs.filter((p) => p.enabled).every((p) => !!prices.fresh(p.symbol)) : null;
+    return reply.status(ok ? 200 : 503).send({ ok, ...checks });
+  });
   customerRoutes(app, ctx);
   opsRoutes(app, ctx);
   streamRoutes(app, ctx);
@@ -128,6 +169,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   if (matching) {
     await exchange.start();
     await positions.resolveOpenClips().catch((err) => app.log.error({ err }, 'resolving open hedge clips failed'));
+    await dealing.resumePending().catch((err) => app.log.error({ err }, 'resuming pending deals failed'));
     if (opts.schedulerIntervalMs) scheduler.start(opts.schedulerIntervalMs);
     if (opts.bankBookIntervalMs) bankBook.start(opts.bankBookIntervalMs);
   }
@@ -145,4 +187,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     await db.end();
   };
   return { app, ctx, close };
+}
+
+export function redactUrl(url: string) {
+  return url.replace(/([?&](?:token|launchToken|access_token)=)[^&]*/gi, '$1[REDACTED]');
 }

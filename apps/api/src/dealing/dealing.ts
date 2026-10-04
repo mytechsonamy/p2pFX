@@ -3,7 +3,8 @@ import { priceSide, pricingParams } from '@p2p/pricing';
 import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
-import type { Db } from '../db/pool.js';
+import { tx, type Db } from '../db/pool.js';
+import { reserveDailyLimit } from '../limits.js';
 import type { Session } from '../auth.js';
 import type { ConfigService } from '../config-service.js';
 import type { EventBus } from '../events.js';
@@ -83,29 +84,37 @@ export class DealingService {
 
   async execute(session: Session, quoteId: string) {
     const now = this.clock();
-    const { rows } = await this.db.query(
-      `update bank_quotes set status = 'EXECUTED' where id = $1 and customer_id = $2 and status = 'OPEN' and expires_at > $3 returning *`,
-      [quoteId, session.customerId, now],
-    );
-    const q = rows[0];
-    if (!q) {
-      const { rows: any } = await this.db.query('select status, expires_at from bank_quotes where id = $1 and customer_id = $2', [quoteId, session.customerId]);
-      if (!any.length) throw notFound('quote not found');
-      if (any[0].status === 'EXECUTED') throw conflict('QUOTE_USED', 'this quote has already been executed');
-      throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
-    }
-    const { pair } = this.pair(q.pair);
+    const { rows: found } = await this.db.query('select * from bank_quotes where id = $1 and customer_id = $2', [quoteId, session.customerId]);
+    const quote = found[0];
+    if (!quote) throw notFound('quote not found');
+    if (quote.status === 'EXECUTED') return this.executed(quote.id);
+    if (new Date(quote.expires_at) <= now) throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
+    // Everything that can fail without side effects happens before the quote is used up.
+    const { pair, config } = this.pair(quote.pair);
     const accounts = await this.core.getAccounts(session.customerRef);
     const fx = pick(accounts, pair.base);
     const tl = pick(accounts, pair.quote);
-    const margin = marginOf(pair, BigInt(q.qty), parsePrice(q.rate), parsePrice(q.lp_rate));
-    const { rows: deals } = await this.db.query(
-      `insert into bank_deals (quote_id, customer_id, pair, side, qty, rate, lp_rate, notional, tax, total, margin, fx_account_id, try_account_id, status)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'PENDING') returning *`,
-      [q.id, session.customerId, q.pair, q.side, q.qty, q.rate, q.lp_rate, q.notional, q.tax, q.total, margin, fx.id, tl.id],
-    );
-    const deal = deals[0];
-    await audit(this.db, `customer:${session.customerId}`, 'dealing.deal', { dealId: deal.id, quoteId: q.id, pair: q.pair, side: q.side, rate: q.rate });
+    const margin = marginOf(pair, BigInt(quote.qty), parsePrice(quote.rate), parsePrice(quote.lp_rate));
+
+    // Claiming the quote, the daily limit and the deal record commit together: a used quote always has its deal.
+    const deal = await tx(this.db, async (client) => {
+      const { rows } = await client.query(
+        `update bank_quotes set status = 'EXECUTED' where id = $1 and customer_id = $2 and status = 'OPEN' and expires_at > $3 returning *`,
+        [quoteId, session.customerId, now],
+      );
+      const q = rows[0];
+      if (!q) return undefined;
+      await reserveDailyLimit(client, config, session, BigInt(q.notional), pair, now);
+      const { rows: deals } = await client.query(
+        `insert into bank_deals (quote_id, customer_id, pair, side, qty, rate, lp_rate, notional, tax, total, margin, fx_account_id, try_account_id, status)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'PENDING') returning *`,
+        [q.id, session.customerId, q.pair, q.side, q.qty, q.rate, q.lp_rate, q.notional, q.tax, q.total, margin, fx.id, tl.id],
+      );
+      await audit(client, `customer:${session.customerId}`, 'dealing.deal', { dealId: deals[0].id, quoteId: q.id, pair: q.pair, side: q.side, rate: q.rate });
+      return deals[0];
+    });
+    // Lost a race with a concurrent execute of the same quote.
+    if (!deal) return this.executed(quoteId);
     const settled = await this.settle(deal, session.customerRef, pair);
     if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
     const view = dealView(settled, pair);
@@ -169,6 +178,32 @@ export class DealingService {
     return rows[0];
   }
 
+  /** A repeated execute: the quote's deal, so a client retry learns the outcome instead of an error. */
+  private async executed(quoteId: string) {
+    const { rows } = await this.db.query('select * from bank_deals where quote_id = $1', [quoteId]);
+    const d = rows[0];
+    if (!d) throw conflict('QUOTE_USED', 'this quote has already been executed');
+    const { pair } = this.pair(d.pair);
+    const view = dealView(d, pair);
+    if (d.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
+    return view;
+  }
+
+  /** Deals left PENDING by a restart or an interrupted request: posted again with their own key (safe to repeat). */
+  async resumePending(olderThanMs = 0) {
+    const { rows } = await this.db.query(
+      `select d.*, c.customer_ref from bank_deals d join customers c on c.id = d.customer_id
+        where d.status = 'PENDING' and d.updated_at <= now() - make_interval(secs => $1::double precision / 1000) order by d.seq`,
+      [olderThanMs],
+    );
+    for (const d of rows) {
+      const pair = findPair(this.config.get().data, d.pair);
+      if (!pair) continue;
+      const settled = await this.settle(d, d.customer_ref, pair).catch((err) => this.log.error({ err, dealId: d.id }, 'resuming deal failed'));
+      if (settled?.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
+    }
+  }
+
   /** Operations: posts a deal that failed with core banking down again (same idempotency key). */
   async retry(dealId: string, actor: string) {
     const { rows } = await this.db.query(
@@ -177,7 +212,7 @@ export class DealingService {
     );
     const d = rows[0];
     if (!d) throw notFound('deal not found');
-    if (d.status !== 'FAILED_NEEDS_REVIEW') throw conflict('NOT_RETRYABLE', `deal is ${d.status}`);
+    if (d.status !== 'FAILED_NEEDS_REVIEW' && d.status !== 'PENDING') throw conflict('NOT_RETRYABLE', `deal is ${d.status}`);
     await audit(this.db, actor, 'dealing.retry', { dealId });
     const { pair } = this.pair(d.pair);
     const settled = await this.settle(d, d.customer_ref, pair);

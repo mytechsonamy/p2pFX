@@ -3,10 +3,8 @@ import {
   currentOrNextSessionClose,
   findPair,
   isMarketOpen,
-  localParts,
   parseDecimal,
   parsePrice,
-  zonedTime,
   type BankConfig,
   type PairConfig,
   type PlaceOrderRequest,
@@ -14,7 +12,8 @@ import {
 } from '@p2p/shared';
 import { priceSide, pricingParams, toBreakdown, toSnapshot } from '@p2p/pricing';
 import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
-import type { Db } from './db/pool.js';
+import { tx, type Db } from './db/pool.js';
+import { reserveDailyLimit } from './limits.js';
 import type { Session } from './auth.js';
 import type { ConfigService } from './config-service.js';
 import type { Exchange } from './engine/exchange.js';
@@ -73,23 +72,27 @@ export class OrderEntry {
     const open = isMarketOpen(now, config.tradingHours);
     if (!open && config.tradingHours.outsideHours === 'reject') throw unprocessable('MARKET_CLOSED', 'the market is closed');
 
-    if (!opts.house) await this.checkLimits(config, session, pricing.notional, pair, now);
+    if (!opts.house) this.checkOrderLimit(config, session, pricing.notional, pair);
 
     const accounts = await this.core.getAccounts(session.customerRef);
     const fxAccount = pickAccount(accounts, pair.base, body.fxAccountId);
     const tryAccount = pickAccount(accounts, pair.quote, body.tryAccountId);
 
-    const insert = await this.db.query(
-      `insert into orders (customer_id, pair, side, book_price, qty, validity, expires_at, fx_account_id, try_account_id,
-         status, pricing, config_version, balance_mode, notional, idempotency_key, request_hash)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NEW',$10,$11,$12,$13,$14,$15)
-       on conflict (customer_id, idempotency_key) do nothing
-       returning id`,
-      [
-        session.customerId, pair.symbol, body.side, body.price, qty, body.validity, expiresAt, fxAccount.id, tryAccount.id,
-        toSnapshot(params), version, config.balanceMode, pricing.notional, idempotencyKey, requestHash,
-      ],
-    );
+    // The daily limit is checked and the order recorded in one transaction, under the customer's limit lock.
+    const insert = await tx(this.db, async (client) => {
+      if (!opts.house) await reserveDailyLimit(client, config, session, pricing.notional, pair, now);
+      return client.query(
+        `insert into orders (customer_id, pair, side, book_price, qty, validity, expires_at, fx_account_id, try_account_id,
+           status, pricing, config_version, balance_mode, notional, idempotency_key, request_hash)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NEW',$10,$11,$12,$13,$14,$15)
+         on conflict (customer_id, idempotency_key) do nothing
+         returning id`,
+        [
+          session.customerId, pair.symbol, body.side, body.price, qty, body.validity, expiresAt, fxAccount.id, tryAccount.id,
+          toSnapshot(params), version, config.balanceMode, pricing.notional, idempotencyKey, requestHash,
+        ],
+      );
+    });
     if (!insert.rows.length) {
       // Lost a race with a concurrent request carrying the same key.
       const again = await this.db.query('select id, request_hash from orders where customer_id = $1 and idempotency_key = $2', [
@@ -122,7 +125,12 @@ export class OrderEntry {
     }
 
     const status = open ? 'OPEN' : 'QUEUED';
-    await this.db.query(`update orders set status = $2, hold_id = $3, updated_at = now() where id = $1`, [orderId, status, holdId]);
+    const moved = await this.db.query(`update orders set status = $2, hold_id = $3, updated_at = now() where id = $1 and status = 'NEW'`, [orderId, status, holdId]);
+    if (moved.rowCount !== 1) {
+      // Rejected meanwhile (e.g. a restart treated the entry as interrupted): give the hold back.
+      if (holdId) await this.core.releaseHold(holdId).catch(() => {});
+      throw new ApiError(503, 'ENTRY_INTERRUPTED', 'order entry was interrupted, please try again');
+    }
     await audit(this.db, session.customerRef, 'order.placed', { orderId, pair: pair.symbol, side: body.side, qty: body.qty, price: body.price, validity: body.validity, status });
 
     if (status === 'OPEN') await this.exchange.submit(orderId, pair.symbol);
@@ -175,21 +183,10 @@ export class OrderEntry {
     return at;
   }
 
-  private async checkLimits(config: BankConfig, session: Session, notional: bigint, pair: PairConfig, now: Date) {
+  private checkOrderLimit(config: BankConfig, session: Session, notional: bigint, pair: PairConfig) {
     const limits = config.limits.segments[session.segment] ?? config.limits.default;
-    const maxOrder = parseDecimal(limits.maxOrderNotional, pair.quoteDecimals);
-    if (notional > maxOrder) {
+    if (notional > parseDecimal(limits.maxOrderNotional, pair.quoteDecimals)) {
       throw unprocessable('ORDER_LIMIT_EXCEEDED', `order value exceeds the limit of ${limits.maxOrderNotional} ${pair.quote}`);
-    }
-    const p = localParts(now, config.tradingHours.timezone);
-    const dayStart = zonedTime(p.year, p.month, p.day, '00:00', config.tradingHours.timezone);
-    const { rows } = await this.db.query(
-      `select coalesce(sum(notional), 0)::bigint as total from orders
-        where customer_id = $1 and created_at >= $2 and status <> 'REJECTED'`,
-      [session.customerId, dayStart],
-    );
-    if (rows[0].total + notional > parseDecimal(limits.maxDailyNotional, pair.quoteDecimals)) {
-      throw unprocessable('DAILY_LIMIT_EXCEEDED', `daily limit of ${limits.maxDailyNotional} ${pair.quote} exceeded`);
     }
   }
 }

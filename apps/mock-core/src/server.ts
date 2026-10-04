@@ -35,6 +35,7 @@ export function buildMockCore(
   app.post<{ Body: { accountId: string; amount: string; ref: string } }>('/holds', async (req) =>
     bank.placeHold(req.body.accountId, BigInt(req.body.amount), req.body.ref),
   );
+  app.get<{ Querystring: { ref: string } }>('/holds', async (req) => bank.findHolds(req.query.ref ?? ''));
   app.put<{ Params: { id: string }; Body: { amount: string } }>('/holds/:id', async (req) => {
     await bank.adjustHold(req.params.id, BigInt(req.body.amount));
     return { ok: true };

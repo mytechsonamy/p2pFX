@@ -28,6 +28,8 @@ export interface SegmentRates {
 
 /** How often a price tick is written to the history. */
 const TICK_EVERY_MS = 5000;
+/** Clock skew tolerated on an LP quote's timestamp. */
+const FUTURE_TOLERANCE_MS = 2000;
 
 /**
  * Price module: pulls quotes from the liquidity providers, drops stale ones, keeps the best bid and ask
@@ -79,7 +81,18 @@ export class PriceEngine {
     const c = this.config.get().data;
     const quotes = await this.lp.quotes(pair);
     const now = this.clock();
-    const fresh = quotes.filter((q) => now.getTime() - new Date(q.at).getTime() <= c.dealing.maxStalenessMs);
+    // Only sane, recent quotes: positive prices, bid below ask, not stamped in the future, within the staleness limit.
+    const fresh = quotes.filter((q) => {
+      const age = now.getTime() - new Date(q.at).getTime();
+      if (!(age <= c.dealing.maxStalenessMs) || age < -FUTURE_TOLERANCE_MS) return false;
+      try {
+        const bid = parsePrice(q.bid);
+        const ask = parsePrice(q.ask);
+        return bid > 0n && ask > 0n && bid <= ask;
+      } catch {
+        return false;
+      }
+    });
     if (!fresh.length) throw new ApiError(503, 'PRICE_UNAVAILABLE', `no live LP price for ${pair}`);
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => fresh.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
@@ -102,8 +115,16 @@ export class PriceEngine {
     return this.refresh(pair);
   }
 
+  /** The latest aggregate whatever its age (display only: dealer screen marks, P&L). */
   cached(pair: string): Aggregate | undefined {
     return this.latest.get(pair);
+  }
+
+  /** The latest aggregate only while it is within the staleness limit; anything that trades must use this or current(). */
+  fresh(pair: string): Aggregate | undefined {
+    const a = this.latest.get(pair);
+    if (!a) return undefined;
+    return this.clock().getTime() - a.at.getTime() <= this.config.get().data.dealing.maxStalenessMs ? a : undefined;
   }
 }
 

@@ -50,7 +50,7 @@ export function opsRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   /**
-   * Replaces the configuration. Body: { config, reason, dryRun? } (a bare configuration is still accepted from
+   * Replaces the configuration. Body: { config, reason, dryRun?, expectedVersion? } (a stale expectedVersion is a 409) (a bare configuration is still accepted from
    * service integrations, with the X-Ops-Reason header as the reason). `dryRun` validates and returns the diff.
    */
   app.put<{ Body: Record<string, unknown> }>('/ops/config', async (req) => {
@@ -59,7 +59,8 @@ export function opsRoutes(app: FastifyInstance, ctx: AppContext) {
     const wrapped = 'config' in body;
     const input = wrapped ? body.config : body;
     const reason = String((wrapped ? body.reason : req.headers['x-ops-reason']) ?? '');
-    return config.update(input, actor, reason, { dryRun: wrapped && body.dryRun === true });
+    const expectedVersion = wrapped && typeof body.expectedVersion === 'number' ? body.expectedVersion : undefined;
+    return config.update(input, actor, reason, { dryRun: wrapped && body.dryRun === true, expectedVersion });
   });
 
   app.get<{ Querystring: { limit?: string } }>('/ops/config/versions', async (req) => {
@@ -141,8 +142,9 @@ export function opsRoutes(app: FastifyInstance, ctx: AppContext) {
     }
     const { rows } = await db.query(
       `update ops_users set role = coalesce($2, role), active = coalesce($3, active), password_hash = coalesce($4, password_hash),
-         display_name = coalesce($5, display_name) where username = $1 returning *`,
-      [req.params.username, body.role ?? null, body.active ?? null, body.password ? await hashPassword(body.password) : null, body.displayName ?? null],
+         display_name = coalesce($5, display_name),
+         password_changed_at = case when $4::text is null then password_changed_at else $6 end where username = $1 returning *`,
+      [req.params.username, body.role ?? null, body.active ?? null, body.password ? await hashPassword(body.password) : null, body.displayName ?? null, ctx.clock()],
     );
     if (!rows.length) throw notFound('operator not found');
     await audit(db, actor, 'ops.user.update', { username: req.params.username, role: body.role, active: body.active, passwordReset: !!body.password });

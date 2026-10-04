@@ -5,7 +5,9 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { MockCoreBank, CoreBankingError, type FxTransactionRequest } from '@p2p/core-adapter';
+import { DEFAULT_CONFIG, type BankConfig } from '@p2p/shared';
 import { OPS, startHarness, units, type Harness } from './helpers.js';
+import { redactUrl } from '../src/app.js';
 
 /** Core that books a posting but can lose the response, and whose lookups can fail. */
 class LossyBank extends MockCoreBank {
@@ -206,5 +208,130 @@ describe('bank deals', () => {
     const d = await h.req('POST', '/v1/bank/deals', ayse, { quoteId: q.body.id });
     expect(d.body.error).toBe('INSUFFICIENT_BALANCE');
     expect(published).not.toContain('fill');
+  });
+});
+
+describe('P1 recovery and controls (F06–F14, F17)', () => {
+  it('F06: withdraws the bank ladder when the LP price goes stale', async () => {
+    const config = { ...DEFAULT_CONFIG, bankBook: { ...DEFAULT_CONFIG.bankBook, pairs: { USDTRY: DEFAULT_CONFIG.bankBook.pairs.USDTRY } } };
+    h = await startHarness({ config });
+    h.customer('bank-desk', { USD: '1000000', TRY: '100000000' });
+    await h.ctx.prices.refreshAll();
+    await h.ctx.bankBook.tick();
+    expect(h.ctx.exchange.depth('USDTRY').asks.length).toBeGreaterThan(0);
+    h.clock.now = new Date(h.clock.now.getTime() + DEFAULT_CONFIG.dealing.maxStalenessMs + 1);
+    await h.ctx.bankBook.tick();
+    expect(h.ctx.exchange.depth('USDTRY')).toMatchObject({ asks: [], bids: [] });
+  });
+
+  it('F07: a quote is used up only together with its deal, and a stuck PENDING deal is resumed', async () => {
+    h = await startHarness();
+    h.customer('ayse', { USD: '0', TRY: '100000' });
+    const ayse = await h.login('ayse');
+    const q = (await h.req('POST', '/v1/bank/quotes', ayse, { pair: 'USDTRY', side: 'BUY', qty: '100' })).body;
+    const getAccounts = h.bank.getAccounts.bind(h.bank);
+    h.bank.getAccounts = () => Promise.reject(new CoreBankingError('UNAVAILABLE', 'down'));
+    expect((await h.req('POST', '/v1/bank/deals', ayse, { quoteId: q.id })).status).toBe(500);
+    h.bank.getAccounts = getAccounts;
+    expect((await h.ctx.db.query('select status from bank_quotes where id = $1', [q.id])).rows[0].status).toBe('OPEN');
+    const d = await h.req('POST', '/v1/bank/deals', ayse, { quoteId: q.id });
+    expect(d.body.settlementStatus).toBe('SETTLED');
+
+    // A deal left PENDING (crash between insert and posting) is posted by the recovery sweep, once.
+    await h.ctx.db.query(`update bank_deals set status = 'PENDING' where id = $1`, [d.body.id]);
+    await h.ctx.dealing.resumePending();
+    expect((await h.ctx.db.query('select status from bank_deals where id = $1', [d.body.id])).rows[0].status).toBe('SETTLED');
+    expect(await h.balance('ayse', 'USD')).toMatchObject({ balance: units('100') });
+  });
+
+  it('F08: concurrent orders and bank deals share one daily limit that cannot be overrun', async () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.limits.default = { maxOrderNotional: '10000', maxDailyNotional: '12000' };
+    h = await startHarness({ config });
+    h.customer('ayse', { USD: '0', TRY: '100000' });
+    const ayse = await h.login('ayse');
+    // Two orders of ~4,915 TRY at once: both fit. A bank deal of ~4,925 TRY then does not.
+    const both = await Promise.all([1, 2].map(() => h.place(ayse, { side: 'BUY', qty: '100', price: '49.15' })));
+    expect(both.map((r) => r.status)).toEqual([201, 201]);
+    const q = (await h.req('POST', '/v1/bank/quotes', ayse, { pair: 'USDTRY', side: 'BUY', qty: '100' })).body;
+    expect((await h.req('POST', '/v1/bank/deals', ayse, { quoteId: q.id })).body.error).toBe('DAILY_LIMIT_EXCEEDED');
+    // Concurrent entries racing for the last room: only one gets it.
+    await h.req('DELETE', `/v1/orders/${both[0].body.id}`, ayse);
+    const race = await Promise.all([1, 2, 3].map(() => h.place(ayse, { side: 'BUY', qty: '100', price: '49.15' })));
+    expect(race.filter((r) => r.status === 201)).toHaveLength(1);
+  });
+
+  it('F10: a hold release core banking did not confirm is retried until it is', async () => {
+    h = await startHarness();
+    h.customer('alice', { USD: '1000', TRY: '0' });
+    const alice = await h.login('alice');
+    const o = await h.place(alice, { side: 'SELL', qty: '100', price: '49.15' });
+    const release = h.bank.releaseHold.bind(h.bank);
+    h.bank.releaseHold = () => Promise.reject(new CoreBankingError('UNAVAILABLE', 'down'));
+    await h.req('DELETE', `/v1/orders/${o.body.id}`, alice);
+    expect(await h.balance('alice', 'USD')).toMatchObject({ available: units('900') });
+    h.bank.releaseHold = release;
+    await h.ctx.scheduler.tick();
+    expect(await h.balance('alice', 'USD')).toMatchObject({ available: units('1000') });
+    expect((await h.ctx.db.query('select count(*)::int as n from hold_tasks where not done')).rows[0].n).toBe(0);
+  });
+
+  it('F12: launch tokens stay single use across a restart; bad stream messages are refused; tokens are not logged', async () => {
+    h = await startHarness();
+    const launch = await h.launchToken('ayse');
+    expect((await h.req('POST', '/v1/session', undefined, { launchToken: launch })).status).toBe(200);
+    await h.close();
+    h = await startHarness({ reset: false });
+    expect((await h.req('POST', '/v1/session', undefined, { launchToken: launch })).body.message).toMatch(/already used/);
+
+    const ws = await h.app.injectWS(`/v1/stream?token=${await h.login('ayse')}`);
+    const messages: { channel: string; data: any }[] = [];
+    ws.on('message', (m: Buffer) => messages.push(JSON.parse(m.toString())));
+    ws.send(JSON.stringify({ op: 'subscribe', channels: [{ evil: true }] }));
+    for (let i = 0; i < 50 && !messages.length; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(messages[0].channel).toBe('error');
+    ws.terminate();
+    expect(redactUrl('/v1/stream?token=abc.def&x=1')).toBe('/v1/stream?token=[REDACTED]&x=1');
+  });
+
+  it('F13: locks out repeated failed logins and ends sessions on a password change', async () => {
+    h = await startHarness();
+    const login = (password: string) => h.req('POST', '/ops/login', undefined, { username: 'admin', password });
+    const good = (await login('admin-pass-123')).body.token;
+    for (let i = 0; i < 5; i++) expect((await login('wrong')).status).toBe(401);
+    expect((await login('admin-pass-123')).status).toBe(429);
+
+    h.clock.now = new Date(h.clock.now.getTime() + 16 * 60 * 1000);
+    const fresh = (await login('admin-pass-123')).body.token;
+    expect((await h.req('PATCH', '/ops/users/admin', fresh, { password: 'new-password-1' })).status).toBe(200);
+    h.clock.now = new Date(h.clock.now.getTime() + 1000);
+    expect((await h.req('GET', '/ops/me', good)).status).toBe(401);
+  });
+
+  it('F14: refuses unusable values, identity changes on traded pairs and stale editors', async () => {
+    h = await startHarness();
+    const put = (patch: (c: BankConfig) => void, extra: Record<string, unknown> = {}) => {
+      const c = structuredClone(h.ctx.config.get().data);
+      patch(c);
+      return h.req('PUT', '/ops/config', OPS, { config: c, reason: 'test', ...extra });
+    };
+    const zero = await put((c) => (c.pairs[0].tickSize = '0'));
+    expect(zero.body).toMatchObject({ error: 'INVALID_CONFIG', details: [expect.objectContaining({ path: ['pairs', 0, 'tickSize'] })] });
+    expect((await put((c) => (c.pairs[0].symbol = 'EURTRY'))).body.error).toBe('INVALID_CONFIG');
+
+    h.customer('ayse', { USD: '0', TRY: '100000' });
+    await h.place(await h.login('ayse'), { side: 'BUY', qty: '1', price: '49.15' });
+    const decimals = await put((c) => (c.pairs[0].baseDecimals = 4));
+    expect(decimals.body.details[0].message).toMatch(/baseDecimals cannot change/);
+
+    const v = h.ctx.config.get().version;
+    expect((await put((c) => (c.pairs[0].commission.buyBips = 6), { expectedVersion: v })).status).toBe(200);
+    expect((await put((c) => (c.pairs[0].commission.buyBips = 7), { expectedVersion: v })).body.error).toBe('VERSION_CONFLICT');
+  });
+
+  it('F17: reports readiness with the numbers operations alert on', async () => {
+    h = await startHarness();
+    const r = await h.req('GET', '/ready');
+    expect(r).toMatchObject({ status: 200, body: { ok: true, database: true, events: true, matching: true, settlements_needing_review: 0 } });
   });
 });

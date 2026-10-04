@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
-import pg from 'pg';
+import type pg from 'pg';
+import { Listener } from './db/pool.js';
 
 export type StreamEvent =
   | { type: 'book'; pair: string; bids: LevelView[]; asks: LevelView[] }
@@ -23,23 +24,37 @@ const CHANNEL = 'p2p_events';
  */
 export class EventBus {
   private readonly emitter = new EventEmitter();
-  private listener?: pg.Client;
+  private listener?: Listener;
 
-  constructor(private readonly db: pg.Pool) {
+  constructor(
+    private readonly db: pg.Pool,
+    private readonly log: { warn: (o: object, m: string) => void } = { warn: () => {} },
+  ) {
     this.emitter.setMaxListeners(0);
   }
 
+  /**
+   * Delivery is best effort: an event lost while the LISTEN connection is down is not replayed. Clients
+   * reload their state when their socket reconnects, and the database stays the source of truth.
+   */
   async start(connectionString: string) {
-    this.listener = new pg.Client({ connectionString });
-    await this.listener.connect();
-    this.listener.on('notification', (msg) => {
-      if (msg.channel === CHANNEL && msg.payload) this.emitter.emit('event', JSON.parse(msg.payload) as StreamEvent);
-    });
-    await this.listener.query(`listen ${CHANNEL}`);
+    this.listener = new Listener(
+      connectionString,
+      CHANNEL,
+      (payload) => {
+        if (payload) this.emitter.emit('event', JSON.parse(payload) as StreamEvent);
+      },
+      this.log,
+    );
+    await this.listener.start();
+  }
+
+  get connected() {
+    return this.listener?.connected ?? false;
   }
 
   async stop() {
-    await this.listener?.end();
+    await this.listener?.stop();
   }
 
   async publish(event: StreamEvent) {

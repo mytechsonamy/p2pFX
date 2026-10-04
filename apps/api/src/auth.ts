@@ -11,6 +11,8 @@ export interface Session {
   customerRef: string;
   segment: string;
   locale?: string;
+  /** Session expiry, epoch seconds (absent for internal sessions). */
+  exp?: number;
 }
 
 export type OpsRole = 'viewer' | 'editor' | 'admin';
@@ -27,6 +29,9 @@ const LAUNCH_MAX_AGE_SECONDS = 60;
 const OPS_AUDIENCE = 'p2pfx-ops';
 const OPS_SESSION_SECONDS = 8 * 60 * 60;
 const RANK: Record<OpsRole, number> = { viewer: 0, editor: 1, admin: 2 };
+/** Failed back office logins tolerated per username in the window before further attempts are refused. */
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number) => Promise<Buffer>;
 
@@ -55,7 +60,7 @@ export class AuthService {
   private bankKey?: CryptoKey;
   private readonly sessionKey: Uint8Array;
   private readonly opsKey: Uint8Array;
-  private readonly usedJti = new Map<string, number>();
+  private readonly loginFailures = new Map<string, number[]>();
 
   constructor(
     private readonly db: Db,
@@ -87,11 +92,14 @@ export class AuthService {
     }
     if ((payload.exp ?? 0) - (payload.iat ?? 0) > LAUNCH_MAX_AGE_SECONDS) throw unauthorized('launch token lifetime exceeds 60 seconds');
 
-    // One-time use.
+    // One-time use, recorded in the database so a restart or another instance cannot accept it again.
     const nowSec = Math.floor(now.getTime() / 1000);
-    for (const [jti, exp] of this.usedJti) if (exp < nowSec) this.usedJti.delete(jti);
-    if (this.usedJti.has(payload.jti!)) throw unauthorized('launch token already used');
-    this.usedJti.set(payload.jti!, payload.exp!);
+    const { rowCount } = await this.db.query(
+      'insert into launch_tokens_used (jti, expires_at) values ($1, to_timestamp($2)) on conflict (jti) do nothing',
+      [String(payload.jti), payload.exp],
+    );
+    if (rowCount !== 1) throw unauthorized('launch token already used');
+    if (Math.random() < 0.01) await this.db.query(`delete from launch_tokens_used where expires_at < now() - interval '1 day'`).catch(() => {});
 
     const customerRef = String(payload.customer_ref);
     const segment = typeof payload.segment === 'string' ? payload.segment : 'default';
@@ -102,8 +110,8 @@ export class AuthService {
        returning id`,
       [customerRef, segment, locale],
     );
-    const session: Session = { customerId: rows[0].id, customerRef, segment, locale };
     const exp = nowSec + this.opts.config.get().data.session.ttlMinutes * 60;
+    const session: Session = { customerId: rows[0].id, customerRef, segment, locale, exp };
     const jwt = await new SignJWT({ ref: customerRef, seg: segment, loc: locale })
       .setProtectedHeader({ alg: 'HS256' })
       .setSubject(session.customerId)
@@ -122,6 +130,7 @@ export class AuthService {
         customerRef: String(payload.ref),
         segment: String(payload.seg ?? 'default'),
         locale: payload.loc ? String(payload.loc) : undefined,
+        exp: payload.exp,
       };
     } catch {
       throw unauthorized('session expired or invalid');
@@ -157,8 +166,12 @@ export class AuthService {
     } catch {
       throw unauthorized('ops session expired or invalid');
     }
-    const { rows } = await this.db.query('select username, display_name, role from ops_users where username = $1 and active', [payload.sub]);
+    const { rows } = await this.db.query('select username, display_name, role, password_changed_at from ops_users where username = $1 and active', [payload.sub]);
     if (!rows.length) throw unauthorized('operator is disabled');
+    // Sessions issued before the last password change are over.
+    if (rows[0].password_changed_at && (payload.iat ?? 0) * 1000 < new Date(rows[0].password_changed_at).getTime()) {
+      throw unauthorized('ops session ended by a password change');
+    }
     return { username: rows[0].username, displayName: rows[0].display_name, role: rows[0].role };
   }
 
@@ -168,7 +181,14 @@ export class AuthService {
       const { rows: any } = await this.db.query('select 1 from ops_users limit 1');
       if (!any.length) throw new ApiError(401, 'NO_OPERATORS', 'no back office users yet: set OPS_ADMIN_PASSWORD and restart the API');
     }
-    if (!rows.length || !(await checkPassword(password, rows[0].password_hash))) throw unauthorized('wrong username or password');
+    const now = this.opts.clock().getTime();
+    const recent = (this.loginFailures.get(username) ?? []).filter((t) => t > now - LOGIN_WINDOW_MS);
+    if (recent.length >= LOGIN_MAX_FAILURES) throw new ApiError(429, 'TOO_MANY_ATTEMPTS', 'too many failed logins, try again later');
+    if (!rows.length || !(await checkPassword(password, rows[0].password_hash))) {
+      this.loginFailures.set(username, [...recent, now]);
+      throw unauthorized('wrong username or password');
+    }
+    this.loginFailures.delete(username);
     await this.db.query('update ops_users set last_login_at = now() where username = $1', [username]);
     const nowSec = Math.floor(this.opts.clock().getTime() / 1000);
     const exp = nowSec + OPS_SESSION_SECONDS;

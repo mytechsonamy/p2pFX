@@ -94,13 +94,21 @@ export class Exchange {
     const interrupted = await loadOrders(this.db, `o.status = 'NEW'`, []);
     for (const o of interrupted) {
       await this.db.query(`update orders set status = 'REJECTED', cancel_reason = 'ENTRY_INTERRUPTED', updated_at = now() where id = $1 and status = 'NEW'`, [o.id]);
-      if (o.hold_id) await this.releaseHold(o.hold_id);
+      // The hold may exist in core banking without its id ever reaching the database: find it by reference.
+      const holds = new Set(o.hold_id ? [o.hold_id] : []);
+      for (const h of await this.core.findHolds(`order:${o.id}`).catch(() => [])) holds.add(h);
+      for (const h of holds) await this.releaseHold(h);
     }
     await this.settlement.resumePending();
     const due = await loadOrders(this.db, `o.status = any($1) and o.expires_at <= $2 order by o.seq`, [['OPEN', 'PARTIAL', 'QUEUED'], this.clock()]);
     for (const o of due) await this.closeOrder(o, 'EXPIRED', 'EXPIRED');
     const live = await loadOrders(this.db, `o.status = any($1) order by o.seq`, [LIVE_STATUSES]);
     for (const o of live) await this.submit(o.id);
+  }
+
+  /** True while this instance holds the matching lock. */
+  get running() {
+    return this.active;
   }
 
   /** Releases the matching lock (shutdown). */
@@ -427,12 +435,44 @@ export class Exchange {
     await this.core.notify(customerRef, event).catch((err) => this.log.warn({ err }, 'notify failed'));
   }
 
+  /** Releases a hold; if core banking does not confirm it, a hold task retries it until it does. */
   private async releaseHold(holdId: string) {
-    await this.core.releaseHold(holdId).catch((err) => this.log.warn({ err, holdId }, 'release hold failed'));
+    await this.core.releaseHold(holdId).catch((err) => this.holdTask(holdId, 'RELEASE', null, err));
   }
 
   private async adjustHold(holdId: string, amount: bigint) {
-    await this.core.adjustHold(holdId, amount).catch((err) => this.log.warn({ err, holdId }, 'adjust hold failed'));
+    await this.core.adjustHold(holdId, amount).catch((err) => this.holdTask(holdId, 'ADJUST', amount, err));
+  }
+
+  private async holdTask(holdId: string, action: 'RELEASE' | 'ADJUST', amount: bigint | null, err: unknown) {
+    this.log.warn({ err, holdId, action }, 'hold change failed; queued for retry');
+    await this.db
+      .query('insert into hold_tasks (hold_id, action, amount, last_error) values ($1, $2, $3, $4)', [holdId, action, amount, (err as Error)?.message ?? String(err)])
+      .catch((e) => this.log.error({ err: e, holdId, action }, 'could not queue the hold change'));
+  }
+
+  /** Retries queued hold changes: per hold, a pending release wins over adjustments, else the latest adjustment. */
+  async retryHoldTasks() {
+    const { rows } = await this.db.query('select * from hold_tasks where not done order by id');
+    const byHold = new Map<string, Record<string, any>[]>();
+    for (const r of rows) byHold.set(r.hold_id, [...(byHold.get(r.hold_id) ?? []), r]);
+    for (const [holdId, tasks] of byHold) {
+      const release = tasks.some((t) => t.action === 'RELEASE');
+      const ids = tasks.map((t) => t.id);
+      try {
+        if (release) await this.core.releaseHold(holdId);
+        else await this.core.adjustHold(holdId, BigInt(tasks[tasks.length - 1].amount));
+        await this.db.query('update hold_tasks set done = true, updated_at = now() where id = any($1)', [ids]);
+      } catch (err) {
+        // A hold core banking no longer has is as good as released.
+        const gone = err instanceof CoreBankingError && err.code === 'NOT_FOUND';
+        await this.db.query('update hold_tasks set done = $2, attempts = attempts + 1, last_error = $3, updated_at = now() where id = any($1)', [
+          ids,
+          gone,
+          (err as Error).message,
+        ]);
+      }
+    }
   }
 }
 

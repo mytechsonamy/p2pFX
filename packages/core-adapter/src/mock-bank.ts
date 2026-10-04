@@ -155,6 +155,10 @@ export class MockCoreBank implements CoreBankingAdapter {
     return { holdId: hold.id };
   }
 
+  async findHolds(ref: string) {
+    return [...this.holds.values()].filter((h) => h.ref === ref && h.active).map((h) => h.id);
+  }
+
   async adjustHold(holdId: string, newAmount: bigint) {
     const hold = this.hold(holdId);
     if (newAmount <= 0n) {

@@ -1,6 +1,5 @@
-import pg from 'pg';
-import { ASSUMPTIONS, BankConfigSchema, DEFAULT_CONFIG, diffConfig, pathMatches, type BankConfig, type ConfigChange } from '@p2p/shared';
-import { tx, type Db } from './db/pool.js';
+import { ASSUMPTIONS, BankConfigSchema, DEFAULT_CONFIG, configIssues, diffConfig, pathMatches, type BankConfig, type ConfigChange, type ConfigIssue } from '@p2p/shared';
+import { Listener, tx, type Db } from './db/pool.js';
 import { audit } from './audit.js';
 import { ApiError, badRequest, notFound } from './errors.js';
 
@@ -28,7 +27,7 @@ const CHANNEL = 'p2p_config';
 export class ConfigService {
   private current?: VersionedConfig;
   private listeners: ((c: VersionedConfig) => void)[] = [];
-  private listener?: pg.Client;
+  private listener?: Listener;
 
   constructor(private readonly db: Db) {}
 
@@ -49,17 +48,17 @@ export class ConfigService {
   }
 
   /** Follows changes made through other API instances. */
-  async listen(connectionString: string) {
-    this.listener = new pg.Client({ connectionString });
-    await this.listener.connect();
-    this.listener.on('notification', (msg) => {
-      if (msg.channel === CHANNEL && Number(msg.payload) > (this.current?.version ?? 0)) void this.reload();
-    });
-    await this.listener.query(`listen ${CHANNEL}`);
+  async listen(connectionString: string, log: { warn: (o: object, m: string) => void } = { warn: () => {} }) {
+    const reload = () => void this.reload().catch((err) => log.warn({ err }, 'config reload failed'));
+    // After a reconnect the latest version is reloaded: a change made while disconnected is not missed.
+    this.listener = new Listener(connectionString, CHANNEL, (payload) => {
+      if (Number(payload) > (this.current?.version ?? 0)) reload();
+    }, log, reload);
+    await this.listener.start();
   }
 
   async stop() {
-    await this.listener?.end();
+    await this.listener?.stop();
   }
 
   get(): VersionedConfig {
@@ -78,9 +77,15 @@ export class ConfigService {
    * Validates a full configuration and, unless `dryRun`, stores it as a new version. Returns the changes
    * against the current version; a configuration identical to the current one is refused.
    */
-  async update(input: unknown, actor: string, reason: string, opts: { dryRun?: boolean } = {}) {
+  async update(input: unknown, actor: string, reason: string, opts: { dryRun?: boolean; expectedVersion?: number } = {}) {
     const parsed = BankConfigSchema.safeParse(input);
     if (!parsed.success) throw badRequest('INVALID_CONFIG', 'configuration is invalid', parsed.error.issues);
+    const issues = [...configIssues(parsed.data), ...(await this.instrumentChanges(this.get().data, parsed.data))];
+    if (issues.length) throw badRequest('INVALID_CONFIG', 'configuration is invalid', issues);
+    // Optimistic concurrency: an editor working from an older version must reload instead of overwriting.
+    if (opts.expectedVersion !== undefined && opts.expectedVersion !== this.get().version) {
+      throw new ApiError(409, 'VERSION_CONFLICT', `the configuration changed (now v${this.get().version}); reload and apply your change again`);
+    }
     const diff = diffConfig(this.get().data, parsed.data);
     if (opts.dryRun) return { ...this.get(), diff, dryRun: true };
     if (!diff.length) throw new ApiError(409, 'NO_CHANGE', 'nothing changed');
@@ -89,10 +94,34 @@ export class ConfigService {
     return { ...saved, diff };
   }
 
+  /**
+   * A pair that has orders or deals keeps its identity: its currencies and decimals cannot change (stored
+   * minor-unit amounts would be read at the wrong scale) and it cannot be removed (close it instead).
+   */
+  private async instrumentChanges(from: BankConfig, to: BankConfig): Promise<ConfigIssue[]> {
+    const issues: ConfigIssue[] = [];
+    for (const old of from.pairs) {
+      const i = to.pairs.findIndex((p) => p.symbol === old.symbol);
+      const next = to.pairs[i];
+      const changed = next ? (['base', 'quote', 'baseDecimals', 'quoteDecimals'] as const).filter((f) => next[f] !== old[f]) : [];
+      if (next && !changed.length) continue;
+      const { rows } = await this.db.query(
+        `select (exists (select 1 from orders where pair = $1) or exists (select 1 from bank_deals where pair = $1)) as used`,
+        [old.symbol],
+      );
+      if (!rows[0].used) continue;
+      if (!next) issues.push({ path: ['pairs'], message: `${old.symbol} has trades and cannot be removed; close it instead` });
+      else for (const f of changed) issues.push({ path: ['pairs', i, f], message: `${old.symbol} has trades; ${f} cannot change` });
+    }
+    return issues;
+  }
+
   /** Restores an earlier version as a new version. */
   async revert(version: number, actor: string, reason: string) {
     requireReason(reason);
     const data = await this.byVersion(version);
+    const issues = await this.instrumentChanges(this.get().data, data);
+    if (issues.length) throw badRequest('INVALID_CONFIG', 'this version cannot be restored', issues);
     const diff = diffConfig(this.get().data, data);
     if (!diff.length) throw new ApiError(409, 'NO_CHANGE', `version ${version} is the same as the current configuration`);
     const saved = await this.save(data, actor, reason, diff, version);
