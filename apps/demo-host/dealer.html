@@ -13,7 +13,10 @@
         <h1>Banka FX masası</h1>
         <p>LP fiyatları, segment bazlı banka kurları, pozisyonlar ve hedge işlemleri. Saniyede bir yenilenir.</p>
       </div>
-      <span id="status" class="status-dot">bağlanıyor…</span>
+      <div class="toolbar-actions">
+        <a class="dealer-link" href="/backoffice.html">Backoffice parametreleri</a>
+        <span id="status" class="status-dot">bağlanıyor…</span>
+      </div>
     </header>
     <section id="policy" class="desk-card policy" hidden>
       <h2>Otomatik hedge kuralı <small>Banka parametresi, kaydedince anında geçerli</small></h2>
@@ -27,6 +30,7 @@
           </select>
         </label>
         <div class="per-ccy" id="per-ccy"></div>
+        <label>Gerekçe <input name="reason" required minlength="3" placeholder="denetim izine yazılır" /></label>
         <button type="submit">Kaydet</button>
         <span id="policy-msg" class="muted"></span>
       </form>

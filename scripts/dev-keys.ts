@@ -19,6 +19,9 @@ const env = {
   BANK_JWT_PRIVATE_KEY: oneLine(await exportPKCS8(privateKey)),
   SESSION_SECRET: randomBytes(32).toString('hex'),
   OPS_TOKEN: randomBytes(16).toString('hex'),
+  // First back office administrator (user `admin`), created only while the database has no operators.
+  // A known password so a demo presenter can sign in; set OPS_ADMIN_PASSWORD to choose another.
+  OPS_ADMIN_PASSWORD: process.env.OPS_ADMIN_PASSWORD ?? 'demo-admin',
 };
 writeFileSync(out, Object.entries(env).map(([k, v]) => `${k}="${v}"`).join('\n') + '\n');
 console.log(`wrote ${out}`);

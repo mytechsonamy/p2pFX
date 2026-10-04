@@ -10,18 +10,29 @@ function bankBackend(privateKeyPem: string | undefined, apiUrl: string, opsToken
   return {
     name: 'demo-bank-backend',
     configureServer(server) {
-      // The dealer screen: the bank's back office calls the platform's ops API with its own credentials.
+      // Back office and dealer screen. A signed-in operator's own session is passed through, so the audit log
+      // names them. Without one, the bank's service token may only read (the dealer screen's live view).
       server.middlewares.use('/bank/ops', async (req, res) => {
         if (!opsToken) {
           res.statusCode = 500;
           return res.end('OPS_TOKEN missing: run pnpm dev:keys');
+        }
+        const operator = req.headers.authorization;
+        const isLogin = req.url === '/login';
+        if (!operator && !isLogin && req.method !== 'GET') {
+          res.statusCode = 401;
+          res.setHeader('content-type', 'application/json');
+          return res.end(JSON.stringify({ error: 'UNAUTHORIZED', message: 'ops login required' }));
         }
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(c as Buffer);
         try {
           const upstream = await fetch(`${apiUrl}/ops${req.url ?? ''}`, {
             method: req.method,
-            headers: { authorization: `Bearer ${opsToken}`, ...(chunks.length ? { 'content-type': 'application/json' } : {}) },
+            headers: {
+              ...(isLogin ? {} : operator ? { authorization: operator } : { authorization: `Bearer ${opsToken}`, 'x-ops-actor': 'dealer-screen' }),
+              ...(chunks.length ? { 'content-type': 'application/json' } : {}),
+            },
             body: chunks.length ? Buffer.concat(chunks) : undefined,
           });
           res.statusCode = upstream.status;
@@ -60,6 +71,6 @@ export default defineConfig(({ mode }) => {
     plugins: [bankBackend(env.BANK_JWT_PRIVATE_KEY, env.API_URL ?? 'http://localhost:4000', env.OPS_TOKEN)],
     define: { __WEB_APP_URL__: JSON.stringify(env.WEB_APP_URL ?? 'http://localhost:5173') },
     server: { port: 5174, host: true },
-    build: { rollupOptions: { input: { main: 'index.html', dealer: 'dealer.html' } } },
+    build: { rollupOptions: { input: { main: 'index.html', dealer: 'dealer.html', backoffice: 'backoffice.html' } } },
   };
 });

@@ -54,6 +54,7 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     bankPublicKeyPem: await exportSPKI(publicKey),
     sessionSecret: 'test-session-secret-0123456789abcdef',
     opsToken: OPS,
+    opsAdminPassword: 'admin-pass-123',
     initialConfig: opts.config ?? DEFAULT_CONFIG,
     clock: () => clock.now,
     settlement: { attempts: 2, baseDelayMs: 1 },
@@ -98,7 +99,7 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     req('POST', '/v1/orders', token, { pair: 'USDTRY', validity: 'GTC', ...body }, { 'idempotency-key': key });
 
   const setConfig = async (patch: (c: BankConfig) => BankConfig) => {
-    const res = await req('PUT', '/ops/config', OPS, patch(structuredClone(ctx.config.get().data)));
+    const res = await req('PUT', '/ops/config', OPS, { config: patch(structuredClone(ctx.config.get().data)), reason: 'test setup' });
     if (res.status !== 200) throw new Error(`config update failed: ${JSON.stringify(res.body)}`);
   };
 

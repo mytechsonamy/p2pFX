@@ -9,7 +9,7 @@
 //   4. When core banking is down, the fill waits for operations review; a retry settles it.
 // Open the demo bank app (http://localhost:5174) next to it to watch the board and both phones update.
 // Usage: pnpm demo:walkthrough
-import { api, core, login, ops, placeOrder, waitFor, waitForApi } from './lib/demo-client.js';
+import { api, changeConfig, core, login, ops, placeOrder, waitFor, waitForApi } from './lib/demo-client.js';
 
 const PAIR = 'USDTRY';
 const PRICE = '49.15';
@@ -107,8 +107,7 @@ line('FX masası', 'http://localhost:5174/dealer.html');
 await pause();
 
 step(8, 'Bloke kapalıyken bakiye eşleşme anında yetersizse emir iptal olur');
-const cfg = await ops('GET', '/ops/config');
-await ops('PUT', '/ops/config', { ...cfg.data, balanceMode: 'no_block' });
+await changeConfig('Demo: bloke kapalı senaryosu', (c) => ({ ...c, balanceMode: 'no_block' }));
 line('Banka ayarı', 'balanceMode = no_block (girişte sadece kontrol, bloke yok)');
 try {
   // A fresh customer each run, with exactly 100 USD.
@@ -131,8 +130,7 @@ try {
   line('Mehmet\'in emri', `${left.filledQty} USD doldu, kalan ${left.remainingQty} USD iptal ediliyor`);
   await api('DELETE', `/v1/orders/${mBuy.id}`, mehmet);
 } finally {
-  const current = await ops('GET', '/ops/config');
-  await ops('PUT', '/ops/config', { ...current.data, balanceMode: 'block' });
+  await changeConfig('Demo: bloke ayarı geri alındı', (c) => ({ ...c, balanceMode: 'block' }));
   line('Banka ayarı', 'balanceMode = block (geri alındı)');
 }
 

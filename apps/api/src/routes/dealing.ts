@@ -57,7 +57,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
   // ---- dealer (operations) ----
 
   app.get('/ops/dealing', async (req) => {
-    auth.ops(req);
+    await auth.ops(req);
     const c = config.get().data;
     const segments = ['default', ...Object.keys(c.dealing.margins.segments)];
     const pairs = [];
@@ -87,7 +87,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.post('/ops/dealing/hedges', async (req) => {
-    const actor = auth.ops(req);
+    const actor = await auth.ops(req, 'editor');
     const body = parse(z.object({ pair: z.string(), side: z.enum(['BUY', 'SELL']), qty: z.string() }), req.body);
     const pair = findPair(config.get().data, body.pair);
     if (!pair) throw badRequest('UNKNOWN_PAIR', `pair ${body.pair} is not available`);
@@ -101,7 +101,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   app.post<{ Params: { id: string } }>('/ops/dealing/deals/:id/retry', async (req) => {
-    const actor = auth.ops(req);
+    const actor = await auth.ops(req, 'editor');
     return dealing.retry(req.params.id, actor);
   });
 }

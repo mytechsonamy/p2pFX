@@ -46,6 +46,7 @@ script is in [docs/demo.md](docs/demo.md).
 |---|---|
 | http://localhost:5174 | demo bank app (two phones, bank brand switch, bridge message log) |
 | http://localhost:5174/dealer.html | the bank's FX desk: LP prices, segment rates, positions and P&L, hedges |
+| http://localhost:5174/backoffice.html | bank back office: every business parameter, change history, audit log, operators (`admin` / `demo-admin`), see [docs/backoffice.md](docs/backoffice.md) |
 | http://localhost:5173 | the embeddable web app: opened directly it refuses to start (bank app only) |
 | http://localhost:4000 | P2P API |
 | http://localhost:4100 | mock core banking (`/admin/bank-accounts`, `/admin/notifications`, `/admin/faults`) |
@@ -56,7 +57,7 @@ Requires Node 20+, pnpm and Postgres 16.
 
 ```sh
 pnpm install
-pnpm dev:keys            # writes .env: demo bank RS256 key pair, session secret, ops token
+pnpm dev:keys            # writes .env: demo bank RS256 key pair, session secret, ops token, first admin password
 createdb p2pfx           # or: docker compose up -d postgres
 pnpm dev:mock-core       # :4100, seeded with demo customers and rates
 pnpm dev:api             # :4000, migrates the database on start
@@ -124,7 +125,7 @@ Customer (session bearer token from `POST /v1/session`):
 | `GET /v1/pairs/:pair/history?minutes=` | LP price history |
 | `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `bank:<pair>`, `orders`, `fills` |
 
-Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`.
+Operations (a back office operator's session from `POST /ops/login`, or the `OPS_TOKEN` service bearer): `GET/PUT /ops/config` (with a reason, as a new version), `GET /ops/config/versions`, `POST /ops/config/revert`, `GET /ops/config/assumptions`, `POST /ops/config/assumptions/confirm`, `GET /ops/audit`, `GET/POST/PATCH /ops/users`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`.
 
 Bank dealing (the bank's own FX desk next to the P2P book: LP aggregation, segment margins, positions,
 auto-hedge) is described in [docs/bank-dealing.md](docs/bank-dealing.md).

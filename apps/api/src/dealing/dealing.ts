@@ -36,7 +36,8 @@ export class DealingService {
     private readonly events: EventBus,
     private readonly clock: () => Date,
     private readonly log: FastifyBaseLogger,
-    private readonly settlement: SettlementOptions,
+    /** Overrides `settlement` from the bank configuration (tests). */
+    private readonly settlementOverride?: SettlementOptions,
   ) {}
 
   /** The customer's segment rates, for the bank row on the board. */
@@ -117,8 +118,9 @@ export class DealingService {
   private async settle(deal: Record<string, any>, customerRef: string, pair: PairConfig) {
     const buyer = deal.side === 'BUY';
     let lastError = '';
-    for (let attempt = 1; attempt <= this.settlement.attempts; attempt++) {
-      if (attempt > 1) await sleep(this.settlement.baseDelayMs * 2 ** (attempt - 2));
+    const policy = this.settlementOverride ?? this.config.get().data.settlement;
+    for (let attempt = 1; attempt <= policy.attempts; attempt++) {
+      if (attempt > 1) await sleep(policy.baseDelayMs * 2 ** (attempt - 2));
       try {
         const res = await this.core.postFxTransaction({
           leg: buyer ? 'BANK_SELL' : 'BANK_BUY',

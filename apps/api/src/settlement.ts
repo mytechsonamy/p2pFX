@@ -31,8 +31,13 @@ export class SettlementService {
     private readonly core: CoreBankingAdapter,
     private readonly config: ConfigService,
     private readonly log: FastifyBaseLogger,
-    private readonly opts: SettlementOptions,
+    /** Overrides `settlement` from the bank configuration (tests). */
+    private readonly override?: SettlementOptions,
   ) {}
+
+  private get opts(): SettlementOptions {
+    return this.override ?? this.config.get().data.settlement;
+  }
 
   static idempotencyKey(fillId: string, leg: FxLeg, round = 0) {
     return round === 0 ? `fill:${fillId}:${leg}` : `fill:${fillId}:${leg}:r${round}`;
