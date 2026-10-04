@@ -268,8 +268,8 @@ export class MockCoreBank implements CoreBankingAdapter {
       lines: [
         { label: 'İşlem', value: isBuy ? `${r.currency} alış` : `${r.currency} satış` },
         { label: 'Tutar', value: `${formatDecimal(r.qty, decimalsOf(r.currency))} ${r.currency}` },
-        { label: 'Eşleşme kuru', value: r.bookPrice },
-        { label: 'İşlem kuru', value: r.effectivePrice },
+        { label: 'Eşleşme kuru', value: rate4(r.bookPrice) },
+        { label: 'İşlem kuru', value: rate4(r.effectivePrice) },
         { label: 'İşlem tutarı', value: q(r.notional) },
         { label: 'Banka komisyonu', value: q(r.commission) },
         { label: 'Kambiyo vergisi', value: q(r.tax) },
@@ -350,4 +350,10 @@ export class MockCoreBank implements CoreBankingAdapter {
   private result(t: Txn): FxTransactionResult {
     return { txnRef: t.txnRef, receiptRef: t.receiptRef, postedAt: t.postedAt };
   }
+}
+
+/** Rates on a dekont carry four decimals, as banks publish them: 49.2 → 49.2000. */
+function rate4(rate: string): string {
+  const [int, frac = ''] = rate.split('.');
+  return `${int}.${frac.padEnd(4, '0')}`;
 }

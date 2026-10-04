@@ -13,11 +13,11 @@ describe('formatting', () => {
     expect(formatDecimal('49298.4', 'en-US')).toBe('49,298.40');
   });
 
-  it('shows prices with 2 to 4 fraction digits', () => {
-    expect(formatPrice('49.15', 'tr-TR')).toBe('49,15');
+  it('shows rates with four fraction digits', () => {
+    expect(formatPrice('49.15', 'tr-TR')).toBe('49,1500');
     expect(formatPrice('49.1525', 'tr-TR')).toBe('49,1525');
-    expect(formatPrice('49.1500', 'tr-TR')).toBe('49,15');
-    expect(formatPrice('49', 'tr-TR')).toBe('49,00');
+    expect(formatPrice('49.1500', 'tr-TR')).toBe('49,1500');
+    expect(formatPrice('49', 'tr-TR')).toBe('49,0000');
   });
 
   it('formats the tax rate as a percentage', () => {

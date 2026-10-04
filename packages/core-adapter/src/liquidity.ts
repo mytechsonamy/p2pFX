@@ -78,7 +78,7 @@ export class MockLiquidity implements LiquidityAdapter {
   private readonly random: () => number;
 
   constructor(private readonly opts: MockLiquidityOptions) {
-    this.volatility = opts.volatility ?? 0.0004;
+    this.volatility = opts.volatility ?? 0.00015;
     this.reversion = opts.reversion ?? 0.05;
     this.clock = opts.clock ?? Date.now;
     this.random = opts.random ?? Math.random;
