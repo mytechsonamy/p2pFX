@@ -68,6 +68,8 @@ export class MockCoreBank implements CoreBankingAdapter {
   private seq = 0;
   /** Fault injection for tests and demos: the next N postings fail with UNAVAILABLE. */
   failNextPostings = 0;
+  /** When set, the injected faults only hit postings for these customers (others keep settling). */
+  faultCustomers: Set<string> | undefined;
 
   private nextId(prefix: string) {
     return `${prefix}-${String(++this.seq).padStart(6, '0')}`;
@@ -169,7 +171,7 @@ export class MockCoreBank implements CoreBankingAdapter {
   async postFxTransaction(req: FxTransactionRequest): Promise<FxTransactionResult> {
     const existing = this.txnsByKey.get(req.idempotencyKey);
     if (existing) return this.result(existing);
-    if (this.failNextPostings > 0) {
+    if (this.failNextPostings > 0 && (!this.faultCustomers || this.faultCustomers.has(req.customerRef))) {
       this.failNextPostings--;
       throw new CoreBankingError('UNAVAILABLE', 'core banking temporarily unavailable (injected fault)');
     }

@@ -80,9 +80,10 @@ export function buildMockCore(
   app.get<{ Params: { id: string } }>('/admin/accounts/:id', async (req) => send(bank.getAccount(req.params.id)));
   app.get<{ Params: { id: string } }>('/admin/accounts/:id/statement', async (req) => send(bank.getStatement(req.params.id)));
   app.get('/admin/notifications', async () => bank.notifications);
-  app.post<{ Body: { failNextPostings: number } }>('/admin/faults', async (req) => {
+  app.post<{ Body: { failNextPostings: number; customers?: string[] } }>('/admin/faults', async (req) => {
     bank.failNextPostings = req.body.failNextPostings;
-    return { failNextPostings: bank.failNextPostings };
+    bank.faultCustomers = req.body.customers?.length ? new Set(req.body.customers) : undefined;
+    return { failNextPostings: bank.failNextPostings, customers: req.body.customers ?? null };
   });
 
   return app;
