@@ -194,6 +194,8 @@ export const BankConfigSchema = z.object({
     buyRate: decimalString,
     sellRate: decimalString,
     base: z.enum(['effective', 'book']),
+    /** Rates for precious metal pairs (gold, silver, platinum), which may diverge from the FX rates. */
+    metals: z.object({ buyRate: decimalString, sellRate: decimalString }).default({ buyRate: '0.002', sellRate: '0.002' }),
   }),
   rounding: z.enum(['HALF_UP', 'HALF_EVEN', 'DOWN', 'UP']),
   validity: z.object({
@@ -242,7 +244,7 @@ const BASE_CONFIG: BankConfig = {
   },
   balanceMode: 'block',
   pairs: [],
-  tax: { buyRate: '0.002', sellRate: '0.002', base: 'effective' },
+  tax: { buyRate: '0.002', sellRate: '0.002', base: 'effective', metals: { buyRate: '0.002', sellRate: '0.002' } },
   rounding: 'HALF_UP',
   validity: { options: ['DAY', 'GTD', 'GTC'], maxValidityDays: 30 },
   // Open around the clock so the prototype can be demoed any time; banks set real hours.

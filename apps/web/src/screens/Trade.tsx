@@ -197,7 +197,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
     if (!buy) return setDraft((d) => ({ ...d, qty: toInputText(payAccount.available, locale) }));
     // Largest whole amount whose all-in total fits the TRY balance.
     if (!quote && !price) return;
-    const unit = Number(quote?.effectivePrice ?? price) * (1 + Number(config.tax.buyRate));
+    const unit = Number(quote?.effectivePrice ?? price) * (1 + Number((pair.tax ?? config.tax).buyRate));
     const max = Math.floor(Number(payAccount.available) / unit);
     if (max > 0) setDraft((d) => ({ ...d, qty: String(max) }));
   };

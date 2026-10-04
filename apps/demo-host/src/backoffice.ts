@@ -148,10 +148,19 @@ const SECTIONS: Section[] = [
     assumptions: ['tax'],
     groups: () => [
       {
+        title: 'Döviz',
         fields: [
           { kind: 'pct', path: ['tax', 'buyRate'], label: 'Alıcıdan', help: 'Binde 2 için 0,2 girin' },
           { kind: 'pct', path: ['tax', 'sellRate'], label: 'Satıcıdan' },
           { kind: 'select', path: ['tax', 'base'], label: 'Matrah', options: [['effective', 'Komisyon dahil tutar'], ['book', 'Kitap fiyatı tutarı']] },
+        ],
+      },
+      {
+        title: 'Kıymetli madenler (altın, gümüş, platin)',
+        note: 'Döviz oranlarından ayrı tutulur; matrah yukarıdakiyle aynıdır.',
+        fields: [
+          { kind: 'pct', path: ['tax', 'metals', 'buyRate'], label: 'Alıcıdan', help: 'Binde 2 için 0,2 girin' },
+          { kind: 'pct', path: ['tax', 'metals', 'sellRate'], label: 'Satıcıdan' },
         ],
       },
     ],

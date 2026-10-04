@@ -10,6 +10,7 @@ import {
   type QuoteBreakdown,
   type RoundingMode,
   type Side,
+  taxRates,
 } from '@p2p/shared';
 
 /**
@@ -45,7 +46,7 @@ export function pricingParams(config: BankConfig, pair: PairConfig, side: Side):
     baseDecimals: pair.baseDecimals,
     quoteDecimals: pair.quoteDecimals,
     commissionPerUnit: BigInt(bips) * parsePrice(pair.bipSize),
-    taxRate: parsePrice(side === 'BUY' ? config.tax.buyRate : config.tax.sellRate),
+    taxRate: parsePrice(taxRates(config, pair)[side === 'BUY' ? 'buyRate' : 'sellRate']),
     taxBase: config.tax.base,
     rounding: config.rounding,
   };

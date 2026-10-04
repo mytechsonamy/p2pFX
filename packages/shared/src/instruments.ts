@@ -125,6 +125,15 @@ export const INSTRUMENTS: Record<string, Instrument> = Object.fromEntries(
 
 const METALS = new Set(['XAU', 'XAG', 'XPT', 'XPD']);
 
+/** Gold, silver, platinum, palladium (catalog kind or ISO 4217 metal code). */
+export const isMetal = (code: string) => INSTRUMENTS[code]?.kind === 'metal' || METALS.has(code);
+
+/** Kambiyo vergisi rates that apply to a pair: the precious metal rates for a metal, the FX rates otherwise. */
+export function taxRates(config: BankConfig, pair: { base: string }): { buyRate: string; sellRate: string } {
+  const r = isMetal(pair.base) ? config.tax.metals : config.tax;
+  return { buyRate: r.buyRate, sellRate: r.sellRate };
+}
+
 /** Rounds to one significant digit: 3456 → 3000, 0.0026 → 0.003. */
 const nice = (v: number) => {
   const p = 10 ** Math.floor(Math.log10(v));
@@ -143,7 +152,7 @@ export function instrument(code: string, rate?: number): Instrument {
   return {
     code,
     name: code,
-    kind: METALS.has(code) ? 'metal' : 'fx',
+    kind: isMetal(code) ? 'metal' : 'fx',
     decimals: 2,
     tickSize: dec(Math.max(0.0001, pow10(r * 2e-6))),
     bipSize: dec(Math.max(0.0001, pow10(r * 2e-4))),

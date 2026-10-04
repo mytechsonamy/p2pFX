@@ -25,6 +25,8 @@ export interface PairInfo {
   priceBandPct: string;
   /** Value of one bip in quote currency, e.g. "0.01". */
   bipSize: string;
+  /** Kambiyo vergisi for this pair (precious metals have their own rates). */
+  tax?: { buyRate: string; sellRate: string };
   commissionPerUnit: { buy: string; sell: string };
 }
 

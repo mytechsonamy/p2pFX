@@ -77,6 +77,29 @@ describe('instruments and pairs', () => {
     expect(fill).toMatchObject({ qty: '10.50', effectivePrice: '6335.00', commission: '52.50' });
     expect((await h.balance('mehmet', 'XAU')).balance).toBe(parseDecimal('10.5', 2));
     expect((await h.balance('ayse', 'XAU')).balance).toBe(parseDecimal('14.5', 2));
+    // Kambiyo vergisi at the metals rate (binde 2 by default) on 10.5 × 6,335.00.
+    expect(fill.tax).toBe('133.04');
+  });
+
+  it('taxes precious metals at their own rates', async () => {
+    await start();
+    await h.setConfig((c) => ({ ...c, tax: { ...c.tax, metals: { buyRate: '0', sellRate: '0.001' } } }));
+    const viewer = await h.login('viewer');
+    const pairs = (await h.req('GET', '/v1/config', viewer)).body.pairs;
+    expect(pairs.map((p: { symbol: string; tax: unknown }) => [p.symbol, p.tax])).toEqual([
+      ['USDTRY', { buyRate: '0.002', sellRate: '0.002' }],
+      ['XAUTRY', { buyRate: '0', sellRate: '0.001' }],
+    ]);
+
+    h.customer('ayse', { XAU: '25', TRY: '0' });
+    h.customer('mehmet', { XAU: '0', TRY: '200000' });
+    const [ayse, mehmet] = [await h.login('ayse'), await h.login('mehmet')];
+    await h.place(ayse, { pair: 'XAUTRY', side: 'SELL', qty: '10.5', price: '6330.00' });
+    await h.place(mehmet, { pair: 'XAUTRY', side: 'BUY', qty: '10.5', price: '6330.00' });
+    await h.ctx.exchange.idle();
+    expect((await h.req('GET', '/v1/fills', mehmet)).body[0].tax).toBe('0.00');
+    // Seller: 10.5 × (6,330.00 − 5.00) × binde 1.
+    expect((await h.req('GET', '/v1/fills', ayse)).body[0].tax).toBe('66.41');
   });
 });
 
