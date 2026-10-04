@@ -21,7 +21,7 @@ Each bank runs its own isolated copy of the platform (its own deployment and dat
 | Language | TypeScript end to end (pnpm monorepo) | One language for backend, SDK and UI; shared API types |
 | Backend | Node 20 + Fastify, Zod | Simple, fast, good WebSocket support |
 | Database | Postgres 16 | Orders, trades, settlement records, audit; `LISTEN/NOTIFY` for live updates |
-| Money math | Amounts as `bigint` minor units; prices as decimal strings with `decimal.js` | No floating point near money |
+| Money math | Amounts as `bigint` minor units; prices and rates as `bigint` fixed-point with 8 decimals | No floating point near money |
 | Matching | In-process, one single-threaded worker per currency pair, price-time priority | Deterministic and easy to audit; enough for a bank's retail volume |
 | Embedding | React + Vite web app in the bank app's WebView, thin native bridges (iOS, Android, React Native) | Works with any bank app stack |
 | Auth | Bank-signed launch token exchanged for a platform session | Customer is already logged in to the bank app |
@@ -96,7 +96,7 @@ Flow per fill (saga with idempotency):
 4. Mark `SETTLED`, update orders, notify both customers, generate receipts (dekont) through the core.
 5. If a leg fails after holds were placed (should be rare, since holds guarantee funds), retry with backoff; if it still fails, reverse any posted leg and mark `FAILED_NEEDS_REVIEW` for the operations screen.
 
-In `block` mode the matching worker can keep matching while settlements post, because funds are already held. In `no_block` mode it waits for both holds on each fill before taking the next match, so the book stays consistent.
+The prototype settles each fill inside the pair's matching worker before taking the next match, in both modes. That keeps hold adjustments simple (a partially filled buy order's hold is shrunk to what its remainder needs, at its limit price, right after each fill). A bank with higher volume can move settlement to its own queue in `block` mode, since funds are already held.
 
 ## 7. Bank integration (`CoreBankingAdapter`)
 
@@ -135,8 +135,8 @@ Customer identity and KYC stay at the bank. The launch token carries `customer_r
 ## 9. Data model
 
 - `customers` (id, customer_ref, segment)
-- `pairs` (symbol, base, quote, tick_size, min_qty, price_band_pct, enabled)
-- `orders` (id, customer_id, pair, side, book_price, qty, filled_qty, validity `DAY|GTD|GTC`, expires_at, fx_account_ref, try_account_ref, hold_id, status `OPEN|PARTIAL|FILLED|CANCELLED|EXPIRED`, cancel_reason, created_at)
+- pairs live in `config` (symbol, base, quote, decimals, tick size, min qty, price band, commission bips, bip size, enabled)
+- `orders` (id, customer_id, pair, side, book_price, qty, filled_qty, validity `DAY|GTD|GTC`, expires_at, fx_account_id, try_account_id, hold_id, status `NEW|QUEUED|OPEN|PARTIAL|FILLED|CANCELLED|EXPIRED|REJECTED`, cancel_reason, pricing snapshot (commission and tax the customer confirmed), config_version, balance_mode, idempotency_key, created_at)
 - `fills` (id, pair, maker_order_id, taker_order_id, book_price, qty, buyer_effective_price, seller_effective_price, buyer_commission, seller_commission, buyer_tax, seller_tax, created_at)
 - `settlements` (id, fill_id, leg `BANK_BUY|BANK_SELL`, idempotency_key unique, core_txn_ref, receipt_ref, status `PENDING|SETTLED|FAILED_NEEDS_REVIEW|REVERSED`, attempts, last_error)
 - `config` (versioned jsonb: branding, pairs, commission, tax, balanceMode, validity options, trading hours, limits)
@@ -198,4 +198,4 @@ p2p-exchange/
 
 ## 15. Open questions
 
-- Which GitHub repository should the code go in? One needs to be attached to the project before the backend work starts.
+- Kambiyo vergisi default is 0.2% on both sides in the prototype config; the real rate and whether the seller side is taxed must be confirmed per bank.

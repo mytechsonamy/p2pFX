@@ -1,0 +1,12 @@
+{
+  "name": "@p2p/core-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "dependencies": {
+    "@p2p/pricing": "workspace:*",
+    "@p2p/shared": "workspace:*"
+  }
+}

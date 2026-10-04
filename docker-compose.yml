@@ -1,0 +1,33 @@
+# Prototype stack: Postgres, the mock core banking system and the P2P API.
+# Run `pnpm dev:keys` first to create .env with the demo bank key pair and secrets.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: p2pfx
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 20
+
+  mock-core:
+    build: .
+    command: ["node", "--import", "tsx", "apps/mock-core/src/main.ts"]
+    environment:
+      PORT: "4100"
+      SEED_DEMO: "1"
+    ports: ["4100:4100"]
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/p2pfx
+      CORE_BANKING_URL: http://mock-core:4100
+      PORT: "4000"
+    ports: ["4000:4000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      mock-core: { condition: service_started }
