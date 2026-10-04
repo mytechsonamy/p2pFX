@@ -31,16 +31,35 @@ export function formatDecimal(value: string, locale: string, minFraction = 2, ma
   return (neg ? '-' : '') + grouped + (f ? decimal + f : '');
 }
 
-/** Prices: 2 to 4 fraction digits (tick size is 0.0001). */
-/** Exchange rates are shown with four decimals, as banks publish them (49,1500). */
-export const formatPrice = (value: string, locale: string) => formatDecimal(value, locale, 4);
+/**
+ * Exchange rates are shown with four decimals, as banks publish them (49,1500); prices of a thousand lira and
+ * more (a gram of gold or platinum) with two (6.320,50).
+ */
+export const formatPrice = (value: string, locale: string) => formatDecimal(value, locale, Math.abs(Number(value)) >= 1000 ? 2 : 4);
 
-export function formatMoney(value: string, currency: string, locale: string, decimals = 2) {
+const METALS: Record<string, { tr: string; en: string }> = {
+  XAU: { tr: 'Altın', en: 'Gold' },
+  XAG: { tr: 'Gümüş', en: 'Silver' },
+  XPT: { tr: 'Platin', en: 'Platinum' },
+  XPD: { tr: 'Paladyum', en: 'Palladium' },
+};
+const DECIMALS: Record<string, number> = { JPY: 0 };
+
+export const isMetal = (code: string) => code in METALS;
+/** What the customer buys or sells: "Altın" for XAU, the currency code otherwise. */
+export const assetName = (code: string, locale = 'tr-TR') => METALS[code]?.[locale.startsWith('tr') ? 'tr' : 'en'] ?? code;
+/** Unit an amount is shown in: grams for metals (priced in TRY per gram), the currency code otherwise. */
+export const unitOf = (code: string) => (isMetal(code) ? 'gr' : code);
+/** Tab and title label: "USD/TRY", or "Altın (gr)" for a metal. */
+export const pairLabel = (p: { base: string; quote: string }, locale = 'tr-TR') =>
+  isMetal(p.base) ? `${assetName(p.base, locale)} (gr)` : `${p.base}/${p.quote}`;
+
+export function formatMoney(value: string, currency: string, locale: string, decimals = DECIMALS[currency] ?? 2) {
   return `${formatDecimal(value, locale, decimals)} ${currencySymbol(currency)}`;
 }
 
 export function currencySymbol(currency: string) {
-  return ({ TRY: 'TL', USD: 'USD', EUR: 'EUR', GBP: 'GBP' } as Record<string, string>)[currency] ?? currency;
+  return currency === 'TRY' ? 'TL' : unitOf(currency);
 }
 
 /** `0.002` → `%0,2` in Turkish, `0.2%` in English. */

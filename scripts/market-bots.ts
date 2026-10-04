@@ -1,5 +1,5 @@
 // Demo order bots: keep every pair's board alive while the demo runs. Each tick a bot (demo-mm-*) posts a
-// passive order a few kuruş off the reference rate, cancels a stale one, or trades with another bot inside
+// passive order a few bips off the reference rate, cancels a stale one, or trades with another bot inside
 // the spread so the last price, chart and trade tape move.
 //
 // Bots never take a customer's order: passive orders are priced so they cannot cross the book, and bot
@@ -31,8 +31,12 @@ interface Order {
 
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 const pick = <T>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)];
-const cents = (v: number) => Math.round(v * 100);
-const price = (c: number) => (c / 100).toFixed(2);
+const decimalsOf = (v: string) => (v.split('.')[1] ?? '').length;
+/** Prices on the pair's bip grid (0.01 TRY for USD, 1 TRY for gram gold, 0.0001 for JPY): integer grid units. */
+const grid = (p: Pair) => {
+  const bip = Number(p.bipSize);
+  return { units: (v: number) => Math.round(v / bip), price: (u: number) => (u * bip).toFixed(decimalsOf(p.bipSize)) };
+};
 
 /** The `bots` parameter, re-read every few seconds. */
 let settings!: BotsConfig;
@@ -46,7 +50,7 @@ async function refreshSettings() {
 const lot = (p: Pair) => {
   const l = settings.lots[p.base] ?? settings.lots.default;
   const step = Number(l.step) || 1;
-  return String(Math.round(rand(Number(l.min), Number(l.max)) / step) * step);
+  return (Math.max(1, Math.round(rand(Number(l.min), Number(l.max)) / step)) * step).toFixed(decimalsOf(l.step));
 };
 
 /** A bot's session; logs in again when its session runs out. */
@@ -82,19 +86,19 @@ async function tick() {
   if (!pairs.length) return;
   const pair = pick(pairs);
   const bot = pick(bots);
-  // Offsets are set in bips of the pair; the bots work in kuruş (0.01).
-  const bipCents = Math.max(1, Math.round(Number(pair.bipSize) * 100));
+  // Offsets are set in bips of the pair; the bots work in whole bips.
+  const { units: bips, price } = grid(pair);
   const [book, rate] = await viewer.call((t) =>
     Promise.all([api('GET', `/v1/pairs/${pair.symbol}/book`, t), api('GET', `/v1/pairs/${pair.symbol}/rate`, t)]),
   );
-  const ref = cents(Number(rate.rate));
-  const bestBid = book.bids[0] ? cents(Number(book.bids[0].price)) : undefined;
-  const bestAsk = book.asks[0] ? cents(Number(book.asks[0].price)) : undefined;
+  const ref = bips(Number(rate.rate));
+  const bestBid = book.bids[0] ? bips(Number(book.bids[0].price)) : undefined;
+  const bestAsk = book.asks[0] ? bips(Number(book.asks[0].price)) : undefined;
   const roll = Math.random();
 
   if (roll < settings.tradeShare && bestBid !== undefined && bestAsk !== undefined) {
     // Trade between two bots at a price inside the spread where no order rests, so only they can match.
-    const taken = new Set([...book.bids, ...book.asks].map((l: Level) => cents(Number(l.price))));
+    const taken = new Set([...book.bids, ...book.asks].map((l: Level) => bips(Number(l.price))));
     const free: number[] = [];
     for (let c = bestBid + 1; c < bestAsk; c++) if (!taken.has(c)) free.push(c);
     if (!free.length) return;
@@ -119,7 +123,7 @@ async function tick() {
 
   // Passive order offsetBips away from the reference rate, never crossing the other side of the book.
   const side = Math.random() < 0.5 ? 'BUY' : 'SELL';
-  const offset = Math.round(rand(settings.offsetBips.min, Math.max(settings.offsetBips.min, settings.offsetBips.max))) * bipCents;
+  const offset = Math.round(rand(settings.offsetBips.min, Math.max(settings.offsetBips.min, settings.offsetBips.max)));
   let at = side === 'BUY' ? ref - offset : ref + offset;
   if (side === 'BUY' && bestAsk !== undefined) at = Math.min(at, bestAsk - 2);
   if (side === 'SELL' && bestBid !== undefined) at = Math.max(at, bestBid + 2);

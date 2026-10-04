@@ -1,4 +1,4 @@
-import { formatDecimal } from '@p2p/shared';
+import { INSTRUMENTS, formatDecimal } from '@p2p/shared';
 import {
   CoreBankingError,
   type CoreAccount,
@@ -48,8 +48,12 @@ interface Txn {
 
 export const BANK_REF = 'BANK';
 
-const DECIMALS: Record<string, number> = { JPY: 0 };
-const decimalsOf = (ccy: string) => DECIMALS[ccy] ?? 2;
+/** Account decimals: grams to 0.01 for metals, none for JPY, 2 otherwise. */
+export const decimalsOf = (ccy: string) => INSTRUMENTS[ccy]?.decimals ?? 2;
+const accountName = (ccy: string) => {
+  const i = INSTRUMENTS[ccy];
+  return i?.kind === 'metal' ? `${i.name.replace(/ \(gram\)$/, '')} Hesabı (gr)` : `${ccy} Vadesiz`;
+};
 
 /**
  * In-memory core banking system for the prototype and tests: customer accounts,
@@ -84,7 +88,7 @@ export class MockCoreBank implements CoreBankingAdapter {
       customerRef,
       currency,
       decimals: decimalsOf(currency),
-      name: name ?? `${currency} Vadesiz`,
+      name: name ?? accountName(currency),
       iban: currency === 'TRY' ? `TR${String(this.seq).padStart(24, '0')}` : undefined,
       balance,
       allowNegative: customerRef === BANK_REF,
@@ -103,6 +107,11 @@ export class MockCoreBank implements CoreBankingAdapter {
   referenceRate(pair: string): number | undefined {
     const r = this.rates.get(pair);
     return r ? Number(r.rate) : undefined;
+  }
+
+  /** Pairs with a reference rate: what the simulated LPs quote. */
+  referencePairs(): string[] {
+    return [...this.rates.keys()];
   }
 
   bankAccounts(): CoreAccount[] {

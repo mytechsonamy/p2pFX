@@ -7,7 +7,7 @@ type Path = (string | number)[];
 type Cfg = Record<string, any>;
 
 type Field =
-  | { kind: 'int' | 'number'; path: Path; label: string; unit?: string; help?: string; min?: number; max?: number; step?: number }
+  | { kind: 'int' | 'number'; path: Path; label: string; unit?: string; help?: string; min?: number; max?: number; step?: number; optional?: boolean; placeholder?: string }
   | { kind: 'decimal'; path: Path; label: string; unit?: string; help?: string; optional?: boolean; placeholder?: string }
   /** A fraction stored as a decimal string ("0.002"), edited as a percentage ("0,2"). */
   | { kind: 'pct'; path: Path; label: string; help?: string }
@@ -37,7 +37,21 @@ interface Section {
   groups?: (c: Cfg) => Group[];
   /** Keyed record that can take new entries, e.g. customer segments. */
   addKey?: { label: string; record: Path; template: (c: Cfg) => unknown };
+  /** Extra content above the groups. */
+  header?: (c: Cfg) => string;
   view?: () => Promise<string>;
+}
+
+/** A pair the LPs quote (GET /ops/instruments). */
+interface Instrument {
+  symbol: string;
+  base: string;
+  quote: string;
+  name: string;
+  kind: 'fx' | 'metal';
+  mid: string | null;
+  configured: boolean;
+  enabled: boolean;
 }
 
 interface Assumption {
@@ -87,6 +101,8 @@ let operator: Operator | undefined;
 let live: { version: number; data: Cfg } | undefined;
 let draft: Cfg | undefined;
 let assumptions: Assumption[] = [];
+let instruments: Instrument[] = [];
+const nameOf = (base: string) => instruments.find((i) => i.base === base)?.name;
 let active = location.hash.slice(1) || 'overview';
 let errors: string[] = [];
 
@@ -107,11 +123,12 @@ const SECTIONS: Section[] = [
   {
     id: 'pairs',
     title: 'Pariteler ve komisyon',
-    intro: 'P2P eşleşmelerde bankanın taraf başı komisyonu ve parite kuralları. Komisyon kitap fiyatına eklenir (alıcı) veya düşülür (satıcı) ve onaydan önce müşteriye gösterilir.',
+    intro: 'Likidite sağlayıcıların fiyat verdiği döviz ve kıymetli madenler, işleme açık olup olmadıkları, P2P eşleşmelerde bankanın taraf başı komisyonu ve parite kuralları. Komisyon kitap fiyatına eklenir (alıcı) veya düşülür (satıcı) ve onaydan önce müşteriye gösterilir.',
     assumptions: ['commission'],
+    header: pairsTable,
     groups: (c) =>
       c.pairs.map((p: Cfg, i: number) => ({
-        title: `${p.base}/${p.quote}`,
+        title: `${p.base}/${p.quote}${nameOf(p.base) && nameOf(p.base) !== p.base ? ` · ${nameOf(p.base)}` : ''}${p.enabled ? '' : ' · işleme kapalı'}`,
         note: commissionNote(p),
         fields: [
           { kind: 'bool', path: ['pairs', i, 'enabled'], label: 'İşleme açık' },
@@ -349,6 +366,9 @@ function limitFields(base: Path): Field[] {
   return [
     { kind: 'decimal', path: [...base, 'maxOrderNotional'], label: 'Tek emir üst sınırı', unit: 'TL' },
     { kind: 'decimal', path: [...base, 'maxDailyNotional'], label: 'Günlük toplam', unit: 'TL' },
+    ...(base.includes('segments')
+      ? ([{ kind: 'int', path: [...base, 'maxOrdersPerWindow'], label: 'Emir sıklığı sınırı', unit: 'emir / pencere', min: 1, optional: true, placeholder: 'genel sınır', help: 'Boşsa genel emir sıklığı sınırı geçerli' }] as Field[])
+      : []),
   ];
 }
 function marginFields(base: Path): Field[] {
@@ -357,6 +377,30 @@ function marginFields(base: Path): Field[] {
     { kind: 'int', path: [...base, 'sellBips'], label: 'Müşteri satarken', unit: 'bip', min: 0 },
   ];
 }
+/** Every instrument the LPs quote: open or closed for trading here, or not set up yet (added with one click). */
+function pairsTable(c: Cfg) {
+  const edit = canEdit(operator);
+  const configured = c.pairs.map((p: Cfg, i: number) => {
+    const lp = instruments.find((x) => x.symbol === p.symbol);
+    const changed = JSON.stringify(live?.data.pairs.find((q: Cfg) => q.symbol === p.symbol)?.enabled) !== JSON.stringify(p.enabled);
+    return `<tr class="${changed ? 'changed' : ''}"><td><strong>${esc(p.base)}/${esc(p.quote)}</strong></td><td>${esc(nameOf(p.base) ?? '')}</td>
+      <td class="num">${lp?.mid ? esc(trNum(lp.mid)) : '<em>LP fiyatı yok</em>'}</td>
+      <td>${p.enabled ? '<span class="badge ok">İşleme açık</span>' : '<span class="badge">Kapalı</span>'}</td>
+      <td>${edit ? `<button class="secondary small" data-toggle-pair="${i}">${p.enabled ? 'Kapat' : 'İşleme aç'}</button>` : ''}</td></tr>`;
+  });
+  const extra = instruments
+    .filter((x) => !x.configured)
+    .map(
+      (x) => `<tr class="muted"><td><strong>${esc(x.base)}/${esc(x.quote)}</strong></td><td>${esc(x.name)}</td>
+      <td class="num">${x.mid ? esc(trNum(x.mid)) : ''}</td><td><span class="badge">Tanımlı değil</span></td>
+      <td>${edit ? `<button class="secondary small" data-add-pair="${esc(x.symbol)}">Parite ekle</button>` : ''}</td></tr>`,
+    );
+  return `<section class="card"><h2>Likidite sağlayıcıların fiyat verdiği kurlar</h2>
+    <p class="note">Açık pariteler müşteri ekranında görünür ve işlem görür. Kapatılan paritede yeni emir alınmaz, bankanın tahtadaki emirleri çekilir; müşterilerin bekleyen emirleri iptal edilene ya da süresi dolana kadar kalır. Eklenen parite önerilen ayarlarla <strong>kapalı</strong> gelir: komisyon ve kuralları kontrol edip açın.</p>
+    <table class="pairs"><thead><tr><th>Parite</th><th>Ad</th><th class="num">LP orta kur</th><th>Durum</th><th></th></tr></thead>
+    <tbody>${[...configured, ...extra].join('')}</tbody></table></section>`;
+}
+
 function commissionNote(p: Cfg) {
   const bip = Number(p.bipSize);
   if (!bip) return '';
@@ -433,7 +477,7 @@ function fieldHtml(f: Field, c: Cfg) {
       input = `<input ${attrs} value="${esc(v === undefined ? '' : trNum(v))}" inputmode="decimal" placeholder="${esc(f.placeholder ?? '')}"/>${unit}`;
       break;
     default:
-      input = `<input type="number" ${attrs} value="${esc(v)}" ${f.min !== undefined ? `min="${f.min}"` : ''} ${f.max !== undefined ? `max="${f.max}"` : ''} step="${f.step ?? 1}" class="short"/>${unit}`;
+      input = `<input type="number" ${attrs} value="${esc(v ?? '')}" placeholder="${esc(f.placeholder ?? '')}" ${f.min !== undefined ? `min="${f.min}"` : ''} ${f.max !== undefined ? `max="${f.max}"` : ''} step="${f.step ?? 1}" class="short"/>${unit}`;
   }
   return `<div class="field${changed}"><label for="${esc(id)}">${esc(f.label)}</label><div class="control">${input}</div>${help}</div>`;
 }
@@ -472,6 +516,10 @@ function readInput(el: HTMLElement): { ok: true; value: unknown } | { ok: false;
     case 'int':
     case 'number': {
       const n = Number(fromTr(text));
+      if (text.trim() === '') {
+        const f = findField(path);
+        if (f && 'optional' in f && f.optional) return { ok: true, value: undefined };
+      }
       if (text.trim() === '' || !Number.isFinite(n) || (kind === 'int' && !Number.isInteger(n))) return { ok: false, message: kind === 'int' ? 'tam sayı girin' : 'sayı girin' };
       return { ok: true, value: n };
     }
@@ -523,6 +571,7 @@ function formView(s: Section) {
     ? `<div class="notice warn">Bu bölümdeki varsayılanlar henüz banka tarafından onaylanmadı: ${open.map((a) => esc(a.label)).join(', ')}.
         ${canEdit(operator) ? `Değeri değiştirip kaydedebilir ya da olduğu gibi onaylayabilirsiniz. <button class="secondary" data-confirm="${open.map((a) => a.key).join(',')}">Mevcut değerleri onayla</button>` : ''}</div>`
     : '';
+  const header = s.header?.(c) ?? '';
   const groups = (s.groups?.(c) ?? [])
     .map(
       (g) => `<section class="card">
@@ -540,7 +589,7 @@ function formView(s: Section) {
   const bar = canEdit(operator)
     ? `<div class="savebar ${dirty() ? 'show' : ''}"><span>Kaydedilmemiş değişiklikler var</span><button class="secondary" id="discard">Vazgeç</button><button id="save">Değişiklikleri gözden geçir</button></div>`
     : `<div class="notice">Sadece görüntüleme yetkiniz var.</div>`;
-  return `${warn}${errs}${groups}${add}${bar}`;
+  return `${warn}${errs}${header}${groups}${add}${bar}`;
 }
 
 // ---- views ----
@@ -681,7 +730,11 @@ const reasonField = (placeholder: string) =>
 // ---- actions ----
 
 async function refresh() {
-  [live, assumptions] = await Promise.all([opsFetch('GET', '/config'), opsFetch<Assumption[]>('GET', '/config/assumptions')]);
+  [live, assumptions, instruments] = await Promise.all([
+    opsFetch('GET', '/config'),
+    opsFetch<Assumption[]>('GET', '/config/assumptions'),
+    opsFetch<Instrument[]>('GET', '/instruments').catch(() => []),
+  ]);
   draft = structuredClone(live!.data);
 }
 
@@ -785,6 +838,12 @@ app.addEventListener('click', async (e) => {
     return render();
   }
   if (el.dataset.confirm) return confirmAssumptions(el.dataset.confirm.split(','));
+  if (el.dataset.togglePair) {
+    const path = ['pairs', Number(el.dataset.togglePair), 'enabled'];
+    set(draft, path, !get(draft, path));
+    return render();
+  }
+  if (el.dataset.addPair) return addPair(el.dataset.addPair);
   if (el.dataset.revert) {
     const v = Number(el.dataset.revert);
     const data = (await opsFetch('GET', `/config/versions/${v}`)).data;
@@ -809,6 +868,25 @@ app.addEventListener('click', async (e) => {
     await opsFetch('PATCH', `/users/${row.dataset.user}`, { password: String(form.get('password')) }).then(() => toast('Şifre değiştirildi'), (err) => toast(err.message));
   }
 });
+
+/** Sets up a pair the LPs quote, closed for trading, as a new configuration version. */
+async function addPair(symbol: string) {
+  if (dirty()) return toast('Önce kaydedilmemiş değişiklikleri kaydedin ya da vazgeçin');
+  const x = instruments.find((i) => i.symbol === symbol);
+  const label = `${symbol.slice(0, 3)}/${symbol.slice(3)}`;
+  const form = await dialog(`<h2>${esc(label)} eklensin mi?</h2>
+    <p class="note">${esc(x?.name ?? '')} önerilen ayarlarla <strong>işleme kapalı</strong> eklenir: 5 bip komisyon, fiyat adımı, en küçük emir, pozisyon limiti, hedge parçası, bankanın tahtadaki kademeleri. Kontrol edip "İşleme aç" ile açarsınız.</p>
+    ${reasonField(`Örn. ${label} müşteri talebi`)}`);
+  if (!form) return;
+  try {
+    await opsFetch('POST', '/pairs', { symbol, reason: String(form.get('reason')) });
+    await refresh();
+    toast(`${label} eklendi (işleme kapalı)`);
+  } catch (err) {
+    toast((err as Error).message);
+  }
+  render();
+}
 
 async function confirmAssumptions(keys: string[], reason?: string) {
   if (reason === undefined) {

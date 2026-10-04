@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useExchange, usePair } from '../store';
 import { Breakdown, Row, Segmented, Sheet } from '../components';
-import { compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
+import { assetName, compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
 import { endOfDay, localDate } from '../time';
 import { newIdempotencyKey, type PlaceOrder } from '../api';
 import { BankRow, BetterAtBank } from '../bank';
@@ -109,7 +109,7 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
       </div>
       <div className="book-cols">
         <span>{t('book.price')} ({currencySymbol(pair.quote)})</span>
-        <span>{t('book.qty')} ({pair.base})</span>
+        <span>{t('book.qty')} ({currencySymbol(pair.base)})</span>
         <span>#</span>
       </div>
       <div className="side-label sell-text">{t('book.asks')}</div>
@@ -170,7 +170,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
   const missingAccount = accounts.length > 0 && (!fxAccount || !tryAccount) ? (!fxAccount ? pair.base : pair.quote) : undefined;
 
   const problems: string[] = [];
-  if (qty && compareDecimal(qty, pair.minQty) < 0) problems.push(t('ticket.minQty', { min: formatDecimal(pair.minQty, locale, 0, pair.baseDecimals), base: pair.base }));
+  if (qty && compareDecimal(qty, pair.minQty) < 0) problems.push(t('ticket.minQty', { min: formatDecimal(pair.minQty, locale, 0, pair.baseDecimals), base: currencySymbol(pair.base) }));
   if (price && rate && (compareDecimal(price, rate.bandLow) < 0 || compareDecimal(price, rate.bandHigh) > 0)) problems.push(t('error.PRICE_OUT_OF_BAND'));
   if (quote && payAccount && compareDecimal(buy ? quote.total : quote.qty, payAccount.available) > 0) problems.push(t('ticket.insufficient'));
   if (error) problems.push(error);
@@ -208,13 +208,13 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
         value={draft.side}
         onChange={(side) => setDraft((d) => ({ ...d, side, priceTouched: false }))}
         options={[
-          { value: 'BUY', label: t('ticket.buyTitle', { base: pair.base }), tone: 'buy' },
-          { value: 'SELL', label: t('ticket.sellTitle', { base: pair.base }), tone: 'sell' },
+          { value: 'BUY', label: t('ticket.buyTitle', { base: assetName(pair.base, locale) }), tone: 'buy' },
+          { value: 'SELL', label: t('ticket.sellTitle', { base: assetName(pair.base, locale) }), tone: 'sell' },
         ]}
       />
 
       <label className="field">
-        <span>{t('ticket.qty', { base: pair.base })}</span>
+        <span>{t('ticket.qty', { base: currencySymbol(pair.base) })}</span>
         <div className="input-wrap">
           <input
             inputMode="decimal"
@@ -222,7 +222,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
             value={draft.qty}
             onChange={(e) => setDraft((d) => ({ ...d, qty: sanitizeAmountInput(e.target.value, pair.baseDecimals) }))}
           />
-          <span className="suffix">{pair.base}</span>
+          <span className="suffix">{currencySymbol(pair.base)}</span>
         </div>
         {payAccount && (
           <small className="hint">
@@ -281,7 +281,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
 
       {missingAccount && (
         <div className="notice">
-          {t('accounts.missing', { currency: missingAccount })}{' '}
+          {t('accounts.missing', { currency: assetName(missingAccount, locale) })}{' '}
           <button className="link" onClick={() => bridge.send({ type: 'openBankScreen', screen: 'openFxAccount', params: { currency: missingAccount } })}>
             {t('accounts.openFx')}
           </button>
@@ -320,7 +320,7 @@ function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInf
   const buy = order.side === 'BUY';
   const fx = accounts.find((a) => a.currency === pair.base);
   const tl = accounts.find((a) => a.currency === pair.quote);
-  const qtyText = `${formatDecimal(order.qty, locale, pair.baseDecimals)} ${pair.base}`;
+  const qtyText = `${formatDecimal(order.qty, locale, pair.baseDecimals)} ${currencySymbol(pair.base)}`;
 
   useEffect(() => track('order_review', { pair: order.pair, side: order.side }), [track, order.pair, order.side]);
 

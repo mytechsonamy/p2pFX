@@ -56,11 +56,12 @@ export interface AppContext {
   entry: OrderEntry;
   scheduler: Scheduler;
   clock: () => Date;
-  rateLimit: (customerId: string) => void;
+  rateLimit: (customerId: string, segment?: string) => void;
   prices: PriceEngine;
   positions: PositionKeeper;
   dealing: DealingService;
   bankBook: BankBook;
+  liquidity: LiquidityAdapter;
 }
 
 export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance; ctx: AppContext; close: () => Promise<void> }> {
@@ -89,8 +90,10 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   // Per-customer order entry rate limit (sliding window, in memory).
   const hits = new Map<string, number[]>();
-  const rateLimit = (customerId: string) => {
-    const { max, windowSeconds } = config.get().data.orderRateLimit;
+  const rateLimit = (customerId: string, segment?: string) => {
+    const c = config.get().data;
+    const { windowSeconds } = c.orderRateLimit;
+    const max = (segment && c.limits.segments[segment]?.maxOrdersPerWindow) || c.orderRateLimit.max;
     const now = clock().getTime();
     const recent = (hits.get(customerId) ?? []).filter((t) => t > now - windowSeconds * 1000);
     if (recent.length >= max) throw new ApiError(429, 'RATE_LIMITED', 'too many orders, try again shortly');
@@ -98,7 +101,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     hits.set(customerId, recent);
   };
 
-  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook };
+  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook, liquidity: opts.liquidity };
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ApiError) {

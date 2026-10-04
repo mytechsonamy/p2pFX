@@ -154,7 +154,7 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
 
   app.post('/v1/orders', async (req, reply) => {
     const session = await auth.customer(req);
-    ctx.rateLimit(session.customerId);
+    ctx.rateLimit(session.customerId, session.segment);
     const body = parse(PlaceOrderSchema, req.body);
     const result = await entry.place(session, body, req.headers['idempotency-key'] as string | undefined);
     return reply.status(result.replayed ? 200 : 201).send(result.order);

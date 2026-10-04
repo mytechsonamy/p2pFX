@@ -1,6 +1,6 @@
 import { useExchange } from '../store';
 import { Row } from '../components';
-import { formatMoney } from '../format';
+import { assetName, formatMoney } from '../format';
 
 export function AccountsScreen() {
   const { accounts, t, locale, bridge, config } = useExchange();
@@ -24,7 +24,7 @@ export function AccountsScreen() {
       ))}
       {missing.map((c) => (
         <div key={c} className="notice">
-          {t('accounts.missing', { currency: c })}{' '}
+          {t('accounts.missing', { currency: assetName(c, locale) })}{' '}
           <button className="link" onClick={() => bridge.send({ type: 'openBankScreen', screen: 'openFxAccount', params: { currency: c } })}>
             {t('accounts.openFx')}
           </button>

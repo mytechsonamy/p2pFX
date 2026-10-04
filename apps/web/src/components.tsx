@@ -59,14 +59,14 @@ export function Breakdown({ q, pair, compact }: { q: QuoteBreakdown; pair: PairI
   const price = (v: string) => `${formatPrice(v, locale)} ${currencySymbol(q.currency)}`;
   const buy = q.side === 'BUY';
   const bips = Math.round(Number(q.commissionPerUnit) / Number(pair.bipSize));
-  const qty = `${formatDecimal(q.qty, locale, pair.baseDecimals)} ${pair.base}`;
+  const qty = `${formatDecimal(q.qty, locale, pair.baseDecimals)} ${currencySymbol(pair.base)}`;
   return (
     <div className="breakdown">
       <Row label={t('quote.bookPrice')} value={price(q.bookPrice)} />
       <Row
         label={t('quote.commission')}
         value={`${buy ? '+' : '−'} ${formatPrice(q.commissionPerUnit, locale)}`}
-        hint={t('quote.commissionPerUnit', { amount: price(q.commissionPerUnit), base: pair.base, bips })}
+        hint={t('quote.commissionPerUnit', { amount: price(q.commissionPerUnit), base: currencySymbol(pair.base), bips })}
       />
       <Row label={t('quote.effectivePrice')} value={price(q.effectivePrice)} strong />
       <div className="divider" />

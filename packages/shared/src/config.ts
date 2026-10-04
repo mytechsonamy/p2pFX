@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { withPair } from './instruments.js';
 
 const decimalString = z.string().regex(/^\d+(\.\d+)?$/, 'expected a non-negative decimal string');
 const hhmm = z.string().regex(/^([01]\d|2[0-4]):[0-5]\d$/, 'expected HH:MM');
@@ -31,6 +32,8 @@ export const LimitsSchema = z.object({
   maxOrderNotional: decimalString,
   /** Max total value of orders entered per day, in quote currency at book price. */
   maxDailyNotional: decimalString,
+  /** Orders per `orderRateLimit` window for this segment, instead of `orderRateLimit.max`. */
+  maxOrdersPerWindow: z.number().int().min(1).optional(),
 });
 
 const MarginSchema = z.object({ buyBips: z.number().int().min(0), sellBips: z.number().int().min(0) });
@@ -222,8 +225,13 @@ export function findPair(config: BankConfig, symbol: string): PairConfig | undef
   return config.pairs.find((p) => p.symbol === symbol);
 }
 
-/** Default configuration used by the prototype and as a template for banks. */
-export const DEFAULT_CONFIG: BankConfig = {
+/**
+ * Pairs open in the prototype: the currencies and metals the demo LPs quote that demo customers hold. The LPs
+ * quote a few more, which the back office can add (`withPair`).
+ */
+export const DEFAULT_PAIRS = ['USD', 'EUR', 'GBP', 'CHF', 'JPY', 'CAD', 'AUD', 'SAR', 'XAU', 'XAG', 'XPT'];
+
+const BASE_CONFIG: BankConfig = {
   bank: { code: 'DEMO', name: 'Demo Bank' },
   branding: {
     productName: 'Döviz Pazarı',
@@ -233,19 +241,7 @@ export const DEFAULT_CONFIG: BankConfig = {
     strings: {},
   },
   balanceMode: 'block',
-  pairs: ['USD', 'EUR', 'GBP'].map((base) => ({
-    symbol: `${base}TRY`,
-    base,
-    quote: 'TRY',
-    baseDecimals: 2,
-    quoteDecimals: 2,
-    tickSize: '0.0001',
-    minQty: '1',
-    priceBandPct: '3',
-    commission: { buyBips: 5, sellBips: 5 },
-    bipSize: '0.01',
-    enabled: true,
-  })),
+  pairs: [],
   tax: { buyRate: '0.002', sellRate: '0.002', base: 'effective' },
   rounding: 'HALF_UP',
   validity: { options: ['DAY', 'GTD', 'GTC'], maxValidityDays: 30 },
@@ -263,7 +259,7 @@ export const DEFAULT_CONFIG: BankConfig = {
     segments: {
       premium: { maxOrderNotional: '10000000', maxDailyNotional: '50000000' },
       // Demo order bots; limits a demo never reaches.
-      'market-maker': { maxOrderNotional: '100000000', maxDailyNotional: '100000000000' },
+      'market-maker': { maxOrderNotional: '100000000', maxDailyNotional: '100000000000', maxOrdersPerWindow: 1000 },
     },
   },
   orderRateLimit: { max: 30, windowSeconds: 60 },
@@ -273,6 +269,9 @@ export const DEFAULT_CONFIG: BankConfig = {
   bots: DEFAULT_BOTS,
   bankBook: DEFAULT_BANK_BOOK,
 };
+
+/** Default configuration used by the prototype and as a template for banks. */
+export const DEFAULT_CONFIG: BankConfig = DEFAULT_PAIRS.reduce((c, code) => withPair(c, code, { enabled: true }), BASE_CONFIG);
 
 /**
  * Parameters the prototype ships with defaults the bank has not confirmed yet. The back office flags each

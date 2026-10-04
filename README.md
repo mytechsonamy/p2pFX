@@ -125,7 +125,7 @@ Customer (session bearer token from `POST /v1/session`):
 | `GET /v1/pairs/:pair/history?minutes=` | LP price history |
 | `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `bank:<pair>`, `orders`, `fills` |
 
-Operations (a back office operator's session from `POST /ops/login`, or the `OPS_TOKEN` service bearer): `GET/PUT /ops/config` (with a reason, as a new version), `GET /ops/config/versions`, `POST /ops/config/revert`, `GET /ops/config/assumptions`, `POST /ops/config/assumptions/confirm`, `GET /ops/audit`, `GET/POST/PATCH /ops/users`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`.
+Operations (a back office operator's session from `POST /ops/login`, or the `OPS_TOKEN` service bearer): `GET/PUT /ops/config` (with a reason, as a new version), `GET /ops/config/versions`, `POST /ops/config/revert`, `GET /ops/config/assumptions`, `POST /ops/config/assumptions/confirm`, `GET /ops/audit`, `GET/POST/PATCH /ops/users`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`, `GET /ops/instruments` (what the LPs quote, configured or not), `POST /ops/pairs` (add a quoted pair, closed for trading).
 
 Bank dealing (the bank's own FX desk next to the P2P book: LP aggregation, segment margins, positions,
 auto-hedge) is described in [docs/bank-dealing.md](docs/bank-dealing.md).

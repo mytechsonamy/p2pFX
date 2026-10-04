@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { useExchange, usePair } from '../store';
 import { Empty } from '../components';
-import { addDecimal, compareDecimal, currencySymbol, formatDecimal, formatPrice } from '../format';
+import { addDecimal, compareDecimal, currencySymbol, formatDecimal, formatPrice, pairLabel } from '../format';
 import type { Book, BookLevel, PairInfo, Side } from '../types';
 import { BankRow } from '../bank';
 
@@ -53,7 +53,7 @@ function Summary({ pair }: { pair: PairInfo }) {
         <Stat label={t('board.open')} value={s?.open ? formatPrice(s.open, locale) : '—'} />
         <Stat label={t('board.high')} value={s?.high ? formatPrice(s.high, locale) : '—'} />
         <Stat label={t('board.low')} value={s?.low ? formatPrice(s.low, locale) : '—'} />
-        <Stat label={`${t('board.volume')} (${pair.base})`} value={s ? formatDecimal(s.volume, locale, 0, pair.baseDecimals) : '—'} />
+        <Stat label={`${t('board.volume')} (${currencySymbol(pair.base)})`} value={s ? formatDecimal(s.volume, locale, 0, pair.baseDecimals) : '—'} />
         <Stat label={`${t('board.turnover')} (${q})`} value={s ? formatDecimal(s.turnover, locale, 0, 2) : '—'} />
         <Stat label={t('board.trades')} value={s ? String(s.trades) : '—'} />
       </dl>
@@ -104,7 +104,7 @@ function DepthLadder({ pair }: { pair: PairInfo }) {
       <div className="card-head">
         <h3>{t('board.depth')}</h3>
         <small>
-          {pair.base}/{pair.quote}
+          {pairLabel(pair, locale)}
         </small>
       </div>
       <div className="ladder-grid head">
@@ -250,7 +250,7 @@ function DepthChart({ pair }: { pair: PairInfo }) {
           <path className="line ask" d={model.askPath.line} />
           <text className="tick" x={PAD.l} y={H - 6}>{price(model.lo)}</text>
           <text className="tick" x={W - PAD.r} y={H - 6} textAnchor="end">{price(model.hi)}</text>
-          <text className="tick" x={PAD.l} y={PAD.t - 3}>{qty(model.maxCum)} {pair.base}</text>
+          <text className="tick" x={PAD.l} y={PAD.t - 3}>{qty(model.maxCum)} {currencySymbol(pair.base)}</text>
           {hover && (
             <g>
               <line className="crosshair" x1={x(hover.price)} x2={x(hover.price)} y1={PAD.t} y2={H - PAD.b} />
@@ -263,7 +263,7 @@ function DepthChart({ pair }: { pair: PairInfo }) {
             <strong>
               {hover.side === 'BUY' ? t('board.bid') : t('board.ask')} {price(hover.price)}
             </strong>
-            <span>{t('board.cumulative', { qty: `${qty(hover.cum)} ${pair.base}` })}</span>
+            <span>{t('board.cumulative', { qty: `${qty(hover.cum)} ${currencySymbol(pair.base)}` })}</span>
           </div>
         )}
       </div>
@@ -283,7 +283,7 @@ function Tape({ pair }: { pair: PairInfo }) {
       <div className="tape-row head">
         <span>{t('board.time')}</span>
         <span>{t('book.price')}</span>
-        <span>{t('book.qty')} ({pair.base})</span>
+        <span>{t('book.qty')} ({currencySymbol(pair.base)})</span>
       </div>
       {list.length === 0 && <Empty>{t('board.noTrades')}</Empty>}
       {list.map((tr) => (

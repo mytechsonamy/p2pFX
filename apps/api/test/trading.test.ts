@@ -232,7 +232,7 @@ describe('order rules', () => {
     expect(await err({ qty: '0.5' })).toBe('QTY_TOO_SMALL');
     expect(await err({ qty: '10.001' })).toBe('INVALID_QTY');
     expect(await err({ qty: '30000' })).toBe('ORDER_LIMIT_EXCEEDED');
-    expect(await err({ pair: 'JPYTRY' })).toBe('UNKNOWN_PAIR');
+    expect(await err({ pair: 'HUFTRY' })).toBe('UNKNOWN_PAIR');
     expect(await err({ validity: 'GTD' })).toBe('EXPIRES_AT_REQUIRED');
     expect(await err({ validity: 'GTD', expiresAt: '2026-12-31T00:00:00Z' })).toBe('INVALID_EXPIRY');
     expect((await h.place(alice, { side: 'SELL', qty: '10', price: '50.6245' })).status).toBe(201); // +3.0% edge
