@@ -1,0 +1,16 @@
+{
+  "name": "@p2p/demo-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@p2p/sdk-bridge": "workspace:*"
+  },
+  "devDependencies": {
+    "jose": "^6.2.12",
+    "vite": "^8.3.2"
+  }
+}

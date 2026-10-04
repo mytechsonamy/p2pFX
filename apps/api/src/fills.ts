@@ -23,6 +23,21 @@ export interface FillRow {
   created_at: Date;
 }
 
+/** A fill as everyone sees it on the market board: no customers, no commission or tax. */
+export function tradeView(f: Pick<FillRow, 'id' | 'pair' | 'book_price' | 'qty' | 'taker_order_id' | 'buy_order_id' | 'created_at'>, config: BankConfig) {
+  const pair = findPair(config, f.pair);
+  return {
+    id: f.id,
+    pair: f.pair,
+    price: formatPrice(parsePrice(f.book_price)),
+    qty: formatDecimal(BigInt(f.qty), pair?.baseDecimals ?? 2),
+    /** Side of the incoming order: BUY when a buyer took an offer. */
+    takerSide: (f.taker_order_id === f.buy_order_id ? 'BUY' : 'SELL') as Side,
+    at: new Date(f.created_at).toISOString(),
+  };
+}
+export type TradeView = ReturnType<typeof tradeView>;
+
 /** A fill from one customer's point of view. */
 export function fillViewFor(
   f: FillRow,

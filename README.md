@@ -10,11 +10,14 @@ See [docs/architecture.md](docs/architecture.md) for the architecture and MVP sc
 apps/
   api/          Fastify API: sessions, order entry, matching workers, settlement saga, scheduler, WebSocket, ops API
   mock-core/    Mock core banking service (accounts, holds, FX postings, receipts, reference rates)
+  web/          Embeddable customer UI (React + Vite) that runs in the bank app's WebView
+  demo-host/    Fake bank app: two phones side by side, mints launch tokens, shows bridge messages
 packages/
   shared/       Config schema, API schemas, fixed-point money helpers, trading-hours helpers
   pricing/      Commission and kambiyo vergisi maths (pure)
   matching/     Order book and price-time matching (pure)
   core-adapter/ CoreBankingAdapter interface, in-memory MockCoreBank, HTTP client
+  sdk-bridge/   postMessage protocol between the bank app and the web app; native SDK stubs in its README
 db/migrations/  Postgres schema
 ```
 
@@ -30,7 +33,18 @@ pnpm dev:mock-core       # :4100, seeded with demo customers and rates
 pnpm dev:api             # :4000, migrates the database on start
 ```
 
-Or everything in Docker: `pnpm dev:keys && docker compose up --build`.
+Then the UI, in two more terminals:
+
+```sh
+pnpm dev:web             # :5173, proxies /v1 to the API
+pnpm dev:demo-host       # :5174, open this: the demo bank app with Ayşe and Mehmet side by side
+```
+
+In the demo, sell USD as Ayşe and tap her offer in Mehmet's order book to buy it. The bank brand switch
+shows the same build in a second bank's colours. See [apps/web/README.md](apps/web/README.md) and
+[packages/sdk-bridge/README.md](packages/sdk-bridge/README.md).
+
+Or the backend in Docker: `pnpm dev:keys && docker compose up --build`.
 
 Try a trade (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`):
 
@@ -60,12 +74,13 @@ Customer (session bearer token from `POST /v1/session`):
 | `GET /v1/config` | branding, pairs with commission per unit, tax, validity options, hours, the customer's limits |
 | `GET /v1/accounts` | the customer's core-banking accounts with balance, held, available |
 | `GET /v1/pairs/:pair/book` | aggregated order book |
+| `GET /v1/pairs/:pair/trades`, `GET /v1/pairs/:pair/stats` | market board: recent trades (anonymous), today's open/high/low/last/volume |
 | `GET /v1/pairs/:pair/rate` | reference rate, indicative all-in buy/sell, price band |
 | `POST /v1/orders/quote` | full breakdown for the confirmation screen |
 | `POST /v1/orders` | place an order (`Idempotency-Key` header required) |
 | `GET /v1/orders`, `GET /v1/orders/:id`, `DELETE /v1/orders/:id` | list, read, cancel |
 | `GET /v1/fills`, `GET /v1/fills/:id/receipt` | fills from the customer's side, dekont |
-| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `orders`, `fills` |
+| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `orders`, `fills` |
 
 Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`.
 
