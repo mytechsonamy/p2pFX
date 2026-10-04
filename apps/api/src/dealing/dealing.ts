@@ -1,4 +1,4 @@
-import { findPair, formatDecimal, formatPrice, isMarketOpen, parseDecimal, parsePrice, type PairConfig } from '@p2p/shared';
+import { findPair, formatDecimal, formatPrice, isMarketOpen, parseDecimal, parsePrice, taxRates, type PairConfig } from '@p2p/shared';
 import { priceSide, pricingParams } from '@p2p/pricing';
 import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
@@ -78,7 +78,7 @@ export class DealingService {
       [session.customerId, pair.symbol, body.side, qty, formatPrice(rate), formatPrice(lpRate), session.segment,
         body.side === 'BUY' ? r.buyBips : r.sellBips, s.notional, s.tax, s.total, expiresAt, version],
     );
-    return quoteView(rows[0], pair, config.tax[body.side === 'BUY' ? 'buyRate' : 'sellRate']);
+    return quoteView(rows[0], pair, taxRates(config, pair)[body.side === 'BUY' ? 'buyRate' : 'sellRate']);
   }
 
   async execute(session: Session, quoteId: string) {

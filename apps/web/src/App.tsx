@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createWebBridge, PROTOCOL_VERSION, type HostMessage } from '@p2p/sdk-bridge';
 import { Api } from './api';
 import { createTranslator } from './i18n';
+import { pairLabel } from './format';
 import { ExchangeProvider, useExchange, type Tab } from './store';
 import { applyTheme, mergeBranding } from './theme';
 import type { AppConfig, Branding } from './types';
@@ -106,7 +107,7 @@ const TABS: { id: Tab; icon: string }[] = [
 ];
 
 function Shell() {
-  const { branding, config, t, tab, setTab, pair, setPair, bridge, connected, toasts, track, bankDeal } = useExchange();
+  const { branding, config, t, tab, setTab, pair, setPair, bridge, connected, toasts, track, bankDeal, locale } = useExchange();
 
   useEffect(() => track('screen_view', { screen: tab }), [tab, track]);
 
@@ -139,7 +140,7 @@ function Shell() {
         <nav className="pairs" role="tablist">
           {config.pairs.map((p) => (
             <button key={p.symbol} role="tab" aria-selected={p.symbol === pair} className={p.symbol === pair ? 'active' : ''} onClick={() => setPair(p.symbol)}>
-              {p.base}/{p.quote}
+              {pairLabel(p, locale)}
             </button>
           ))}
         </nav>

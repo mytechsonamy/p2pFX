@@ -67,7 +67,7 @@ function OrderCard({ order: o }: { order: Order }) {
       <header>
         <SideBadge side={o.side} />
         <strong>
-          {formatDecimal(o.qty, locale, decimals)} {base}
+          {formatDecimal(o.qty, locale, decimals)} {currencySymbol(base)}
         </strong>
         <span className="muted">@ {formatPrice(o.price, locale)} {currencySymbol(quote)}</span>
         <span className={`status s-${o.status.toLowerCase()}`}>{t(`status.${o.status}`)}</span>

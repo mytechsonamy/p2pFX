@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useExchange } from '../store';
 import { Empty, Row, Sheet, SideBadge } from '../components';
-import { formatDateTime, formatDecimal, formatMoney, formatPrice } from '../format';
+import { currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice } from '../format';
 import type { StringKey } from '../i18n';
 import type { Fill, Receipt } from '../types';
 
@@ -16,7 +16,7 @@ function FillCard({ fill: f }: { fill: Fill }) {
   const pair = config.pairs.find((p) => p.symbol === f.pair);
   const base = f.pair.slice(0, 3);
   const buy = f.side === 'BUY';
-  const qty = `${formatDecimal(f.qty, locale, pair?.baseDecimals ?? 2)} ${base}`;
+  const qty = `${formatDecimal(f.qty, locale, pair?.baseDecimals ?? 2)} ${currencySymbol(base)}`;
   const money = (v: string) => formatMoney(v, f.currency, locale);
   const tz = config.tradingHours.timezone;
   const settlement = f.settlementStatus ? t(`fills.settlement.${f.settlementStatus}` as StringKey) : undefined;

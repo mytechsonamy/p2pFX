@@ -68,6 +68,27 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
   The demo bank app shows it as a dealer screen at http://localhost:5174/dealer.html (the bank's backend calls
   the ops API with its own token; the browser never sees it).
 
+## Bank orders in the book
+
+The bank can also be a participant in the P2P book with its own trading account (`bankBook.customerRef`), so
+the book has the bank's liquidity in it, not only customers'. `dealing/bank-book.ts` keeps a ladder per pair
+and side:
+
+- Anchor: the bank-row rate of `bankBook.anchorSegment`. Asks start `startPct` % above its buy rate, bids
+  `startPct` % below its sell rate; each further level is `stepPct` % further out; `levels` lists the
+  quantity of each level (t1 … tz).
+- `includeCommission`: the book shows matching prices and the customer pays commission on top, so a level
+  priced at the bank rate would cost the customer more than the bank row. With this on, the customer's
+  commission is taken out of the level price: a customer who takes a bank level pays (or receives) the level
+  price plus commission, which is never better than the bank's own rate. Example, USD/TRY: bank rate
+  49.2559, first ask level 0.02 % out = 49.2658 all-in, shown in the book at 49.2158.
+- The ladder is repriced when the anchor moves `repriceBips` or more, when the configuration changes, and
+  when customers take a level (the level is refilled). The bank's own orders pay no commission or tax and
+  skip customer limits (`OrderEntry.place(..., { house: true })`).
+- Fills against the bank's orders change the bank position (with P&L) like bank-row deals and go through the
+  same auto-hedge rule. Fills between customers stay back-to-back.
+- Editing: backoffice → "Banka emirleri (tahta)". The dealer screen lists the bank's resting orders.
+
 ## Configuration
 
 ```jsonc

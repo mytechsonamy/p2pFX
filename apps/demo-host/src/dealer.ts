@@ -62,6 +62,7 @@ interface Desk {
   positions: Position[];
   deals: Deal[];
   hedges: Hedge[];
+  bankBook?: { enabled: boolean; orders: { pair: string; side: 'BUY' | 'SELL'; price: string; qty: string }[] };
 }
 
 const root = document.getElementById('dealer')!;
@@ -144,7 +145,29 @@ function render(d: Desk) {
       <section class="desk-card"><h2>LP hedge işlemleri</h2>
         <table><thead><tr><th>Saat</th><th>Tür</th><th>Yön</th><th class="num">Miktar</th><th class="num">Kur</th><th>LP</th></tr></thead>
         <tbody>${hedges || '<tr><td colspan="6" class="muted">Henüz hedge yok</td></tr>'}</tbody></table></section>
-    </div>`;
+    </div>
+    ${bankBookCard(d)}`;
+}
+
+function bankBookCard(d: Desk) {
+  if (!d.bankBook) return '';
+  const pairs = [...new Set(d.bankBook.orders.map((o) => o.pair))];
+  const col = (pair: string, side: 'BUY' | 'SELL') =>
+    d.bankBook!.orders
+      .filter((o) => o.pair === pair && o.side === side)
+      .sort((a, b) => (side === 'SELL' ? Number(a.price) - Number(b.price) : Number(b.price) - Number(a.price)))
+      .map((o) => `<tr><td class="num ${side === 'SELL' ? 'neg' : 'pos'}">${rate(o.price)}</td><td class="num">${money(o.qty)}</td></tr>`)
+      .join('');
+  const cards = pairs
+    .map(
+      (p) => `<div><h3>${p.slice(0, 3)}/${p.slice(3)}</h3><div class="desk-grid two-small">
+        <table><thead><tr><th class="num">Satış</th><th class="num">Miktar</th></tr></thead><tbody>${col(p, 'SELL')}</tbody></table>
+        <table><thead><tr><th class="num">Alış</th><th class="num">Miktar</th></tr></thead><tbody>${col(p, 'BUY')}</tbody></table></div></div>`,
+    )
+    .join('');
+  return `<section class="desk-card wide"><h2>Tahtadaki banka emirleri <small>${
+    d.bankBook.enabled ? 'Kademeler backoffice\'ten yönetilir, LP fiyatı oynadıkça yeniden fiyatlanır' : 'Kapalı'
+  }</small></h2><div class="desk-grid">${cards || '<p class="muted">Tahtada banka emri yok</p>'}</div></section>`;
 }
 
 function policyText(d: Desk['dealing']) {

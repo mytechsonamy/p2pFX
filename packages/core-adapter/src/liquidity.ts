@@ -28,6 +28,8 @@ export interface LpExecution extends LpExecutionRequest {
 }
 
 export interface LiquidityAdapter {
+  /** Pair symbols the LPs quote (e.g. USDTRY, XAUTRY): what the bank can open for trading. */
+  instruments(): Promise<string[]>;
   quotes(pair: string): Promise<LpQuote[]>;
   execute(req: LpExecutionRequest): Promise<LpExecution>;
 }
@@ -54,6 +56,8 @@ const MOCK_LPS: MockLp[] = [
 export interface MockLiquidityOptions {
   /** Where each pair's price is anchored (the bank's reference rate); the walk reverts towards it. */
   anchor: (pair: string) => number | undefined;
+  /** Pairs the LPs quote; defaults to none listed (quotes still work for any anchored pair). */
+  instruments?: () => string[];
   /** Volatility per √second as a fraction of the price; 0 freezes the market (tests). */
   volatility?: number;
   /** Mean reversion per second. */
@@ -104,13 +108,19 @@ export class MockLiquidity implements LiquidityAdapter {
     return s.mid;
   }
 
+  async instruments() {
+    return this.opts.instruments?.() ?? [];
+  }
+
   async quotes(pair: string): Promise<LpQuote[]> {
     const mid = this.mid(pair);
     const at = new Date(this.clock()).toISOString();
     return MOCK_LPS.map((lp) => {
       const m = mid * (1 + (this.volatility > 0 ? this.gaussian() * 0.00006 : 0));
       const half = m * lp.halfSpread * (this.volatility > 0 ? 1 + this.random() * 0.3 : 1);
-      return { lp: lp.name, pair, bid: (m - half).toFixed(4), ask: (m + half).toFixed(4), at };
+      // Cheap units (JPY ≈ 0.33 TRY) need more decimals for the spread to show.
+      const d = mid < 10 ? 6 : 4;
+      return { lp: lp.name, pair, bid: (m - half).toFixed(d), ask: (m + half).toFixed(d), at };
     });
   }
 
@@ -152,6 +162,9 @@ export class HttpLiquidityAdapter implements LiquidityAdapter {
     return json as T;
   }
 
+  instruments() {
+    return this.call<string[]>('GET', '/lp/instruments');
+  }
   quotes(pair: string) {
     return this.call<LpQuote[]>('GET', `/lp/quotes/${pair}`);
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareDecimal, formatDecimal, formatPrice, formatRate, sanitizeAmountInput, toApiDecimal, toInputText } from '../src/format';
+import { assetName, compareDecimal, currencySymbol, formatDecimal, formatMoney, formatPrice, formatRate, pairLabel, sanitizeAmountInput, toApiDecimal, toInputText } from '../src/format';
 import { endOfDay, localDate } from '../src/time';
 import { createTranslator } from '../src/i18n';
 import { mergeBranding, themeVars } from '../src/theme';
@@ -18,6 +18,9 @@ describe('formatting', () => {
     expect(formatPrice('49.1525', 'tr-TR')).toBe('49,1525');
     expect(formatPrice('49.1500', 'tr-TR')).toBe('49,1500');
     expect(formatPrice('49', 'tr-TR')).toBe('49,0000');
+    // A gram of gold: two decimals.
+    expect(formatPrice('6320.5', 'tr-TR')).toBe('6.320,50');
+    expect(formatPrice('0.3291', 'tr-TR')).toBe('0,3291');
   });
 
   it('formats the tax rate as a percentage', () => {
@@ -99,5 +102,18 @@ describe('market board', () => {
     s = applyTrade(s, trade('49.30', '50.5'), 2);
     s = applyTrade(s, trade('49.10', '10'), 2);
     expect(s).toMatchObject({ open: '49.15', high: '49.30', low: '49.10', last: '49.10', volume: '160.50', trades: 3 });
+  });
+});
+
+describe('instrument labels', () => {
+  it('names metals and shows their amounts in grams', () => {
+    expect(pairLabel({ base: 'XAU', quote: 'TRY' })).toBe('Altın (gr)');
+    expect(pairLabel({ base: 'USD', quote: 'TRY' })).toBe('USD/TRY');
+    expect(assetName('XAG')).toBe('Gümüş');
+    expect(assetName('XPT', 'en-US')).toBe('Platinum');
+    expect(currencySymbol('XAU')).toBe('gr');
+    expect(currencySymbol('TRY')).toBe('TL');
+    expect(formatMoney('150000', 'JPY', 'tr-TR')).toBe('150.000 JPY');
+    expect(formatMoney('10.5', 'XAU', 'tr-TR')).toBe('10,50 gr');
   });
 });

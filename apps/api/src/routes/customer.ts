@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { PlaceOrderSchema, QuoteRequestSchema, findPair, formatDecimal, formatPrice, isMarketOpen, parsePrice } from '@p2p/shared';
+import { PlaceOrderSchema, QuoteRequestSchema, findPair, formatDecimal, formatPrice, isMarketOpen, parsePrice, taxRates } from '@p2p/shared';
 import { toWire } from '@p2p/core-adapter';
 import type { AppContext } from '../app.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
@@ -44,6 +44,8 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
           minQty: p.minQty,
           priceBandPct: p.priceBandPct,
           bipSize: p.bipSize,
+          /** Kambiyo vergisi for this pair (precious metals have their own rates). */
+          tax: taxRates(c, p),
           commissionPerUnit: {
             buy: formatPrice(BigInt(p.commission.buyBips) * parsePrice(p.bipSize)),
             sell: formatPrice(BigInt(p.commission.sellBips) * parsePrice(p.bipSize)),
@@ -154,7 +156,7 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
 
   app.post('/v1/orders', async (req, reply) => {
     const session = await auth.customer(req);
-    ctx.rateLimit(session.customerId);
+    ctx.rateLimit(session.customerId, session.segment);
     const body = parse(PlaceOrderSchema, req.body);
     const result = await entry.place(session, body, req.headers['idempotency-key'] as string | undefined);
     return reply.status(result.replayed ? 200 : 201).send(result.order);

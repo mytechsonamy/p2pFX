@@ -62,6 +62,11 @@ vergisini tahsil etti; fiyat riski almadı.
    parçayı 500 yapıp kaydedin; Mehmet bankadan 2.000 USD alınca pozisyon 500'e iner, hedge üç parça halinde
    LP-A, LP-B, LP-C'ye gider.
 
+5. Tahtada bankanın kendi emirleri de var: banka kurunun %0,02 uzağından başlayan 3 kademe (USD: 5.000,
+   10.000, 20.000). Fiyatlar komisyon düşülmüş olarak girilir, müşteri komisyonla birlikte banka kurundan
+   daha iyi bir fiyat bulamaz. FX masasında "Tahtadaki banka emirleri", ayarlar backoffice'te "Banka emirleri
+   (tahta)". Müşteri bir kademeyi alınca kademe yeniden dolar, işlem bankanın pozisyonuna yazılır.
+
 Mesaj: P2P eşleşmede banka risk almadan komisyon kazanır; kendi kurunda marj kazanır ve pozisyonu yönetir.
 İkisi aynı uygulamada, müşteri iyi olanı seçer.
 

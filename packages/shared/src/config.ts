@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { withPair } from './instruments.js';
 
 const decimalString = z.string().regex(/^\d+(\.\d+)?$/, 'expected a non-negative decimal string');
 const hhmm = z.string().regex(/^([01]\d|2[0-4]):[0-5]\d$/, 'expected HH:MM');
@@ -31,6 +32,8 @@ export const LimitsSchema = z.object({
   maxOrderNotional: decimalString,
   /** Max total value of orders entered per day, in quote currency at book price. */
   maxDailyNotional: decimalString,
+  /** Orders per `orderRateLimit` window for this segment, instead of `orderRateLimit.max`. */
+  maxOrdersPerWindow: z.number().int().min(1).optional(),
 });
 
 const MarginSchema = z.object({ buyBips: z.number().int().min(0), sellBips: z.number().int().min(0) });
@@ -117,6 +120,47 @@ const BotsSchema = z.object({
 });
 export type BotsConfig = z.infer<typeof BotsSchema>;
 
+/** One side of the bank's ladder in a pair: levels moving away from the bank's own rate. */
+const LadderSchema = z.object({
+  enabled: z.boolean(),
+  /** Distance of the first level from the bank's rate, in percent ("0.02" = 0.02 %). */
+  startPct: decimalString,
+  /** Distance between consecutive levels, in percent. */
+  stepPct: decimalString,
+  /** Quantity of each level from the best price outwards (t1, t2, … tz); the length is the number of levels. */
+  levels: z.array(decimalString).min(1).max(20),
+});
+
+/** The bank's own orders in the P2P book, priced off its published rate and repriced as the LPs move. */
+const BankBookSchema = z.object({
+  enabled: z.boolean(),
+  /** The bank's own trading account in core banking that the orders are entered for. */
+  customerRef: z.string().min(1),
+  /** Segment whose bank-row rate anchors the ladder (asks above its buy rate, bids below its sell rate). */
+  anchorSegment: z.string().min(1),
+  /** Price levels so that, once the customer's commission is added, no level beats the bank's own rate. */
+  includeCommission: z.boolean(),
+  /** Reprice a side when its anchor rate has moved at least this many bips (of the pair's bipSize). */
+  repriceBips: z.number().int().min(1),
+  /** Per pair symbol; a pair without an entry has no bank orders. */
+  pairs: z.record(z.object({ asks: LadderSchema, bids: LadderSchema })),
+});
+export type BankBookConfig = z.infer<typeof BankBookSchema>;
+
+const ladder = (levels: string[]) => ({ enabled: true, startPct: '0.02', stepPct: '0.02', levels });
+export const DEFAULT_BANK_BOOK: BankBookConfig = {
+  enabled: true,
+  customerRef: 'bank-desk',
+  anchorSegment: 'default',
+  includeCommission: true,
+  repriceBips: 2,
+  pairs: {
+    USDTRY: { asks: ladder(['5000', '10000', '20000']), bids: ladder(['5000', '10000', '20000']) },
+    EURTRY: { asks: ladder(['5000', '10000', '20000']), bids: ladder(['5000', '10000', '20000']) },
+    GBPTRY: { asks: ladder(['2000', '5000', '10000']), bids: ladder(['2000', '5000', '10000']) },
+  },
+};
+
 export const DEFAULT_SESSION = { ttlMinutes: 30 };
 export const DEFAULT_SETTLEMENT = { attempts: 3, baseDelayMs: 500 };
 export const DEFAULT_BOTS: BotsConfig = {
@@ -150,6 +194,8 @@ export const BankConfigSchema = z.object({
     buyRate: decimalString,
     sellRate: decimalString,
     base: z.enum(['effective', 'book']),
+    /** Rates for precious metal pairs (gold, silver, platinum), which may diverge from the FX rates. */
+    metals: z.object({ buyRate: decimalString, sellRate: decimalString }).default({ buyRate: '0.002', sellRate: '0.002' }),
   }),
   rounding: z.enum(['HALF_UP', 'HALF_EVEN', 'DOWN', 'UP']),
   validity: z.object({
@@ -173,6 +219,7 @@ export const BankConfigSchema = z.object({
   session: SessionSchema.default(DEFAULT_SESSION),
   settlement: SettlementSchema.default(DEFAULT_SETTLEMENT),
   bots: BotsSchema.default(DEFAULT_BOTS),
+  bankBook: BankBookSchema.default(DEFAULT_BANK_BOOK),
 });
 export type BankConfig = z.infer<typeof BankConfigSchema>;
 
@@ -180,8 +227,13 @@ export function findPair(config: BankConfig, symbol: string): PairConfig | undef
   return config.pairs.find((p) => p.symbol === symbol);
 }
 
-/** Default configuration used by the prototype and as a template for banks. */
-export const DEFAULT_CONFIG: BankConfig = {
+/**
+ * Pairs open in the prototype: the currencies and metals the demo LPs quote that demo customers hold. The LPs
+ * quote a few more, which the back office can add (`withPair`).
+ */
+export const DEFAULT_PAIRS = ['USD', 'EUR', 'GBP', 'CHF', 'JPY', 'CAD', 'AUD', 'SAR', 'XAU', 'XAG', 'XPT'];
+
+const BASE_CONFIG: BankConfig = {
   bank: { code: 'DEMO', name: 'Demo Bank' },
   branding: {
     productName: 'Döviz Pazarı',
@@ -191,20 +243,8 @@ export const DEFAULT_CONFIG: BankConfig = {
     strings: {},
   },
   balanceMode: 'block',
-  pairs: ['USD', 'EUR', 'GBP'].map((base) => ({
-    symbol: `${base}TRY`,
-    base,
-    quote: 'TRY',
-    baseDecimals: 2,
-    quoteDecimals: 2,
-    tickSize: '0.0001',
-    minQty: '1',
-    priceBandPct: '3',
-    commission: { buyBips: 5, sellBips: 5 },
-    bipSize: '0.01',
-    enabled: true,
-  })),
-  tax: { buyRate: '0.002', sellRate: '0.002', base: 'effective' },
+  pairs: [],
+  tax: { buyRate: '0.002', sellRate: '0.002', base: 'effective', metals: { buyRate: '0.002', sellRate: '0.002' } },
   rounding: 'HALF_UP',
   validity: { options: ['DAY', 'GTD', 'GTC'], maxValidityDays: 30 },
   // Open around the clock so the prototype can be demoed any time; banks set real hours.
@@ -221,7 +261,7 @@ export const DEFAULT_CONFIG: BankConfig = {
     segments: {
       premium: { maxOrderNotional: '10000000', maxDailyNotional: '50000000' },
       // Demo order bots; limits a demo never reaches.
-      'market-maker': { maxOrderNotional: '100000000', maxDailyNotional: '100000000000' },
+      'market-maker': { maxOrderNotional: '100000000', maxDailyNotional: '100000000000', maxOrdersPerWindow: 1000 },
     },
   },
   orderRateLimit: { max: 30, windowSeconds: 60 },
@@ -229,7 +269,11 @@ export const DEFAULT_CONFIG: BankConfig = {
   session: DEFAULT_SESSION,
   settlement: DEFAULT_SETTLEMENT,
   bots: DEFAULT_BOTS,
+  bankBook: DEFAULT_BANK_BOOK,
 };
+
+/** Default configuration used by the prototype and as a template for banks. */
+export const DEFAULT_CONFIG: BankConfig = DEFAULT_PAIRS.reduce((c, code) => withPair(c, code, { enabled: true }), BASE_CONFIG);
 
 /**
  * Parameters the prototype ships with defaults the bank has not confirmed yet. The back office flags each
@@ -248,6 +292,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bots', label: 'Demo piyasa yapıcı botlar', paths: ['bots'] },
+  { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler', paths: ['bankBook'] },
 ];
 
 export interface ConfigChange {

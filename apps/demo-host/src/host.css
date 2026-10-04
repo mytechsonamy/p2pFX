@@ -64,3 +64,4 @@ body.dealer .toolbar p { color: #94a3b8; }
 #policy-form legend { color: #94a3b8; font-weight: 600; }
 .per-ccy { display: flex; gap: 10px; flex-wrap: wrap; }
 tr.same-batch td { border-top: 0; }
+.desk-grid.two-small { grid-template-columns: 1fr 1fr; gap: 8px; }

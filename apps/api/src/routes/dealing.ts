@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { findPair, formatPrice, parseDecimal, parsePrice } from '@p2p/shared';
+import { findPair, formatPrice, instrument, parseDecimal, parsePrice, PRICE_SCALE, withPair } from '@p2p/shared';
 import { toWire } from '@p2p/core-adapter';
 import type { AppContext } from '../app.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
@@ -24,7 +24,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
 
   app.post('/v1/bank/quotes', async (req) => {
     const session = await auth.customer(req);
-    ctx.rateLimit(session.customerId);
+    ctx.rateLimit(session.customerId, session.segment);
     return dealing.quote(session, parse(BankQuoteRequestSchema, req.body));
   });
 
@@ -83,6 +83,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
       positions: await positions.snapshot(),
       deals: await dealing.recentDeals(),
       hedges: await positions.recentHedges(),
+      bankBook: { enabled: c.bankBook.enabled, orders: await ctx.bankBook.snapshot() },
     };
   });
 
@@ -104,4 +105,62 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
     const actor = await auth.ops(req, 'editor');
     return dealing.retry(req.params.id, actor);
   });
+
+  // ---- instruments: what the LPs quote, and adding a pair ----
+
+  /** Every pair the LPs quote, with its mid rate and whether the bank has it set up (and open). */
+  app.get('/ops/instruments', async (req) => {
+    await auth.ops(req);
+    const c = config.get().data;
+    const symbols = [...new Set([...(await ctx.liquidity.instruments()), ...c.pairs.map((p) => p.symbol)])];
+    const rows = await Promise.all(
+      symbols.map(async (symbol) => {
+        const pair = findPair(c, symbol);
+        const base = pair?.base ?? symbol.slice(0, 3);
+        const quote = pair?.quote ?? symbol.slice(3);
+        const mid = await midOf(symbol);
+        const i = instrument(base, mid === undefined ? undefined : Number(formatPrice(mid)));
+        return {
+          symbol,
+          base,
+          quote,
+          name: i.name,
+          kind: i.kind,
+          // Display precision: four decimals, two from a thousand lira up (a gram of gold).
+          mid: mid === undefined ? null : Number(formatPrice(mid)).toFixed(mid >= 1000n * PRICE_SCALE ? 2 : 4),
+          configured: !!pair,
+          enabled: !!pair?.enabled,
+        };
+      }),
+    );
+    return rows.sort((a, b) => Number(b.configured) - Number(a.configured) || a.base.localeCompare(b.base));
+  });
+
+  /**
+   * Adds a pair the LPs quote, closed for trading, with the instrument's defaults (bips, tick, min order, the
+   * bank's ladder, limits). The operator reviews them and opens the pair under "Pariteler ve komisyon".
+   */
+  app.post('/ops/pairs', async (req) => {
+    const actor = await auth.ops(req, 'editor');
+    const body = parse(z.object({ symbol: z.string().regex(/^[A-Z]{6}$/), reason: z.string().default('') }), req.body);
+    const c = config.get().data;
+    if (findPair(c, body.symbol)) throw new ApiError(409, 'PAIR_EXISTS', `${body.symbol} is already set up`);
+    if (!(await ctx.liquidity.instruments()).includes(body.symbol)) throw badRequest('NOT_QUOTED', `the LPs do not quote ${body.symbol}`);
+    if (!body.symbol.endsWith('TRY')) throw badRequest('UNSUPPORTED_QUOTE', 'only pairs against TRY are supported');
+    const mid = await midOf(body.symbol);
+    const next = withPair(c, body.symbol.slice(0, 3), { enabled: false, rate: mid === undefined ? undefined : Number(formatPrice(mid)) });
+    return config.update(next, actor, body.reason || `Yeni parite: ${body.symbol.slice(0, 3)}/TRY (işleme kapalı)`);
+  });
+
+  async function midOf(symbol: string) {
+    try {
+      const q = await ctx.liquidity.quotes(symbol);
+      if (!q.length) return undefined;
+      const bid = q.reduce((m, x) => (parsePrice(x.bid) > m ? parsePrice(x.bid) : m), 0n);
+      const ask = q.reduce((m, x) => (m === 0n || parsePrice(x.ask) < m ? parsePrice(x.ask) : m), 0n);
+      return (bid + ask) / 2n;
+    } catch {
+      return undefined;
+    }
+  }
 }

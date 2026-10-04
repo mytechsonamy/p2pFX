@@ -127,7 +127,7 @@ export function BankDealSheet() {
         ]}
       />
       <label className="field">
-        <span>{t('ticket.qty', { base: pair.base })}</span>
+        <span>{t('ticket.qty', { base: currencySymbol(pair.base) })}</span>
         <div className="input-wrap">
           <input
             inputMode="decimal"
@@ -138,7 +138,7 @@ export function BankDealSheet() {
               setQuote(undefined);
             }}
           />
-          <span className="suffix">{pair.base}</span>
+          <span className="suffix">{currencySymbol(pair.base)}</span>
         </div>
         {pay && <small className="hint">{t('ticket.available', { amount: formatMoney(pay.available, pay.currency, locale) })}</small>}
       </label>
@@ -146,7 +146,7 @@ export function BankDealSheet() {
       {quote && (
         <div className="breakdown">
           <Row label={t('bank.rate')} value={`${formatPrice(quote.rate, locale)} ${currencySymbol(pair.quote)}`} strong />
-          <Row label={t('bank.notional', { qty: `${formatDecimal(quote.qty, locale, pair.baseDecimals)} ${pair.base}`, rate: formatPrice(quote.rate, locale) })} value={money(quote.notional)} />
+          <Row label={t('bank.notional', { qty: `${formatDecimal(quote.qty, locale, pair.baseDecimals)} ${currencySymbol(pair.base)}`, rate: formatPrice(quote.rate, locale) })} value={money(quote.notional)} />
           <Row label={t('quote.tax', { rate: formatRate(quote.taxRate, locale) })} value={`${buy ? '+' : '−'} ${money(quote.tax)}`} />
           <div className="divider" />
           <Row label={buy ? t('quote.totalBuy') : t('quote.totalSell')} value={money(quote.total)} strong />

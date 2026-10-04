@@ -74,6 +74,12 @@ td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 table.list td:first-child { width: 28px; }
 table.diff td.from { color: var(--danger); text-decoration: line-through; }
 table.diff td.to { color: var(--ok); font-weight: 600; }
+.badge:not(.ok):not(.warn) { background: #f3f4f6; color: var(--muted); }
+table.pairs td, table.pairs th { vertical-align: middle; }
+table.pairs .num { text-align: right; font-variant-numeric: tabular-nums; }
+table.pairs tr.changed { background: var(--changed); }
+table.pairs tr.muted td { color: var(--muted); }
+button.small { padding: 4px 10px; font-size: 12px; }
 td code { font-size: 11px; color: var(--muted); word-break: break-all; }
 .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
 .row.end { justify-content: flex-end; }

@@ -46,7 +46,7 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     bank.setReferenceRate('EURTRY', '53.40');
   }
   const clock = { now: new Date('2026-10-05T09:00:00Z') };
-  const liquidity = new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), volatility: 0, clock: () => clock.now.getTime() });
+  const liquidity = new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs(), volatility: 0, clock: () => clock.now.getTime() });
   const { app, ctx, close } = await buildApp({
     databaseUrl: DATABASE_URL,
     core: bank,

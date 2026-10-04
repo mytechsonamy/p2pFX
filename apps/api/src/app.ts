@@ -19,6 +19,7 @@ import { dealingRoutes } from './routes/dealing.js';
 import { PriceEngine } from './dealing/price-engine.js';
 import { PositionKeeper } from './dealing/positions.js';
 import { DealingService } from './dealing/dealing.js';
+import { BankBook } from './dealing/bank-book.js';
 
 export interface AppOptions {
   databaseUrl: string;
@@ -39,6 +40,8 @@ export interface AppOptions {
   schedulerIntervalMs?: number;
   /** LP price refresh interval; 0 disables it (prices are then pulled on demand). */
   priceIntervalMs?: number;
+  /** How often the bank's own ladder in the book is checked and repriced; 0 disables it (tests call tick()). */
+  bankBookIntervalMs?: number;
   logger?: boolean;
 }
 
@@ -53,10 +56,12 @@ export interface AppContext {
   entry: OrderEntry;
   scheduler: Scheduler;
   clock: () => Date;
-  rateLimit: (customerId: string) => void;
+  rateLimit: (customerId: string, segment?: string) => void;
   prices: PriceEngine;
   positions: PositionKeeper;
   dealing: DealingService;
+  bankBook: BankBook;
+  liquidity: LiquidityAdapter;
 }
 
 export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance; ctx: AppContext; close: () => Promise<void> }> {
@@ -81,11 +86,14 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
   const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);
+  const bankBook = new BankBook(db, config, entry, exchange, prices, positions, app.log);
 
   // Per-customer order entry rate limit (sliding window, in memory).
   const hits = new Map<string, number[]>();
-  const rateLimit = (customerId: string) => {
-    const { max, windowSeconds } = config.get().data.orderRateLimit;
+  const rateLimit = (customerId: string, segment?: string) => {
+    const c = config.get().data;
+    const { windowSeconds } = c.orderRateLimit;
+    const max = (segment && c.limits.segments[segment]?.maxOrdersPerWindow) || c.orderRateLimit.max;
     const now = clock().getTime();
     const recent = (hits.get(customerId) ?? []).filter((t) => t > now - windowSeconds * 1000);
     if (recent.length >= max) throw new ApiError(429, 'RATE_LIMITED', 'too many orders, try again shortly');
@@ -93,7 +101,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     hits.set(customerId, recent);
   };
 
-  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing };
+  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook, liquidity: opts.liquidity };
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ApiError) {
@@ -114,10 +122,12 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   await exchange.start();
   if (opts.schedulerIntervalMs) scheduler.start(opts.schedulerIntervalMs);
   if (opts.priceIntervalMs) prices.start(opts.priceIntervalMs);
+  if (opts.bankBookIntervalMs) bankBook.start(opts.bankBookIntervalMs);
 
   const close = async () => {
     scheduler.stop();
     prices.stop();
+    bankBook.stop();
     await app.close();
     await exchange.idle();
     await events.stop();

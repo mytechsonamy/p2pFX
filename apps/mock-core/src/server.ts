@@ -14,7 +14,7 @@ export function buildMockCore(
 ): FastifyInstance {
   const app = Fastify({ logger: opts.logger ?? false });
   // Simulated LPs quote around the bank's reference rate.
-  const liquidity = opts.liquidity ?? new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair) });
+  const liquidity = opts.liquidity ?? new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs() });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof LiquidityError) return reply.status(503).send({ code: 'UNAVAILABLE', message: err.message });
@@ -62,6 +62,7 @@ export function buildMockCore(
 
   // ---- liquidity providers (simulated) ----
 
+  app.get('/lp/instruments', async () => liquidity.instruments());
   app.get<{ Params: { pair: string } }>('/lp/quotes/:pair', async (req) => liquidity.quotes(req.params.pair));
   app.post<{ Body: LpExecutionRequest }>('/lp/executions', async (req) => liquidity.execute(req.body));
 
