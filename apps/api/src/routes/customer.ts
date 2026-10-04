@@ -6,6 +6,7 @@ import type { AppContext } from '../app.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { loadOrder, loadOrders, orderView } from '../orders.js';
 import { fillViewFor, tradeView } from '../fills.js';
+import { dealView } from '../dealing/dealing.js';
 
 const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
   const r = schema.safeParse(value);
@@ -53,6 +54,7 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
       tradingHours: c.tradingHours,
       marketOpen: isMarketOpen(ctx.clock(), c.tradingHours),
       limits: c.limits.segments[session.segment] ?? c.limits.default,
+      dealing: { enabled: c.dealing.enabled, quoteTtlSeconds: c.dealing.quoteTtlSeconds, maxDealQty: c.dealing.maxDealQty },
     };
   });
 
@@ -201,7 +203,18 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
         order by f.seq desc limit $2`,
       [session.customerId, limit],
     );
-    return rows.map((r) => fillViewFor(r, r.my_side, config.get().data, { status: r.settlement_status, receipt_ref: r.receipt_ref }));
+    const c = config.get().data;
+    const p2p = rows.map((r) => fillViewFor(r, r.my_side, c, { status: r.settlement_status, receipt_ref: r.receipt_ref }));
+    // Deals with the bank appear in the same list, with the bank as counterparty.
+    const { rows: deals } = await db.query(
+      `select * from bank_deals where customer_id = $1 and status <> 'REJECTED' order by seq desc limit $2`,
+      [session.customerId, limit],
+    );
+    const bank = deals.flatMap((d) => {
+      const pair = findPair(c, d.pair);
+      return pair ? [dealView(d, pair)] : [];
+    });
+    return [...p2p, ...bank].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
   });
 
   app.get<{ Params: { id: string } }>('/v1/fills/:id/receipt', async (req) => {
@@ -214,6 +227,10 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
         where f.id = $1 and (b.customer_id = $2 or so.customer_id = $2)`,
       [req.params.id, session.customerId],
     );
+    if (!rows.length) {
+      const { rows: deal } = await db.query('select receipt_ref from bank_deals where id = $1 and customer_id = $2', [req.params.id, session.customerId]);
+      rows.push(...deal);
+    }
     if (!rows.length) throw notFound('fill not found');
     if (!rows[0].receipt_ref) throw new ApiError(409, 'NOT_SETTLED', 'the receipt is available once the fill is settled');
     return toWire(await core.getReceipt(rows[0].receipt_ref));

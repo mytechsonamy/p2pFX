@@ -5,7 +5,9 @@ export type StreamEvent =
   | { type: 'book'; pair: string; bids: LevelView[]; asks: LevelView[] }
   | { type: 'order'; customerId: string; order: unknown }
   | { type: 'fill'; customerId: string; fill: unknown }
-  | { type: 'trade'; pair: string; trade: unknown };
+  | { type: 'trade'; pair: string; trade: unknown }
+  /** Best LP prices; the stream turns them into each customer's segment rates. */
+  | { type: 'lp'; pair: string; bid: string; ask: string; at: string };
 
 export interface LevelView {
   price: string;

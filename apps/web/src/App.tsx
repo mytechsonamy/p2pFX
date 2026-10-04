@@ -11,9 +11,13 @@ import { BoardScreen } from './screens/Board';
 import { FillsScreen } from './screens/Fills';
 import { AccountsScreen } from './screens/Accounts';
 import { closeTopSheet } from './components';
+import { BankDealSheet } from './bank';
+import { checkEmbedding, parentOrigin } from './guard';
 
 const allowedOrigins = (import.meta.env.VITE_HOST_ORIGINS ?? '').split(',').filter(Boolean);
 const brandingPreviewAllowed = import.meta.env.DEV || import.meta.env.VITE_BRANDING_PREVIEW === '1';
+/** Development only: accept a launch token in the URL fragment to run the app standalone in a browser. */
+const urlTokenAllowed = import.meta.env.VITE_ALLOW_URL_TOKEN === '1';
 
 type Boot =
   | { state: 'loading' }
@@ -26,8 +30,16 @@ export function App() {
   const [safeArea, setSafeArea] = useState<{ top?: number; bottom?: number }>({});
 
   useEffect(() => {
-    // Launch tokens arrive from the host (`init`, then `refreshToken` after `tokenExpired`). A token in the URL
-    // fragment is accepted for running the app standalone in a browser during development.
+    // Launch tokens arrive only from the host bank app (`init`, then `refreshToken` after `tokenExpired`).
+    const fromUrl = urlTokenAllowed ? new URLSearchParams(location.hash.slice(1)).get('token') : null;
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    const embed = checkEmbedding({ transport: bridge.transport, allowedOrigins, parentOrigin: parentOrigin(), dev: import.meta.env.DEV });
+    if (!embed.ok && !fromUrl) {
+      const t = createTranslator(navigator.language.startsWith('en') ? 'en' : 'tr-TR');
+      setBoot({ state: 'error', message: t(embed.reason === 'notEmbedded' ? 'error.noToken' : 'error.untrustedHost') });
+      return;
+    }
+
     const waiters: ((token: string) => void)[] = [];
     let initial: HostMessage & { type: 'init' } | undefined;
     const off = bridge.onMessage((m) => {
@@ -46,8 +58,6 @@ export function App() {
     });
 
     (async () => {
-      const fromUrl = new URLSearchParams(location.hash.slice(1)).get('token');
-      if (fromUrl) history.replaceState(null, '', location.pathname + location.search);
       const launchToken = fromUrl ?? (await (bridge.send({ type: 'ready', version: PROTOCOL_VERSION }), nextToken(10_000)));
       const session = await api.startSession(launchToken);
       const config = await api.config();
@@ -96,7 +106,7 @@ const TABS: { id: Tab; icon: string }[] = [
 ];
 
 function Shell() {
-  const { branding, config, t, tab, setTab, pair, setPair, bridge, connected, toasts, track } = useExchange();
+  const { branding, config, t, tab, setTab, pair, setPair, bridge, connected, toasts, track, bankDeal } = useExchange();
 
   useEffect(() => track('screen_view', { screen: tab }), [tab, track]);
 
@@ -158,6 +168,7 @@ function Shell() {
         ))}
       </nav>
 
+      {bankDeal && <BankDealSheet key={`${bankDeal.side}:${bankDeal.qty ?? ''}`} />}
       <div className="toasts" aria-live="polite">
         {toasts.map((x) => (
           <div key={x.id} className={`toast ${x.tone}`}>{x.text}</div>

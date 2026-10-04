@@ -21,6 +21,35 @@ packages/
 db/migrations/  Postgres schema
 ```
 
+## Demo in one command
+
+Requires Docker only.
+
+```sh
+docker compose up --build      # or: pnpm demo
+```
+
+Open **http://localhost:5174**: the demo bank app with Ayşe and Mehmet side by side. The stack generates
+its own demo keys, starts Postgres, the mock core banking service, the API and the web app, seeds every
+pair with a trade history and a resting order book, and runs order bots that keep the board moving (they post,
+cancel and trade among themselves, never taking a customer's order). Then, in a second terminal, the scripted end-to-end
+trade (narrated in Turkish) while the phones update live:
+
+```sh
+docker compose run --rm walkthrough
+```
+
+Restarting the stack resets the demo (Postgres and the mock core both run in memory). The presenter's
+script is in [docs/demo.md](docs/demo.md).
+
+| | |
+|---|---|
+| http://localhost:5174 | demo bank app (two phones, bank brand switch, bridge message log) |
+| http://localhost:5174/dealer.html | the bank's FX desk: LP prices, segment rates, positions and P&L, hedges |
+| http://localhost:5173 | the embeddable web app: opened directly it refuses to start (bank app only) |
+| http://localhost:4000 | P2P API |
+| http://localhost:4100 | mock core banking (`/admin/bank-accounts`, `/admin/notifications`, `/admin/faults`) |
+
 ## Run locally
 
 Requires Node 20+, pnpm and Postgres 16.
@@ -44,9 +73,19 @@ In the demo, sell USD as Ayşe and tap her offer in Mehmet's order book to buy i
 shows the same build in a second bank's colours. See [apps/web/README.md](apps/web/README.md) and
 [packages/sdk-bridge/README.md](packages/sdk-bridge/README.md).
 
-Or the backend in Docker: `pnpm dev:keys && docker compose up --build`.
+`pnpm demo:seed` fills the board with market-maker orders and trades, `pnpm demo:bots` keeps it moving and
+`pnpm demo:walkthrough` runs the scripted trade, all against this local setup.
 
-Try a trade (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`):
+## Access
+
+The marketplace only opens inside the bank's app. The bank backend mints a launch token for its logged-in
+customer (RS256 with the bank's key, audience `p2pfx`, at most 60 seconds, one-time `jti`) and the bank app
+hands it over the bridge; the API exchanges it for a 30-minute session held in memory only. The web app
+refuses to start when opened from a link in a browser (no host bridge) or framed by a page outside
+`VITE_HOST_ORIGINS`, and the server sends `Content-Security-Policy: frame-ancestors` (`FRAME_ANCESTORS`) so
+browsers refuse other embedders. Without a bank-signed token the API answers nothing.
+
+Try a trade by hand (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`; `demo-mm-1` to `demo-mm-6` are the seeder's market makers):
 
 ```sh
 login() { curl -s localhost:4000/v1/session -H 'content-type: application/json' \
@@ -80,9 +119,15 @@ Customer (session bearer token from `POST /v1/session`):
 | `POST /v1/orders` | place an order (`Idempotency-Key` header required) |
 | `GET /v1/orders`, `GET /v1/orders/:id`, `DELETE /v1/orders/:id` | list, read, cancel |
 | `GET /v1/fills`, `GET /v1/fills/:id/receipt` | fills from the customer's side, dekont |
-| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `orders`, `fills` |
+| `GET /v1/bank/rates/:pair` | the bank's buy/sell rate for the customer's segment (LP price + segment margin) |
+| `POST /v1/bank/quotes`, `POST /v1/bank/deals` | firm quote with expiry, then instant deal with the bank |
+| `GET /v1/pairs/:pair/history?minutes=` | LP price history |
+| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `bank:<pair>`, `orders`, `fills` |
 
-Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`.
+Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`, `GET /ops/dealing` (LP feeds, positions, P&L, deals, hedges), `POST /ops/dealing/hedges`, `POST /ops/dealing/deals/:id/retry`.
+
+Bank dealing (the bank's own FX desk next to the P2P book: LP aggregation, segment margins, positions,
+auto-hedge) is described in [docs/bank-dealing.md](docs/bank-dealing.md).
 
 ## Tests
 

@@ -22,3 +22,45 @@ details { font-size: 12px; background: #fff; border-radius: 12px; padding: 8px 1
 summary { cursor: pointer; font-weight: 600; color: #4b5563; }
 .log { margin: 8px 0 0; padding-left: 0; list-style: none; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-family: ui-monospace, monospace; font-size: 11px; }
 .log code { color: #6b7280; word-break: break-all; }
+
+.toolbar-actions { display: flex; align-items: flex-end; gap: 16px; }
+.dealer-link { font-weight: 600; color: #0b5fff; text-decoration: none; padding: 8px 0; }
+
+/* Dealer screen */
+body.dealer { background: #0f172a; color: #e2e8f0; }
+body.dealer .toolbar { background: #111827; border-color: #1f2937; }
+body.dealer .toolbar p { color: #94a3b8; }
+.status-dot { font-size: 13px; color: #f87171; }
+.status-dot.live { color: #34d399; }
+#dealer { padding: 20px 32px; display: flex; flex-direction: column; gap: 16px; }
+.desk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.desk-grid.two { grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); }
+.desk-card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 14px 16px; overflow-x: auto; }
+.desk-card h2 { margin: 0 0 10px; font-size: 16px; }
+.desk-card h2 small { font-weight: 400; color: #94a3b8; font-size: 12px; margin-left: 8px; }
+.desk-card h3 { margin: 14px 0 6px; font-size: 13px; color: #94a3b8; font-weight: 600; }
+.desk-card table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.desk-card th { text-align: left; color: #94a3b8; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid #1f2937; }
+.desk-card td { padding: 5px 6px; border-bottom: 1px solid #1e293b; white-space: nowrap; }
+.desk-card tfoot td { font-weight: 700; border-bottom: 0; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.best { color: #fbbf24; font-weight: 700; }
+.pos { color: #34d399; }
+.neg { color: #f87171; }
+.muted { color: #64748b; }
+.desk-card small { color: #94a3b8; }
+.limit { width: 90px; height: 6px; background: #1f2937; border-radius: 3px; overflow: hidden; }
+.limit span { display: block; height: 100%; background: #38bdf8; }
+.limit span.hot { background: #f87171; }
+.desk-card button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; }
+
+.policy { margin: 20px 32px 0; }
+#policy-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; font-size: 13px; }
+#policy-form label { display: flex; align-items: center; gap: 6px; color: #cbd5e1; }
+#policy-form input, #policy-form select { font: inherit; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 4px 8px; }
+#policy-form input[type='number'] { width: 60px; }
+#policy-form input[inputmode] { width: 90px; }
+#policy-form fieldset { border: 1px solid #1f2937; border-radius: 8px; padding: 4px 10px 8px; display: flex; gap: 10px; }
+#policy-form legend { color: #94a3b8; font-weight: 600; }
+.per-ccy { display: flex; gap: 10px; flex-wrap: wrap; }
+tr.same-batch td { border-top: 0; }

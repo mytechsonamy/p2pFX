@@ -6,10 +6,32 @@ import { SignJWT, importPKCS8 } from 'jose';
  * Plays the bank's backend: mints the short-lived launch token the bank app hands to the P2P web app.
  * Uses the demo key pair from the repository's .env (`pnpm dev:keys`).
  */
-function bankBackend(privateKeyPem: string | undefined): Plugin {
+function bankBackend(privateKeyPem: string | undefined, apiUrl: string, opsToken: string | undefined): Plugin {
   return {
     name: 'demo-bank-backend',
     configureServer(server) {
+      // The dealer screen: the bank's back office calls the platform's ops API with its own credentials.
+      server.middlewares.use('/bank/ops', async (req, res) => {
+        if (!opsToken) {
+          res.statusCode = 500;
+          return res.end('OPS_TOKEN missing: run pnpm dev:keys');
+        }
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        try {
+          const upstream = await fetch(`${apiUrl}/ops${req.url ?? ''}`, {
+            method: req.method,
+            headers: { authorization: `Bearer ${opsToken}`, ...(chunks.length ? { 'content-type': 'application/json' } : {}) },
+            body: chunks.length ? Buffer.concat(chunks) : undefined,
+          });
+          res.statusCode = upstream.status;
+          res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
+          res.end(Buffer.from(await upstream.arrayBuffer()));
+        } catch (e) {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ message: (e as Error).message }));
+        }
+      });
       server.middlewares.use('/bank/launch-token', async (req, res) => {
         if (!privateKeyPem) {
           res.statusCode = 500;
@@ -35,8 +57,9 @@ function bankBackend(privateKeyPem: string | undefined): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '../..', '');
   return {
-    plugins: [bankBackend(env.BANK_JWT_PRIVATE_KEY)],
+    plugins: [bankBackend(env.BANK_JWT_PRIVATE_KEY, env.API_URL ?? 'http://localhost:4000', env.OPS_TOKEN)],
     define: { __WEB_APP_URL__: JSON.stringify(env.WEB_APP_URL ?? 'http://localhost:5173') },
     server: { port: 5174, host: true },
+    build: { rollupOptions: { input: { main: 'index.html', dealer: 'dealer.html' } } },
   };
 });

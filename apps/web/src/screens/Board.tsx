@@ -3,6 +3,7 @@ import { useExchange, usePair } from '../store';
 import { Empty } from '../components';
 import { addDecimal, compareDecimal, currencySymbol, formatDecimal, formatPrice } from '../format';
 import type { Book, BookLevel, PairInfo, Side } from '../types';
+import { BankRow } from '../bank';
 
 /** The live market board: the day's numbers, full depth, a depth chart and the trade tape. */
 export function BoardScreen() {
@@ -10,6 +11,7 @@ export function BoardScreen() {
   return (
     <div className="board">
       <Summary pair={pair} />
+      <BankRow pair={pair} />
       <DepthLadder pair={pair} />
       <DepthChart pair={pair} />
       <Tape pair={pair} />

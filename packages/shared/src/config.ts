@@ -33,6 +33,53 @@ export const LimitsSchema = z.object({
   maxDailyNotional: decimalString,
 });
 
+const MarginSchema = z.object({ buyBips: z.number().int().min(0), sellBips: z.number().int().min(0) });
+
+/** The bank's own FX desk: prices aggregated from liquidity providers plus a margin per customer segment. */
+const HedgingSchema = z.object({
+  /** An auto-hedge brings the position down to this share of the limit, keeping its direction (0 = flat). */
+  targetPct: z.number().min(0).max(99),
+  /** Largest single LP ticket per currency; a bigger hedge is split into clips. A missing currency hedges in one ticket. */
+  maxClipQty: z.record(decimalString),
+  /** BEST_LP: every clip goes to the best-priced LP. ACROSS_LPS: clips go round the LPs from best to worst price. */
+  split: z.enum(['BEST_LP', 'ACROSS_LPS']),
+});
+export type HedgingConfig = z.infer<typeof HedgingSchema>;
+
+export const DEFAULT_HEDGING: HedgingConfig = {
+  targetPct: 0,
+  maxClipQty: { USD: '50000', EUR: '50000', GBP: '25000' },
+  split: 'ACROSS_LPS',
+};
+
+export const DealingSchema = z.object({
+  enabled: z.boolean(),
+  /** How long a firm bank quote can be executed. */
+  quoteTtlSeconds: z.number().int().min(1).max(120),
+  /** LP quotes older than this are ignored. */
+  maxStalenessMs: z.number().int().min(100),
+  /** Bips (of the pair's bipSize) over the best LP price: customers buy at ask + buyBips, sell at bid − sellBips. */
+  margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
+  /** Largest single deal per base currency. */
+  maxDealQty: z.record(decimalString),
+  /** Open position per currency above which the bank hedges (when autoHedge is on). */
+  positionLimits: z.record(decimalString),
+  autoHedge: z.boolean(),
+  hedging: HedgingSchema.default(DEFAULT_HEDGING),
+});
+export type DealingConfig = z.infer<typeof DealingSchema>;
+
+export const DEFAULT_DEALING: DealingConfig = {
+  enabled: true,
+  quoteTtlSeconds: 10,
+  maxStalenessMs: 3000,
+  margins: { default: { buyBips: 10, sellBips: 10 }, segments: { premium: { buyBips: 4, sellBips: 4 } } },
+  maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
+  positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },
+  autoHedge: true,
+  hedging: DEFAULT_HEDGING,
+};
+
 export const BankConfigSchema = z.object({
   bank: z.object({ code: z.string().min(1), name: z.string().min(1) }),
   branding: z.object({
@@ -71,6 +118,7 @@ export const BankConfigSchema = z.object({
   }),
   limits: z.object({ default: LimitsSchema, segments: z.record(LimitsSchema) }),
   orderRateLimit: z.object({ max: z.number().int().min(1), windowSeconds: z.number().int().min(1) }),
+  dealing: DealingSchema.default(DEFAULT_DEALING),
 });
 export type BankConfig = z.infer<typeof BankConfigSchema>;
 
@@ -119,4 +167,5 @@ export const DEFAULT_CONFIG: BankConfig = {
     segments: { premium: { maxOrderNotional: '10000000', maxDailyNotional: '50000000' } },
   },
   orderRateLimit: { max: 30, windowSeconds: 60 },
+  dealing: DEFAULT_DEALING,
 };

@@ -1,11 +1,35 @@
-# Prototype stack: Postgres, the mock core banking system and the P2P API.
-# Run `pnpm dev:keys` first to create .env with the demo bank key pair and secrets.
+# The whole demo in one command: `docker compose up --build` (or `pnpm demo`), then open http://localhost:5174.
+#
+#   keys       generates the demo bank's RS256 key pair, session secret and ops token into a shared volume
+#   postgres   the platform database (in memory: restarting the stack resets the demo)
+#   mock-core  mock core banking: customer accounts, holds, FX postings, dekont, reference rates
+#   api        the P2P platform API, matching and settlement
+#   seed       one-off: fills the board with a trade history and resting orders, then exits
+#   bots       demo order bots: keep posting, cancelling and trading among themselves so the board stays alive
+#   web        the embeddable customer UI (http://localhost:5173)
+#   demo-host  the fake bank app with two phones side by side (http://localhost:5174)
+#
+# Scripted end-to-end trade, narrated in Turkish: `docker compose run --rm walkthrough`.
+# One image for every Node service. Only `keys` builds it: when several services share an image name and
+# each has a build section, Compose builds them in parallel and the exports collide ("image already exists").
+x-node: &node
+  image: p2pfx-demo
+  pull_policy: never
+  volumes: ["keys:/keys"]
+
 services:
+  keys:
+    <<: *node
+    build: .
+    command: ["node", "--import", "tsx", "scripts/dev-keys.ts", "--out", "/keys/.env"]
+
   postgres:
     image: postgres:16
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: p2pfx
+    # In memory, like the mock core, so a restart starts both from the same clean demo state.
+    tmpfs: ["/var/lib/postgresql/data"]
     ports: ["5432:5432"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
@@ -13,7 +37,7 @@ services:
       retries: 20
 
   mock-core:
-    build: .
+    <<: *node
     command: ["node", "--import", "tsx", "apps/mock-core/src/main.ts"]
     environment:
       PORT: "4100"
@@ -21,13 +45,75 @@ services:
     ports: ["4100:4100"]
 
   api:
-    build: .
-    env_file: .env
+    <<: *node
+    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "apps/api/src/main.ts"]
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/p2pfx
       CORE_BANKING_URL: http://mock-core:4100
       PORT: "4000"
     ports: ["4000:4000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 2s
+      retries: 30
     depends_on:
+      keys: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
       mock-core: { condition: service_started }
+
+  seed:
+    <<: *node
+    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/seed-market.ts"]
+    environment: &clients
+      API_URL: http://api:4000
+      CORE_BANKING_URL: http://mock-core:4100
+    depends_on:
+      api: { condition: service_healthy }
+
+  bots:
+    <<: *node
+    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/market-bots.ts"]
+    environment:
+      <<: *clients
+      BOT_INTERVAL_MS: "1500"
+    depends_on:
+      seed: { condition: service_completed_successfully }
+
+  web:
+    <<: *node
+    working_dir: /app/apps/web
+    command: ["node", "node_modules/vite/bin/vite.js"]
+    environment:
+      API_URL: http://api:4000
+      # Only the demo bank app may embed the marketplace; opened directly in a browser it refuses to start.
+      VITE_HOST_ORIGINS: http://localhost:5174
+      FRAME_ANCESTORS: http://localhost:5174
+    ports: ["5173:5173"]
+    depends_on:
+      api: { condition: service_healthy }
+
+  demo-host:
+    <<: *node
+    working_dir: /app/apps/demo-host
+    # The browser loads the web app from the host machine, hence localhost.
+    command: ["node", "--env-file=/keys/.env", "node_modules/vite/bin/vite.js"]
+    # /dealer.html is the bank's FX desk; it calls the API's /ops endpoints server-side with OPS_TOKEN.
+    environment:
+      WEB_APP_URL: http://localhost:5173
+      API_URL: http://api:4000
+    ports: ["5174:5174"]
+    depends_on:
+      keys: { condition: service_completed_successfully }
+      web: { condition: service_started }
+      api: { condition: service_healthy }
+
+  walkthrough:
+    <<: *node
+    profiles: ["tools"]
+    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/demo-walkthrough.ts"]
+    environment: *clients
+    depends_on:
+      api: { condition: service_healthy }
+
+volumes:
+  keys:

@@ -16,7 +16,11 @@
     "dev:api": "node --env-file=.env --import tsx --watch apps/api/src/main.ts",
     "dev:web": "pnpm --filter @p2p/web dev",
     "dev:demo-host": "pnpm --filter @p2p/demo-host dev",
-    "build:web": "pnpm --filter @p2p/web build"
+    "build:web": "pnpm --filter @p2p/web build",
+    "demo": "docker compose up --build",
+    "demo:seed": "node --env-file=.env --import tsx scripts/seed-market.ts",
+    "demo:bots": "node --env-file=.env --import tsx scripts/market-bots.ts",
+    "demo:walkthrough": "node --env-file=.env --import tsx scripts/demo-walkthrough.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

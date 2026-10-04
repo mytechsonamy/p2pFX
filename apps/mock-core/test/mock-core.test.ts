@@ -27,3 +27,15 @@ describe('mock-core over HTTP', () => {
     expect((await client.getReferenceRate('USDTRY')).rate).toBe('49.15');
   });
 });
+
+describe('simulated liquidity providers', () => {
+  it('quote around the reference rate and fill at their own price', async () => {
+    await client.setReferenceRate('EURTRY', '53.40');
+    const quotes = (await app.inject({ method: 'GET', url: '/lp/quotes/EURTRY' })).json();
+    expect(quotes.map((q: { lp: string }) => q.lp)).toEqual(['LP-A', 'LP-B', 'LP-C']);
+    for (const q of quotes) expect(Math.abs((Number(q.bid) + Number(q.ask)) / 2 - 53.4)).toBeLessThan(0.5);
+    const exec = (await app.inject({ method: 'POST', url: '/lp/executions', payload: { lp: 'LP-B', pair: 'EURTRY', side: 'BUY', qty: '100.00', ref: 'h1' } })).json();
+    expect(exec).toMatchObject({ lp: 'LP-B', side: 'BUY', tradeRef: expect.stringMatching(/^LP-B-/) });
+    expect((await app.inject({ method: 'GET', url: '/lp/quotes/XXXTRY' })).statusCode).toBe(503);
+  });
+});

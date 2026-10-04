@@ -4,6 +4,7 @@ import { Breakdown, Row, Segmented, Sheet } from '../components';
 import { compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
 import { endOfDay, localDate } from '../time';
 import { newIdempotencyKey, type PlaceOrder } from '../api';
+import { BankRow, BetterAtBank } from '../bank';
 import type { BookLevel, PairInfo, QuoteBreakdown, Side, Validity } from '../types';
 
 interface Draft {
@@ -40,6 +41,7 @@ export function TradeScreen() {
   return (
     <div className="trade">
       <RateStrip pair={pair} />
+      <BankRow pair={pair} />
       <OrderBook
         pair={pair}
         onPick={(level, side) => setDraft((d) => ({ ...d, side, price: level.price, priceTouched: true }))}
@@ -49,9 +51,13 @@ export function TradeScreen() {
   );
 }
 
+/** Reference rate and the top of the P2P book, the same prices the order book below shows. */
 function RateStrip({ pair }: { pair: PairInfo }) {
-  const { rates, t, locale } = useExchange();
+  const { rates, books, t, locale } = useExchange();
   const r = rates[pair.symbol];
+  const book = books[pair.symbol];
+  const bid = book?.bids[0]?.price;
+  const ask = book?.asks[0]?.price;
   return (
     <section className="card rates">
       <div>
@@ -59,13 +65,14 @@ function RateStrip({ pair }: { pair: PairInfo }) {
         <strong>{r ? formatPrice(r.rate, locale) : '—'}</strong>
       </div>
       <div className="buy-text">
-        <small>{t('rate.indicativeBuy')}</small>
-        <strong>{r ? formatPrice(r.buyPrice, locale) : '—'}</strong>
+        <small>{t('rate.bestBid')}</small>
+        <strong>{bid ? formatPrice(bid, locale) : '—'}</strong>
       </div>
       <div className="sell-text">
-        <small>{t('rate.indicativeSell')}</small>
-        <strong>{r ? formatPrice(r.sellPrice, locale) : '—'}</strong>
+        <small>{t('rate.bestAsk')}</small>
+        <strong>{ask ? formatPrice(ask, locale) : '—'}</strong>
       </div>
+      <p className="rates-note">{t('rate.p2pNote')}</p>
     </section>
   );
 }
@@ -270,6 +277,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
       )}
 
       {quote && qty && price && <Breakdown q={quote} pair={pair} compact />}
+      {quote && qty && price && <BetterAtBank side={draft.side} effectivePrice={quote.effectivePrice} qty={qty} />}
 
       {missingAccount && (
         <div className="notice">
