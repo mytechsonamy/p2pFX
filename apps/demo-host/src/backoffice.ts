@@ -793,7 +793,13 @@ app.addEventListener('submit', async (e) => {
       await refresh();
       render();
     } catch (err) {
-      renderLogin(err instanceof OpsError && err.status === 401 ? 'Kullanıcı adı veya şifre hatalı' : (err as Error).message);
+      renderLogin(
+        err instanceof OpsError && err.code === 'NO_OPERATORS'
+          ? 'Henüz backoffice kullanıcısı yok: .env dosyasına OPS_ADMIN_PASSWORD ekleyip API\'yi yeniden başlatın (pnpm dev:keys eksikleri ekler).'
+          : err instanceof OpsError && err.status === 401
+            ? 'Kullanıcı adı veya şifre hatalı'
+            : (err as Error).message,
+      );
     }
     return;
   }

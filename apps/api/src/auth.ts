@@ -164,6 +164,10 @@ export class AuthService {
 
   async opsLogin(username: string, password: string): Promise<{ token: string; operator: Operator; expiresAt: string }> {
     const { rows } = await this.db.query('select * from ops_users where username = $1 and active', [username]);
+    if (!rows.length) {
+      const { rows: any } = await this.db.query('select 1 from ops_users limit 1');
+      if (!any.length) throw new ApiError(401, 'NO_OPERATORS', 'no back office users yet: set OPS_ADMIN_PASSWORD and restart the API');
+    }
     if (!rows.length || !(await checkPassword(password, rows[0].password_hash))) throw unauthorized('wrong username or password');
     await this.db.query('update ops_users set last_login_at = now() where username = $1', [username]);
     const nowSec = Math.floor(this.opts.clock().getTime() / 1000);

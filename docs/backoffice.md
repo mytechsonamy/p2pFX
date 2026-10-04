@@ -1,6 +1,8 @@
 # Backoffice: banka parametreleri
 
 http://localhost:5174/backoffice.html — demo girişi `admin` / `demo-admin` (`OPS_ADMIN_PASSWORD` ile değişir).
+Önceki bir sürümden kalan `.env` dosyası ya da Docker `keys` volume'ü silinmeden çalışır: `pnpm dev:keys` ve
+compose'un `keys` servisi mevcut dosyaya yalnızca eksik değerleri ekler.
 
 Platformdaki her iş parametresi bankanın elinde: kodda sabit iş değeri yok, değerler Postgres'te versiyonlu
 duruyor, değişiklik yeniden başlatma olmadan geçerli oluyor.

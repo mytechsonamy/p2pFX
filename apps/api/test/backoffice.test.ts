@@ -73,6 +73,13 @@ describe('back office', () => {
     expect((await h.req('PATCH', '/ops/users/admin', admin, { active: false })).status).toBe(400);
   });
 
+  it('says when a deployment has no back office users yet', async () => {
+    h = await startHarness();
+    await h.ctx.db.query('delete from ops_users');
+    const r = await h.req('POST', '/ops/login', undefined, { username: 'admin', password: 'admin-pass-123' });
+    expect(r).toMatchObject({ status: 401, body: { error: 'NO_OPERATORS' } });
+  });
+
   it('records who changed what and why, previews changes and restores earlier versions', async () => {
     h = await startHarness();
     const { editor } = await operators();
