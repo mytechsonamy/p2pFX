@@ -74,12 +74,13 @@ Customer (session bearer token from `POST /v1/session`):
 | `GET /v1/config` | branding, pairs with commission per unit, tax, validity options, hours, the customer's limits |
 | `GET /v1/accounts` | the customer's core-banking accounts with balance, held, available |
 | `GET /v1/pairs/:pair/book` | aggregated order book |
+| `GET /v1/pairs/:pair/trades`, `GET /v1/pairs/:pair/stats` | market board: recent trades (anonymous), today's open/high/low/last/volume |
 | `GET /v1/pairs/:pair/rate` | reference rate, indicative all-in buy/sell, price band |
 | `POST /v1/orders/quote` | full breakdown for the confirmation screen |
 | `POST /v1/orders` | place an order (`Idempotency-Key` header required) |
 | `GET /v1/orders`, `GET /v1/orders/:id`, `DELETE /v1/orders/:id` | list, read, cancel |
 | `GET /v1/fills`, `GET /v1/fills/:id/receipt` | fills from the customer's side, dekont |
-| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `orders`, `fills` |
+| `WS /v1/stream?token=` | subscribe to `book:<pair>`, `trades:<pair>`, `orders`, `fills` |
 
 Operations (`OPS_TOKEN` bearer): `GET/PUT /ops/config`, `GET /ops/settlements?status=`, `POST /ops/settlements/:id/retry`, `GET /ops/revenue?from&to`, `PUT /ops/rates/:pair`.
 

@@ -1,4 +1,4 @@
-import type { Account, AppConfig, Book, Fill, Order, QuoteBreakdown, Rate, Receipt, Side, Validity } from './types';
+import type { Account, AppConfig, Book, Fill, Order, PairStats, QuoteBreakdown, Rate, Receipt, Side, Trade, Validity } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -51,6 +51,8 @@ export class Api {
   config = () => this.request<AppConfig>('GET', '/v1/config');
   accounts = () => this.request<Account[]>('GET', '/v1/accounts');
   book = (pair: string) => this.request<Book>('GET', `/v1/pairs/${pair}/book`);
+  trades = (pair: string, limit = 50) => this.request<Trade[]>('GET', `/v1/pairs/${pair}/trades?limit=${limit}`);
+  stats = (pair: string) => this.request<PairStats>('GET', `/v1/pairs/${pair}/stats`);
   rate = (pair: string) => this.request<Rate>('GET', `/v1/pairs/${pair}/rate`);
   quote = (q: { pair: string; side: Side; qty: string; price: string }) => this.request<QuoteBreakdown>('POST', '/v1/orders/quote', q);
   orders = () => this.request<Order[]>('GET', '/v1/orders?limit=200');

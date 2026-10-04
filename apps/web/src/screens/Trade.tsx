@@ -17,7 +17,7 @@ interface Draft {
 }
 
 export function TradeScreen() {
-  const { config, pair: symbol } = useExchange();
+  const { config, pair: symbol, pick, clearPick } = useExchange();
   const pair = usePair();
   const [draft, setDraft] = useState<Draft>(() => ({
     side: 'BUY',
@@ -30,6 +30,12 @@ export function TradeScreen() {
 
   // A new pair starts with a fresh amount and a market price.
   useEffect(() => setDraft((d) => ({ ...d, qty: '', price: '', priceTouched: false })), [symbol]);
+  // A price picked on the board (runs after the reset above when the pair changed too).
+  useEffect(() => {
+    if (!pick || pick.pair !== symbol) return;
+    setDraft((d) => ({ ...d, side: pick.side, price: pick.price, priceTouched: true }));
+    clearPick();
+  }, [pick, symbol, clearPick]);
 
   return (
     <div className="trade">

@@ -63,6 +63,28 @@ export interface Book {
   asks: BookLevel[];
 }
 
+export interface Trade {
+  id: string;
+  pair: string;
+  price: string;
+  qty: string;
+  /** BUY: a buyer took an offer (price ticked up); SELL: a seller hit a bid. */
+  takerSide: Side;
+  at: string;
+}
+
+export interface PairStats {
+  pair: string;
+  open: string | null;
+  high: string | null;
+  low: string | null;
+  last: string | null;
+  prevClose: string | null;
+  volume: string;
+  turnover: string;
+  trades: number;
+}
+
 export interface Rate {
   pair: string;
   rate: string;

@@ -9,9 +9,9 @@ import type { EventBus } from '../events.js';
 import { SettlementService } from '../settlement.js';
 import { LIVE_STATUSES, loadOrder, loadOrders, orderView, remainingOf, requirementFor, type OrderRow } from '../orders.js';
 import { audit } from '../audit.js';
-import { fillViewFor, type FillRow } from '../fills.js';
+import { fillViewFor, tradeView, type FillRow } from '../fills.js';
 
-const BOOK_DEPTH = 10;
+const BOOK_DEPTH = 20;
 
 /** Serialises all work for one pair: matching, cancels and expiries never interleave. */
 class PairWorker {
@@ -278,6 +278,7 @@ export class Exchange {
 
   private async announceFill(fill: FillRow, buy: OrderRow, sell: OrderRow) {
     const config = this.config.get().data;
+    await this.events.publish({ type: 'trade', pair: fill.pair, trade: tradeView(fill, config) });
     for (const o of [buy, sell]) {
       await this.publishOrder(o);
       const view = fillViewFor(fill, o.side, config);

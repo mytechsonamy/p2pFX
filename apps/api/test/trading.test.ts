@@ -103,6 +103,30 @@ describe('block mode', () => {
     expect(book.body).toEqual({ pair: 'USDTRY', bids: [{ price: '49.20', qty: '600.00', count: 1 }], asks: [] });
   });
 
+  it('shows trades and the day on the market board without customer details', async () => {
+    h.customer('alice', { USD: '1000', TRY: '0' });
+    h.customer('bob', { USD: '0', TRY: '100000' });
+    const alice = await h.login('alice');
+    const bob = await h.login('bob');
+    await h.place(alice, { side: 'SELL', qty: '300', price: '49.10' });
+    await h.place(alice, { side: 'SELL', qty: '500', price: '49.20' });
+    await h.place(bob, { side: 'BUY', qty: '600', price: '49.20' });
+
+    const trades = await h.req('GET', '/v1/pairs/USDTRY/trades', bob);
+    expect(trades.body.map((t: { price: string; qty: string; takerSide: string }) => [t.price, t.qty, t.takerSide])).toEqual([
+      ['49.20', '300.00', 'BUY'],
+      ['49.10', '300.00', 'BUY'],
+    ]);
+    expect(Object.keys(trades.body[0]).sort()).toEqual(['at', 'id', 'pair', 'price', 'qty', 'takerSide']);
+
+    const stats = await h.req('GET', '/v1/pairs/USDTRY/stats', alice);
+    expect(stats.body).toEqual({
+      pair: 'USDTRY', open: '49.10', high: '49.20', low: '49.10', last: '49.20', prevClose: null,
+      volume: '600.00', turnover: '29490.00', trades: 2,
+    });
+    expect((await h.req('GET', '/v1/pairs/EURTRY/stats', alice)).body).toMatchObject({ last: null, volume: '0.00', trades: 0 });
+  });
+
   it('rejects an order the customer cannot fund', async () => {
     h.customer('bob', { USD: '0', TRY: '1000' });
     const bob = await h.login('bob');

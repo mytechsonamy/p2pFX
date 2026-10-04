@@ -4,7 +4,8 @@ import pg from 'pg';
 export type StreamEvent =
   | { type: 'book'; pair: string; bids: LevelView[]; asks: LevelView[] }
   | { type: 'order'; customerId: string; order: unknown }
-  | { type: 'fill'; customerId: string; fill: unknown };
+  | { type: 'fill'; customerId: string; fill: unknown }
+  | { type: 'trade'; pair: string; trade: unknown };
 
 export interface LevelView {
   price: string;

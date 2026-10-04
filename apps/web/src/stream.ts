@@ -1,7 +1,8 @@
-import type { Book, Fill, Order } from './types';
+import type { Book, Fill, Order, Trade } from './types';
 
 export type StreamMessage =
   | { channel: `book:${string}`; data: Book }
+  | { channel: `trades:${string}`; data: Trade }
   | { channel: 'orders'; data: Order }
   | { channel: 'fills'; data: Fill }
   | { channel: 'ack' | 'error'; data: unknown };

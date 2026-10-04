@@ -5,7 +5,7 @@ import { toWire } from '@p2p/core-adapter';
 import type { AppContext } from '../app.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { loadOrder, loadOrders, orderView } from '../orders.js';
-import { fillViewFor } from '../fills.js';
+import { fillViewFor, tradeView } from '../fills.js';
 
 const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
   const r = schema.safeParse(value);
@@ -94,6 +94,54 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
       sellPrice: formatPrice(ref - BigInt(pair.commission.sellBips) * bip),
       bandLow: formatPrice(ref - (ref * parsePrice(pair.priceBandPct)) / 100n / 10n ** 8n),
       bandHigh: formatPrice(ref + (ref * parsePrice(pair.priceBandPct)) / 100n / 10n ** 8n),
+    };
+  });
+
+  /** Recent trades on the pair, newest first, as shown on the market board. */
+  app.get<{ Params: { pair: string }; Querystring: { limit?: string } }>('/v1/pairs/:pair/trades', async (req) => {
+    await auth.customer(req);
+    const c = config.get().data;
+    if (!findPair(c, req.params.pair)) throw notFound(`pair ${req.params.pair} not found`);
+    const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
+    const { rows } = await db.query(
+      `select id, pair, book_price, qty, taker_order_id, buy_order_id, created_at from fills where pair = $1 order by seq desc limit $2`,
+      [req.params.pair, limit],
+    );
+    return rows.map((r) => tradeView(r, c));
+  });
+
+  /** Today's session on the pair (in the bank's time zone): open, high, low, last, volume, previous close. */
+  app.get<{ Params: { pair: string } }>('/v1/pairs/:pair/stats', async (req) => {
+    await auth.customer(req);
+    const c = config.get().data;
+    const pair = findPair(c, req.params.pair);
+    if (!pair) throw notFound(`pair ${req.params.pair} not found`);
+    const { rows } = await db.query(
+      `with day as (select (date_trunc('day', now() at time zone $2) at time zone $2) as start),
+            today as (select f.* from fills f, day where f.pair = $1 and f.created_at >= day.start)
+       select (select book_price from today order by seq limit 1) as open,
+              (select book_price from today order by seq desc limit 1) as last,
+              (select max(book_price) from today) as high,
+              (select min(book_price) from today) as low,
+              (select coalesce(sum(qty), 0) from today) as volume,
+              (select coalesce(sum(notional), 0) from today) as turnover,
+              (select count(*) from today) as trades,
+              (select book_price from fills f, day where f.pair = $1 and f.created_at < day.start order by seq desc limit 1) as prev_close`,
+      // Fill timestamps come from the database clock, so the day boundary does too.
+      [pair.symbol, c.tradingHours.timezone],
+    );
+    const r = rows[0];
+    const price = (v: string | null) => (v == null ? null : formatPrice(parsePrice(v)));
+    return {
+      pair: pair.symbol,
+      open: price(r.open),
+      high: price(r.high),
+      low: price(r.low),
+      last: price(r.last),
+      prevClose: price(r.prev_close),
+      volume: formatDecimal(BigInt(r.volume), pair.baseDecimals),
+      turnover: formatDecimal(BigInt(r.turnover), pair.quoteDecimals),
+      trades: Number(r.trades),
     };
   });
 

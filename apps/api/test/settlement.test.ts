@@ -102,7 +102,7 @@ describe('stream', () => {
     const ws = await h.app.injectWS(`/v1/stream?token=${alice}`);
     const messages: { channel: string; data: any }[] = [];
     ws.on('message', (m: Buffer) => messages.push(JSON.parse(m.toString())));
-    ws.send(JSON.stringify({ op: 'subscribe', channels: ['book:USDTRY', 'orders', 'fills'] }));
+    ws.send(JSON.stringify({ op: 'subscribe', channels: ['book:USDTRY', 'trades:USDTRY', 'orders', 'fills'] }));
     await waitFor(() => messages.some((m) => m.channel === 'ack'));
     expect(messages[0]).toEqual({ channel: 'book:USDTRY', data: { pair: 'USDTRY', bids: [], asks: [] } });
 
@@ -112,6 +112,8 @@ describe('stream', () => {
     await waitFor(() => messages.some((m) => m.channel === 'fills'));
     const fill = messages.find((m) => m.channel === 'fills')!.data;
     expect(fill).toMatchObject({ side: 'SELL', total: '49001.80' });
+    await waitFor(() => messages.some((m) => m.channel === 'trades:USDTRY'));
+    expect(messages.find((m) => m.channel === 'trades:USDTRY')!.data).toMatchObject({ price: '49.15', qty: '1000.00', takerSide: 'BUY' });
     // Bob's events are not sent to Alice.
     expect(messages.filter((m) => m.channel === 'orders').every((m) => m.data.side === 'SELL')).toBe(true);
     ws.terminate();

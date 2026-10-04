@@ -7,6 +7,7 @@ import { applyTheme, mergeBranding } from './theme';
 import type { AppConfig, Branding } from './types';
 import { TradeScreen } from './screens/Trade';
 import { OrdersScreen } from './screens/Orders';
+import { BoardScreen } from './screens/Board';
 import { FillsScreen } from './screens/Fills';
 import { AccountsScreen } from './screens/Accounts';
 import { closeTopSheet } from './components';
@@ -88,6 +89,7 @@ export function App() {
 
 const TABS: { id: Tab; icon: string }[] = [
   { id: 'trade', icon: 'M4 7h13l-3-3M20 17H7l3 3' },
+  { id: 'board', icon: 'M4 20V10M10 20V4M16 20v-7M22 20H2' },
   { id: 'orders', icon: 'M6 4h12v16H6zM9 8h6M9 12h6M9 16h4' },
   { id: 'fills', icon: 'M5 12l4 4L19 6' },
   { id: 'accounts', icon: 'M3 7h18v12H3zM3 11h18' },
@@ -123,7 +125,7 @@ function Shell() {
         )}
       </header>
 
-      {(tab === 'trade' || tab === 'orders') && config.pairs.length > 1 && (
+      {(tab === 'trade' || tab === 'board' || tab === 'orders') && config.pairs.length > 1 && (
         <nav className="pairs" role="tablist">
           {config.pairs.map((p) => (
             <button key={p.symbol} role="tab" aria-selected={p.symbol === pair} className={p.symbol === pair ? 'active' : ''} onClick={() => setPair(p.symbol)}>
@@ -139,6 +141,7 @@ function Shell() {
 
       <main className="content">
         {tab === 'trade' && <TradeScreen />}
+        {tab === 'board' && <BoardScreen />}
         {tab === 'orders' && <OrdersScreen />}
         {tab === 'fills' && <FillsScreen />}
         {tab === 'accounts' && <AccountsScreen />}

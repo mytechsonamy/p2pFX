@@ -5,7 +5,7 @@ import type { StreamEvent } from '../events.js';
 
 /**
  * WebSocket /v1/stream?token=<session>. Client sends
- *   { "op": "subscribe", "channels": ["book:USDTRY", "orders", "fills"] }
+ *   { "op": "subscribe", "channels": ["book:USDTRY", "trades:USDTRY", "orders", "fills"] }
  * and receives { channel, data } messages. Book subscriptions get a snapshot first.
  */
 export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
@@ -25,6 +25,7 @@ export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
       if (e.type === 'book' && channels.has(`book:${e.pair}`)) send(`book:${e.pair}`, { pair: e.pair, bids: e.bids, asks: e.asks });
       else if (e.type === 'order' && e.customerId === session.customerId && channels.has('orders')) send('orders', e.order);
       else if (e.type === 'fill' && e.customerId === session.customerId && channels.has('fills')) send('fills', e.fill);
+      else if (e.type === 'trade' && channels.has(`trades:${e.pair}`)) send(`trades:${e.pair}`, e.trade);
     });
 
     socket.on('message', async (raw: Buffer) => {

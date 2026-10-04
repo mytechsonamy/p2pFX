@@ -100,3 +100,13 @@ export function compareDecimal(a: string, b: string): number {
   const d = scaled(a) - scaled(b);
   return d === 0n ? 0 : d < 0n ? -1 : 1;
 }
+
+/** Exact sum of two decimal strings, with `decimals` fraction digits. */
+export function addDecimal(a: string, b: string, decimals: number): string {
+  const n = scaled(a) + scaled(b);
+  const neg = n < 0n;
+  const abs = (neg ? -n : n).toString().padStart(SCALE + 1, '0');
+  const int = abs.slice(0, -SCALE);
+  const frac = abs.slice(-SCALE).slice(0, decimals);
+  return (neg ? '-' : '') + int + (decimals ? '.' + frac : '');
+}

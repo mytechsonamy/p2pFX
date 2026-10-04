@@ -83,3 +83,21 @@ describe('strings and theme', () => {
     expect(merged).toMatchObject({ productName: 'Yıldız Döviz', radius: 4, colors: { primary: '#14532D', buy: '#059669' }, locale: 'tr-TR' });
   });
 });
+
+describe('market board', () => {
+  it('adds decimals exactly', async () => {
+    const { addDecimal } = await import('../src/format');
+    expect(addDecimal('1000.50', '0.25', 2)).toBe('1000.75');
+    expect(addDecimal('49.20', '-49.15', 4)).toBe('0.0500');
+    expect(addDecimal('49.15', '-49.20', 4)).toBe('-0.0500');
+  });
+
+  it('folds a trade into the day statistics', async () => {
+    const { applyTrade } = await import('../src/store');
+    const trade = (price: string, qty: string) => ({ id: price + qty, pair: 'USDTRY', price, qty, takerSide: 'BUY' as const, at: '' });
+    let s = applyTrade(undefined, trade('49.15', '100'), 2);
+    s = applyTrade(s, trade('49.30', '50.5'), 2);
+    s = applyTrade(s, trade('49.10', '10'), 2);
+    expect(s).toMatchObject({ open: '49.15', high: '49.30', low: '49.10', last: '49.10', volume: '160.50', trades: 3 });
+  });
+});

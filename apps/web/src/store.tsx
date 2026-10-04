@@ -3,10 +3,33 @@ import type { WebBridge, WebMessage } from '@p2p/sdk-bridge';
 import { Api, ApiError } from './api';
 import { Stream, type StreamMessage } from './stream';
 import { createTranslator, hasKey, type Translate } from './i18n';
-import type { Account, AppConfig, Book, Branding, Fill, Order, Rate } from './types';
-import { formatDecimal, formatPrice } from './format';
+import type { Account, AppConfig, Book, Branding, Fill, Order, PairStats, Rate, Side, Trade } from './types';
+import { addDecimal, compareDecimal, formatDecimal, formatPrice } from './format';
 
-export type Tab = 'trade' | 'orders' | 'fills' | 'accounts';
+export type Tab = 'trade' | 'board' | 'orders' | 'fills' | 'accounts';
+
+/** A price picked on the board, handed to the order ticket. */
+export interface Pick {
+  pair: string;
+  side: Side;
+  price: string;
+}
+
+const TAPE_LENGTH = 100;
+
+/** Folds a new trade into the day's statistics. */
+export function applyTrade(s: PairStats | undefined, t: Trade, baseDecimals: number): PairStats {
+  const cur = s ?? { pair: t.pair, open: null, high: null, low: null, last: null, prevClose: null, volume: '0', turnover: '0', trades: 0 };
+  return {
+    ...cur,
+    open: cur.open ?? t.price,
+    high: cur.high == null || compareDecimal(t.price, cur.high) > 0 ? t.price : cur.high,
+    low: cur.low == null || compareDecimal(t.price, cur.low) < 0 ? t.price : cur.low,
+    last: t.price,
+    volume: addDecimal(cur.volume, t.qty, baseDecimals),
+    trades: cur.trades + 1,
+  };
+}
 
 export interface Toast {
   id: number;
@@ -27,6 +50,13 @@ export interface Exchange {
   fills: Fill[];
   books: Record<string, Book>;
   rates: Record<string, Rate>;
+  /** Recent trades per pair, newest first. */
+  trades: Record<string, Trade[]>;
+  stats: Record<string, PairStats>;
+  pick: Pick | null;
+  /** Opens the order ticket with a side and price chosen on the board. */
+  pickPrice: (p: Pick) => void;
+  clearPick: () => void;
   pair: string;
   setPair: (p: string) => void;
   tab: Tab;
@@ -64,6 +94,9 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
   const [fills, setFills] = useState<Fill[]>([]);
   const [books, setBooks] = useState<Record<string, Book>>({});
   const [rates, setRates] = useState<Record<string, Rate>>({});
+  const [trades, setTrades] = useState<Record<string, Trade[]>>({});
+  const [stats, setStats] = useState<Record<string, PairStats>>({});
+  const [pick, setPick] = useState<Pick | null>(null);
   const [pair, setPair] = useState(config.pairs[0]?.symbol ?? '');
   const [tab, setTab] = useState<Tab>('trade');
   const [connected, setConnected] = useState(false);
@@ -125,13 +158,30 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
 
   const track = useCallback<Exchange['track']>((name, props) => bridge.send({ type: 'analyticsEvent', name, props }), [bridge]);
 
+  const seenTrades = useRef(new Set<string>());
+  const statsTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const refreshStats = useCallback(
+    (pair: string) => {
+      clearTimeout(statsTimers.current[pair]);
+      statsTimers.current[pair] = setTimeout(() => api.stats(pair).then((s) => setStats((cur) => ({ ...cur, [pair]: s })), () => {}), 1000);
+    },
+    [api],
+  );
+
   const loadAll = useCallback(async () => {
     const [acc, ord, fil] = await Promise.all([api.accounts(), api.orders(), api.fills()]);
     setAccounts(acc);
     setOrders(ord);
     setFills(fil);
-    const bks = await Promise.all(config.pairs.map((p) => api.book(p.symbol)));
+    const [bks, trs, sts] = await Promise.all([
+      Promise.all(config.pairs.map((p) => api.book(p.symbol))),
+      Promise.all(config.pairs.map((p) => api.trades(p.symbol, TAPE_LENGTH))),
+      Promise.all(config.pairs.map((p) => api.stats(p.symbol))),
+    ]);
     setBooks(Object.fromEntries(bks.map((b) => [b.pair, b])));
+    trs.flat().forEach((tr) => seenTrades.current.add(tr.id));
+    setTrades(Object.fromEntries(config.pairs.map((p, i) => [p.symbol, trs[i]])));
+    setStats(Object.fromEntries(sts.map((s) => [s.pair, s])));
   }, [api, config.pairs]);
 
   const loadRates = useCallback(async () => {
@@ -140,8 +190,8 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
   }, [api, config.pairs]);
 
   // Latest handlers for the stream callbacks, which are created once.
-  const handlers = useRef({ toast, refreshAccounts, refreshFills, upsertOrder, t, locale, loadAll });
-  handlers.current = { toast, refreshAccounts, refreshFills, upsertOrder, t, locale, loadAll };
+  const handlers = useRef({ toast, refreshAccounts, refreshFills, refreshStats, upsertOrder, t, locale, loadAll });
+  handlers.current = { toast, refreshAccounts, refreshFills, refreshStats, upsertOrder, t, locale, loadAll };
 
   useEffect(() => {
     loadAll().catch((e) => toast(errorText(e), 'error'));
@@ -158,6 +208,15 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
         if (m.channel.startsWith('book:')) {
           const b = m.data as Book;
           setBooks((cur) => ({ ...cur, [b.pair]: b }));
+        } else if (m.channel.startsWith('trades:')) {
+          const tr = m.data as Trade;
+          const decimals = config.pairs.find((p) => p.symbol === tr.pair)?.baseDecimals ?? 2;
+          if (seenTrades.current.has(tr.id)) return;
+          seenTrades.current.add(tr.id);
+          setTrades((cur) => ({ ...cur, [tr.pair]: [tr, ...(cur[tr.pair] ?? [])].slice(0, TAPE_LENGTH) }));
+          // Updated at once from the trade; turnover and the rest are refreshed from the server shortly after.
+          setStats((s) => ({ ...s, [tr.pair]: applyTrade(s[tr.pair], tr, decimals) }));
+          h.refreshStats(tr.pair);
         } else if (m.channel === 'orders') {
           h.upsertOrder(m.data as Order);
           h.refreshAccounts();
@@ -184,7 +243,7 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
       // Any authenticated call renews the session through the host, then the socket reconnects.
       () => api.config().then(() => stream.restart(), () => {}),
     );
-    stream.subscribe('orders', 'fills', ...config.pairs.map((p) => `book:${p.symbol}`));
+    stream.subscribe('orders', 'fills', ...config.pairs.flatMap((p) => [`book:${p.symbol}`, `trades:${p.symbol}`]));
     stream.connect();
     return () => {
       clearInterval(rateTimer);
@@ -204,6 +263,15 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
     fills,
     books,
     rates,
+    trades,
+    stats,
+    pick,
+    pickPrice: (p: Pick) => {
+      setPick(p);
+      setPair(p.pair);
+      setTab('trade');
+    },
+    clearPick: () => setPick(null),
     pair,
     setPair,
     tab,
