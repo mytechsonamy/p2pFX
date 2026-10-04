@@ -40,6 +40,7 @@ interface Deal {
   createdAt: string;
 }
 interface Hedge {
+  batchId: string;
   pair: string;
   side: 'BUY' | 'SELL';
   qty: string;
@@ -49,7 +50,12 @@ interface Hedge {
   at: string;
 }
 interface Desk {
-  dealing: { autoHedge: boolean; margins: { default: { buyBips: number; sellBips: number }; segments: Record<string, { buyBips: number; sellBips: number }> } };
+  dealing: {
+    autoHedge: boolean;
+    positionLimits: Record<string, string>;
+    hedging: { targetPct: number; maxClipQty: Record<string, string>; split: 'BEST_LP' | 'ACROSS_LPS' };
+    margins: { default: { buyBips: number; sellBips: number }; segments: Record<string, { buyBips: number; sellBips: number }> };
+  };
   pairs: PairView[];
   positions: Position[];
   deals: Deal[];
@@ -113,16 +119,18 @@ function render(d: Desk) {
       <td class="num pos">${money(x.margin)}</td><td>${x.settlementStatus === 'SETTLED' ? '✓' : esc(x.settlementStatus)}</td></tr>`,
     )
     .join('');
+  const batches = new Map<string, number>();
+  for (const h of d.hedges) batches.set(h.batchId, (batches.get(h.batchId) ?? 0) + 1);
   const hedges = d.hedges
     .map(
-      (h) => `<tr><td>${time(h.at)}</td><td>${h.reason === 'AUTO' ? 'Otomatik' : 'Manuel'}</td><td>${h.side === 'BUY' ? 'Banka aldı' : 'Banka sattı'}</td>
+      (h, i) => `<tr class="${i > 0 && d.hedges[i - 1].batchId === h.batchId ? 'same-batch' : ''}"><td>${time(h.at)}${batches.get(h.batchId)! > 1 ? ' <small>parça</small>' : ''}</td><td>${h.reason === 'AUTO' ? 'Otomatik' : 'Manuel'}</td><td>${h.side === 'BUY' ? 'Banka aldı' : 'Banka sattı'}</td>
       <td class="num">${money(h.qty)} ${h.pair.slice(0, 3)}</td><td class="num">${rate(h.rate)}</td><td>${esc(h.lp)}</td></tr>`,
     )
     .join('');
   root.innerHTML = `
     <div class="desk-grid">${d.pairs.map(pairCard).join('')}</div>
     <section class="desk-card wide">
-      <h2>Pozisyonlar <small>Otomatik hedge: ${d.dealing.autoHedge ? 'açık, limit aşılınca LP ile kapatılır' : 'kapalı'}</small></h2>
+      <h2>Pozisyonlar <small>${policyText(d.dealing)}</small></h2>
       <table><thead><tr><th>Döviz</th><th class="num">Pozisyon</th><th class="num">Ort. maliyet</th><th class="num">LP orta</th>
         <th class="num">Gerçekleşmemiş K/Z (TL)</th><th class="num">Gerçekleşen K/Z (TL)</th><th class="num">Marj geliri (TL)</th><th>Limit</th><th></th></tr></thead>
         <tbody>${d.positions.map(positionRow).join('')}</tbody></table>
@@ -136,6 +144,65 @@ function render(d: Desk) {
         <tbody>${hedges || '<tr><td colspan="6" class="muted">Henüz hedge yok</td></tr>'}</tbody></table></section>
     </div>`;
 }
+
+function policyText(d: Desk['dealing']) {
+  if (!d.autoHedge) return 'Otomatik hedge kapalı';
+  const h = d.hedging;
+  const target = h.targetPct === 0 ? 'sıfırlanır' : `limitin %${h.targetPct}'ine indirilir`;
+  return `Otomatik hedge: limit aşılınca pozisyon ${target}, ${h.split === 'ACROSS_LPS' ? "parçalar LP'lere dağıtılır" : 'en iyi LP ile yapılır'}`;
+}
+
+// Hedge rule editor: reads /ops/config once, writes the dealing part back with PUT /ops/config.
+const policy = document.getElementById('policy')!;
+const form = document.getElementById('policy-form') as HTMLFormElement;
+const msg = document.getElementById('policy-msg')!;
+let current: { data: { dealing: Desk['dealing'] & Record<string, unknown> } & Record<string, unknown> } | undefined;
+
+async function loadPolicy() {
+  const res = await fetch('/bank/ops/config');
+  if (!res.ok) return;
+  current = await res.json();
+  const d = current!.data.dealing;
+  (form.elements.namedItem('autoHedge') as HTMLInputElement).checked = d.autoHedge;
+  (form.elements.namedItem('targetPct') as HTMLInputElement).value = String(d.hedging.targetPct);
+  (form.elements.namedItem('split') as HTMLSelectElement).value = d.hedging.split;
+  document.getElementById('per-ccy')!.innerHTML = Object.keys(d.positionLimits)
+    .map(
+      (c) => `<fieldset><legend>${c}</legend>
+        <label>Limit <input name="limit-${c}" value="${esc(d.positionLimits[c])}" inputmode="decimal" /></label>
+        <label>En büyük parça <input name="clip-${c}" value="${esc(d.hedging.maxClipQty[c] ?? '')}" inputmode="decimal" placeholder="tek parça" /></label>
+      </fieldset>`,
+    )
+    .join('');
+  policy.hidden = false;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!current) return;
+  const f = new FormData(form);
+  const d = current.data.dealing;
+  const positionLimits: Record<string, string> = {};
+  const maxClipQty: Record<string, string> = {};
+  for (const c of Object.keys(d.positionLimits)) {
+    positionLimits[c] = String(f.get(`limit-${c}`) ?? '').trim();
+    const clip = String(f.get(`clip-${c}`) ?? '').trim();
+    if (clip) maxClipQty[c] = clip;
+  }
+  const dealing = {
+    ...d,
+    autoHedge: f.get('autoHedge') === 'on',
+    positionLimits,
+    hedging: { targetPct: Number(f.get('targetPct')), split: f.get('split'), maxClipQty },
+  };
+  const res = await fetch('/bank/ops/config', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...current.data, dealing }),
+  });
+  msg.textContent = res.ok ? 'Kaydedildi' : `Kaydedilemedi: ${(await res.text()).slice(0, 120)}`;
+  if (res.ok) await loadPolicy();
+});
 
 async function refresh() {
   try {
@@ -162,5 +229,6 @@ root.addEventListener('click', async (e) => {
   refresh();
 });
 
+loadPolicy();
 refresh();
 setInterval(refresh, 1000);

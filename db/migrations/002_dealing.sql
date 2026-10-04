@@ -70,6 +70,8 @@ create table hedges (
   rate numeric(24, 8) not null,
   lp text not null,
   lp_trade_ref text not null,
+  -- clips of one hedge decision share a batch
+  batch_id uuid not null,
   reason text not null check (reason in ('AUTO', 'MANUAL')),
   actor text not null,
   created_at timestamptz not null default now()

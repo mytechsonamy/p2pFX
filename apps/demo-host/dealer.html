@@ -15,6 +15,22 @@
       </div>
       <span id="status" class="status-dot">bağlanıyor…</span>
     </header>
+    <section id="policy" class="desk-card policy" hidden>
+      <h2>Otomatik hedge kuralı <small>Banka parametresi, kaydedince anında geçerli</small></h2>
+      <form id="policy-form">
+        <label><input type="checkbox" name="autoHedge" /> Otomatik hedge açık</label>
+        <label>Hedef seviye <input name="targetPct" type="number" min="0" max="99" step="1" /> % (limitin; 0 = sıfırla)</label>
+        <label>Dağıtım
+          <select name="split">
+            <option value="ACROSS_LPS">Parçaları LP'lere sırayla dağıt</option>
+            <option value="BEST_LP">Hepsi en iyi fiyatlı LP'ye</option>
+          </select>
+        </label>
+        <div class="per-ccy" id="per-ccy"></div>
+        <button type="submit">Kaydet</button>
+        <span id="policy-msg" class="muted"></span>
+      </form>
+    </section>
     <main id="dealer"></main>
     <script type="module" src="/src/dealer.ts"></script>
   </body>

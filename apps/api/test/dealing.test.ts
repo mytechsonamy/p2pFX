@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_CONFIG, parsePrice } from '@p2p/shared';
 import { OPS, startHarness, units, type Harness } from './helpers.js';
-import { positionOf } from '../src/dealing/positions.js';
+import { autoHedgeQty, planHedge, positionOf } from '../src/dealing/positions.js';
 
 let h: Harness;
 afterEach(async () => {
@@ -77,6 +77,40 @@ describe('bank dealing', () => {
     expect(pos.qty).toBe('0.00');
   });
 
+  it('hedges down to the target share of the limit in clips spread across the LPs', async () => {
+    h = await startHarness();
+    await h.setConfig((c) => ({
+      ...c,
+      dealing: {
+        ...c.dealing,
+        positionLimits: { ...c.dealing.positionLimits, USD: '1500' },
+        hedging: { targetPct: 50, maxClipQty: { USD: '500' }, split: 'ACROSS_LPS' },
+      },
+    }));
+    h.customer('zeynep', { USD: '0', TRY: '1000000' });
+    const zeynep = await h.login('zeynep');
+    await deal(zeynep, 'BUY', '1000');
+    await deal(zeynep, 'BUY', '1000');
+
+    // −2000 over a 1500 limit, target 50% = 750 short → buy 1250 as 500 + 500 + 250, best LP first.
+    const dealer = (await h.req('GET', '/ops/dealing', OPS)).body;
+    const clips = [...dealer.hedges].reverse();
+    expect(clips.map((x: { lp: string; qty: string }) => [x.lp, x.qty])).toEqual([['LP-A', '500.00'], ['LP-B', '500.00'], ['LP-C', '250.00']]);
+    expect(new Set(clips.map((x: { batchId: string }) => x.batchId)).size).toBe(1);
+    expect(dealer.positions.find((p: { pair: string }) => p.pair === 'USDTRY').qty).toBe('-750.00');
+  });
+
+  it('moves a clip to the next LP when one rejects it', async () => {
+    h = await startHarness();
+    h.liquidity.rejecting.add('LP-A');
+    const res = await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'BUY', qty: '100' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ qty: '100.00', unhedged: '0.00', clips: [expect.objectContaining({ lp: 'LP-B', qty: '100.00' })] });
+
+    h.liquidity.rejecting.add('LP-B').add('LP-C');
+    expect((await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'BUY', qty: '100' })).status).toBe(503);
+  });
+
   it('hedges back to flat with the best LP when a deal takes the position over its limit', async () => {
     h = await startHarness();
     await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, positionLimits: { ...c.dealing.positionLimits, USD: '1500' } } }));
@@ -98,5 +132,15 @@ describe('bank dealing', () => {
     const p = positionOf(usd, [t('BUY', '100', '49'), t('BUY', '100', '50'), t('SELL', '50', '51'), t('SELL', '250', '48')]);
     // avg 49.5; sell 50 @51 → +75; sell 150 @48 closes → −225; 100 short opened at 48.
     expect(p).toMatchObject({ qty: units('-100'), avgRate: parsePrice('48'), realized: units('-150') });
+  });
+
+  it('plans hedge clips and the auto-hedge size', () => {
+    const lps = ['LP-A', 'LP-B'];
+    expect(planHedge(units('1200'), units('500'), lps, 'BEST_LP').map((c) => [c.lp, c.qty])).toEqual([['LP-A', units('500')], ['LP-A', units('500')], ['LP-A', units('200')]]);
+    expect(planHedge(units('1200'), units('500'), lps, 'ACROSS_LPS').map((c) => c.lp)).toEqual(['LP-A', 'LP-B', 'LP-A']);
+    expect(planHedge(units('1200'), undefined, lps, 'ACROSS_LPS')).toEqual([{ lp: 'LP-A', qty: units('1200') }]);
+    expect(autoHedgeQty(units('-900'), units('1000'), 0)).toBe(0n);
+    expect(autoHedgeQty(units('-2000'), units('1000'), 0)).toBe(units('2000'));
+    expect(autoHedgeQty(units('2000'), units('1000'), 25)).toBe(units('1750'));
   });
 });

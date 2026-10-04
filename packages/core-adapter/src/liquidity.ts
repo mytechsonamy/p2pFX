@@ -70,6 +70,8 @@ export class MockLiquidity implements LiquidityAdapter {
   private readonly mids = new Map<string, { mid: number; at: number }>();
   private readonly executions = new Map<string, LpExecution>();
   private seq = 0;
+  /** LPs that reject every execution (to simulate an LP going down). */
+  readonly rejecting = new Set<string>();
   private readonly volatility: number;
   private readonly reversion: number;
   private readonly clock: () => number;
@@ -118,6 +120,7 @@ export class MockLiquidity implements LiquidityAdapter {
     if (done) return done;
     const quote = (await this.quotes(req.pair)).find((q) => q.lp === req.lp);
     if (!quote) throw new LiquidityError(`unknown LP ${req.lp}`);
+    if (this.rejecting.has(req.lp)) throw new LiquidityError(`${req.lp} rejected the order`);
     const exec: LpExecution = {
       ...req,
       rate: req.side === 'BUY' ? quote.ask : quote.bid,

@@ -54,7 +54,11 @@ vergisini tahsil etti; fiyat riski almadı.
    Emir girerken bankanın kuru P2P'den iyiyse bilet bunu söyler.
 3. Yeni sekmede **http://localhost:5174/dealer.html** (Banka FX masası): üç LP'nin fiyatı ve en iyileri,
    segment kurları, USD pozisyonu (−1.000, kısa), ortalama maliyet, gerçekleşmemiş/gerçekleşen K/Z, marj
-   geliri. **Kapat** pozisyonu en iyi LP ile kapatır. Limit (USD 100.000) aşılırsa sistem kendisi hedge eder.
+   geliri. **Kapat** pozisyonu LP'lerle kapatır. Limit (USD 100.000) aşılırsa sistem kendisi hedge eder.
+4. Üstteki **Otomatik hedge kuralı**: limit, hedef seviye (limitin yüzdesi, 0 = sıfırla), en büyük LP
+   parçası ve dağıtım (LP'lere sırayla ya da hepsi en iyi LP'ye). Örnek: USD limitini 1.000, hedefi %50,
+   parçayı 500 yapıp kaydedin; Mehmet bankadan 2.000 USD alınca pozisyon 500'e iner, hedge üç parça halinde
+   LP-A, LP-B, LP-C'ye gider.
 
 Mesaj: P2P eşleşmede banka risk almadan komisyon kazanır; kendi kurunda marj kazanır ve pozisyonu yönetir.
 İkisi aynı uygulamada, müşteri iyi olanı seçer.

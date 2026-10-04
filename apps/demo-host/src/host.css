@@ -53,3 +53,14 @@ body.dealer .toolbar p { color: #94a3b8; }
 .limit span { display: block; height: 100%; background: #38bdf8; }
 .limit span.hot { background: #f87171; }
 .desk-card button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; }
+
+.policy { margin: 20px 32px 0; }
+#policy-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; font-size: 13px; }
+#policy-form label { display: flex; align-items: center; gap: 6px; color: #cbd5e1; }
+#policy-form input, #policy-form select { font: inherit; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 4px 8px; }
+#policy-form input[type='number'] { width: 60px; }
+#policy-form input[inputmode] { width: 90px; }
+#policy-form fieldset { border: 1px solid #1f2937; border-radius: 8px; padding: 4px 10px 8px; display: flex; gap: 10px; }
+#policy-form legend { color: #94a3b8; font-weight: 600; }
+.per-ccy { display: flex; gap: 10px; flex-wrap: wrap; }
+tr.same-batch td { border-top: 0; }

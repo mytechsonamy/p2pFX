@@ -36,6 +36,22 @@ export const LimitsSchema = z.object({
 const MarginSchema = z.object({ buyBips: z.number().int().min(0), sellBips: z.number().int().min(0) });
 
 /** The bank's own FX desk: prices aggregated from liquidity providers plus a margin per customer segment. */
+const HedgingSchema = z.object({
+  /** An auto-hedge brings the position down to this share of the limit, keeping its direction (0 = flat). */
+  targetPct: z.number().min(0).max(99),
+  /** Largest single LP ticket per currency; a bigger hedge is split into clips. A missing currency hedges in one ticket. */
+  maxClipQty: z.record(decimalString),
+  /** BEST_LP: every clip goes to the best-priced LP. ACROSS_LPS: clips go round the LPs from best to worst price. */
+  split: z.enum(['BEST_LP', 'ACROSS_LPS']),
+});
+export type HedgingConfig = z.infer<typeof HedgingSchema>;
+
+export const DEFAULT_HEDGING: HedgingConfig = {
+  targetPct: 0,
+  maxClipQty: { USD: '50000', EUR: '50000', GBP: '25000' },
+  split: 'ACROSS_LPS',
+};
+
 export const DealingSchema = z.object({
   enabled: z.boolean(),
   /** How long a firm bank quote can be executed. */
@@ -46,9 +62,10 @@ export const DealingSchema = z.object({
   margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
   /** Largest single deal per base currency. */
   maxDealQty: z.record(decimalString),
-  /** Open position per currency above which the bank hedges back to flat (when autoHedge is on). */
+  /** Open position per currency above which the bank hedges (when autoHedge is on). */
   positionLimits: z.record(decimalString),
   autoHedge: z.boolean(),
+  hedging: HedgingSchema.default(DEFAULT_HEDGING),
 });
 export type DealingConfig = z.infer<typeof DealingSchema>;
 
@@ -60,6 +77,7 @@ export const DEFAULT_DEALING: DealingConfig = {
   maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
   positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },
   autoHedge: true,
+  hedging: DEFAULT_HEDGING,
 };
 
 export const BankConfigSchema = z.object({

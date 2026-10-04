@@ -54,8 +54,16 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
 - The position keeper tracks quantity, average cost, realized P&L (on reductions) and unrealized P&L at the
   aggregated mid. Margin earned per deal is reported separately (deal rate vs LP price at the time).
 - `dealing.positionLimits` sets a limit per currency. With `autoHedge` on, a deal that takes the position past
-  the limit is followed by a hedge with the best LP that brings it back to zero. Operations can also hedge by
-  hand (`POST /ops/dealing/hedges`).
+  the limit is followed by an automatic hedge. `dealing.hedging` sets how:
+  - `targetPct`: the hedge brings the position down to this share of the limit, keeping its direction
+    (0 = flat). Example: limit 100,000, target 50 → a 130,000 short is cut to 50,000 short with an 80,000 buy.
+  - `maxClipQty`: the largest single LP ticket per currency; a bigger hedge is split into clips.
+  - `split`: `ACROSS_LPS` sends the clips round the LPs from best to worst price; `BEST_LP` sends every clip to
+    the best-priced LP.
+  - If an LP rejects a clip, the clip goes to the next LP by price. What no LP takes is logged as unhedged and
+    shows as open position. All clips of one decision share a `batch_id`.
+- Operations can also hedge by hand (`POST /ops/dealing/hedges`, same clip rules). The dealer screen edits
+  the auto-hedge rule and limits in place (it writes `PUT /ops/config`).
 - `GET /ops/dealing` returns the LP feeds, aggregated prices, segment rates, positions, P&L and recent hedges.
   The demo bank app shows it as a dealer screen at http://localhost:5174/dealer.html (the bank's backend calls
   the ops API with its own token; the browser never sees it).
@@ -70,7 +78,8 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
   "margins": { "default": { "buyBips": 10, "sellBips": 10 }, "segments": { "premium": { "buyBips": 4, "sellBips": 4 } } },
   "maxDealQty": { "USD": "250000", "EUR": "250000", "GBP": "100000" },
   "positionLimits": { "USD": "100000", "EUR": "100000", "GBP": "50000" },
-  "autoHedge": true
+  "autoHedge": true,
+  "hedging": { "targetPct": 0, "maxClipQty": { "USD": "50000", "EUR": "50000", "GBP": "25000" }, "split": "ACROSS_LPS" }
 }
 ```
 
