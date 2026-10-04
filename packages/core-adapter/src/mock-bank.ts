@@ -244,6 +244,11 @@ export class MockCoreBank implements CoreBankingAdapter {
     return this.result(txn);
   }
 
+  async findFxTransaction(idempotencyKey: string): Promise<FxTransactionResult | undefined> {
+    const txn = this.txnsByKey.get(idempotencyKey);
+    return txn && this.result(txn);
+  }
+
   async reverseFxTransaction(txnRef: string, idempotencyKey: string) {
     const done = this.reversalsByKey.get(idempotencyKey);
     if (done) return { reversalRef: done };

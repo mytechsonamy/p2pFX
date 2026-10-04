@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { findPair, type HedgingConfig, formatDecimal, formatPrice, parseDecimal, parsePrice, valueOf, type PairConfig } from '@p2p/shared';
-import type { LiquidityAdapter } from '@p2p/core-adapter';
+import { LiquidityError, type LiquidityAdapter } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Db } from '../db/pool.js';
 import type { ConfigService } from '../config-service.js';
@@ -53,6 +53,9 @@ export function positionOf(pair: PairConfig, trades: Trade[]): Position {
   return { pair: pair.symbol, currency: pair.base, qty, avgRate: avg, realized };
 }
 
+/** How long a clip the LP does not know about may still turn up there (a request still in flight). */
+const UNKNOWN_SETTLE_MS = 30_000;
+
 export interface Clip {
   lp: string;
   qty: bigint;
@@ -98,18 +101,21 @@ export class PositionKeeper {
 
   async position(pair: PairConfig): Promise<Position> {
     // Customer BUY → the bank sells. Only settled deals change the position. P2P fills where the bank's own
-    // account (its ladder in the book) was a side count too; other P2P fills are back-to-back and do not.
+    // account (its ladder in the book) was a side count too, unless their settlement failed or was reversed;
+    // other P2P fills are back-to-back and do not. Hedge clips count from the moment they are sent (PENDING,
+    // UNKNOWN), so a clip whose outcome is not known yet is never hedged a second time.
     const { rows } = await this.db.query(
       `select at, side, qty, rate from (
          select created_at as at, seq, case side when 'BUY' then 'SELL' else 'BUY' end as side, qty, rate, 0 as src
            from bank_deals where pair = $1 and status = 'SETTLED'
          union all
-         select created_at, seq, side, qty, rate, 1 from hedges where pair = $1
+         select created_at, seq, side, qty, rate, 1 from hedges where pair = $1 and status <> 'REJECTED'
          union all
          select f.created_at, f.seq, o.side, f.qty, f.book_price, 2 from fills f
            join orders o on o.id in (f.buy_order_id, f.sell_order_id)
            join customers c on c.id = o.customer_id
           where f.pair = $1 and c.customer_ref = $2
+            and not exists (select 1 from settlements s where s.fill_id = f.id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED'))
        ) t order by at, src, seq`,
       [pair.symbol, this.config.get().data.bankBook.customerRef],
     );
@@ -150,27 +156,47 @@ export class PositionKeeper {
     return out;
   }
 
+  /** One hedge decision at a time per pair, so two deals finishing together cannot both hedge the same position. */
+  private readonly hedgeChains = new Map<string, Promise<unknown>>();
+
+  private serial<T>(pair: string, fn: () => Promise<T>): Promise<T> {
+    const next = (this.hedgeChains.get(pair) ?? Promise.resolve()).then(fn, fn);
+    this.hedgeChains.set(pair, next.catch(() => {}));
+    return next;
+  }
+
   /** After a deal: when the position is over its limit, hedge it down to the target with the LPs. */
-  async afterDeal(pairSymbol: string) {
-    const c = this.config.get().data;
-    const pair = findPair(c, pairSymbol);
-    const limit = pair && c.dealing.positionLimits[pair.base];
-    if (!pair || !c.dealing.autoHedge || !limit) return;
-    const p = await this.position(pair);
-    const qty = autoHedgeQty(p.qty, parseDecimal(limit, pair.baseDecimals), c.dealing.hedging.targetPct);
-    if (qty === 0n) return;
-    try {
-      await this.hedge(pair, p.qty < 0n ? 'BUY' : 'SELL', qty, 'AUTO', 'system');
-    } catch (err) {
-      this.log.error({ err, pair: pair.symbol }, 'auto-hedge failed');
-    }
+  afterDeal(pairSymbol: string) {
+    return this.serial(pairSymbol, async () => {
+      const c = this.config.get().data;
+      const pair = findPair(c, pairSymbol);
+      const limit = pair && c.dealing.positionLimits[pair.base];
+      if (!pair || !c.dealing.autoHedge || !limit) return;
+      try {
+        await this.resolveOpenClips(pair.symbol);
+        const p = await this.position(pair);
+        const qty = autoHedgeQty(p.qty, parseDecimal(limit, pair.baseDecimals), c.dealing.hedging.targetPct);
+        if (qty === 0n) return;
+        await this.execute(pair, p.qty < 0n ? 'BUY' : 'SELL', qty, 'AUTO', 'system');
+      } catch (err) {
+        this.log.error({ err, pair: pair.symbol }, 'auto-hedge failed');
+      }
+    });
   }
 
   /**
    * Trades `qty` with the LPs: split into clips by `hedging.maxClipQty`, each clip to the LP the split rule picks.
-   * A clip an LP rejects goes to the next LP by price; clips that no LP takes are reported as unhedged.
+   * A clip an LP definitely rejects goes to the next LP by price; a clip whose outcome is unknown stops the
+   * hedge (it is never re-sent to another LP before it is looked up). Clips that no LP takes are reported as unhedged.
    */
-  async hedge(pair: PairConfig, side: 'BUY' | 'SELL', qty: bigint, reason: 'AUTO' | 'MANUAL', actor: string) {
+  hedge(pair: PairConfig, side: 'BUY' | 'SELL', qty: bigint, reason: 'AUTO' | 'MANUAL', actor: string) {
+    return this.serial(pair.symbol, async () => {
+      await this.resolveOpenClips(pair.symbol);
+      return this.execute(pair, side, qty, reason, actor);
+    });
+  }
+
+  private async execute(pair: PairConfig, side: 'BUY' | 'SELL', qty: bigint, reason: 'AUTO' | 'MANUAL', actor: string) {
     if (qty <= 0n) throw badRequest('INVALID_QTY', 'quantity must be positive');
     const { hedging } = this.config.get().data.dealing;
     const agg = await this.prices.current(pair.symbol);
@@ -180,36 +206,91 @@ export class PositionKeeper {
     const batchId = randomUUID();
     const clips = [];
     let unhedged = 0n;
+    let unknown = 0n;
     for (const clip of plan) {
-      const done = await this.executeClip(pair, side, clip, [clip.lp, ...lps.filter((l) => l !== clip.lp)], batchId, reason, actor);
-      if (done) clips.push(done);
+      if (unknown > 0n) {
+        unhedged += clip.qty;
+        continue;
+      }
+      const done = await this.executeClip(pair, side, clip, [clip.lp, ...lps.filter((l) => l !== clip.lp)], agg, batchId, reason, actor);
+      if (done === 'UNKNOWN') unknown += clip.qty;
+      else if (done) clips.push(done);
       else unhedged += clip.qty;
     }
-    await audit(this.db, actor, 'dealing.hedge', { batchId, pair: pair.symbol, side, qty: formatDecimal(qty, pair.baseDecimals), clips: clips.length, unhedged: formatDecimal(unhedged, pair.baseDecimals), reason });
-    this.log.info({ pair: pair.symbol, side, qty: formatDecimal(qty, pair.baseDecimals), clips: clips.length, reason }, 'hedged with LPs');
-    if (clips.length === 0) throw new ApiError(503, 'LP_UNAVAILABLE', 'no liquidity provider accepted the hedge');
-    return { batchId, side, qty: formatDecimal(qty - unhedged, pair.baseDecimals), unhedged: formatDecimal(unhedged, pair.baseDecimals), clips };
+    const fmt = (v: bigint) => formatDecimal(v, pair.baseDecimals);
+    await audit(this.db, actor, 'dealing.hedge', { batchId, pair: pair.symbol, side, qty: fmt(qty), clips: clips.length, unhedged: fmt(unhedged), unknown: fmt(unknown), reason });
+    this.log.info({ pair: pair.symbol, side, qty: fmt(qty), clips: clips.length, unknown: fmt(unknown), reason }, 'hedged with LPs');
+    if (clips.length === 0 && unknown === 0n) throw new ApiError(503, 'LP_UNAVAILABLE', 'no liquidity provider accepted the hedge');
+    return { batchId, side, qty: fmt(qty - unhedged - unknown), unhedged: fmt(unhedged), unknown: fmt(unknown), clips };
   }
 
-  private async executeClip(pair: PairConfig, side: 'BUY' | 'SELL', clip: Clip, order: string[], batchId: string, reason: string, actor: string) {
+  /**
+   * One clip: the intent is stored (PENDING, with the reference the LP gets) before anything is sent, so a
+   * crash or a database error after the LP traded can never lose the trade. A definite rejection moves on to
+   * the next LP; an unknown outcome stops there.
+   */
+  private async executeClip(
+    pair: PairConfig, side: 'BUY' | 'SELL', clip: Clip, order: string[], agg: Aggregate, batchId: string, reason: string, actor: string,
+  ): Promise<ReturnType<typeof hedgeView> | 'UNKNOWN' | undefined> {
     for (const lp of order) {
+      const quote = agg.quotes.find((q) => q.lp === lp);
+      const expected = quote ? (side === 'BUY' ? quote.ask : quote.bid) : formatPrice(side === 'BUY' ? agg.ask : agg.bid);
+      const ref = randomUUID();
+      const { rows: intent } = await this.db.query(
+        `insert into hedges (pair, side, qty, rate, lp, lp_ref, batch_id, reason, actor, status)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING') returning id`,
+        [pair.symbol, side, clip.qty, expected, lp, ref, batchId, reason, actor],
+      );
+      const id = intent[0].id as string;
+      let exec;
       try {
-        const exec = await this.lp.execute({ lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref: randomUUID() });
+        exec = await this.lp.execute({ lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref });
+      } catch (err) {
+        if (err instanceof LiquidityError) {
+          this.log.warn({ err, lp, pair: pair.symbol }, 'LP rejected hedge clip');
+          await this.db.query(`update hedges set status = 'REJECTED' where id = $1`, [id]);
+          continue;
+        }
+        this.log.error({ err, lp, pair: pair.symbol, ref }, 'hedge clip outcome unknown: not re-sent to another LP');
+        await this.db.query(`update hedges set status = 'UNKNOWN' where id = $1`, [id]).catch(() => {});
+        return 'UNKNOWN';
+      }
+      try {
         const { rows } = await this.db.query(
-          `insert into hedges (pair, side, qty, rate, lp, lp_trade_ref, batch_id, reason, actor) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning *`,
-          [pair.symbol, side, clip.qty, exec.rate, exec.lp, exec.tradeRef, batchId, reason, actor],
+          `update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1 returning *`,
+          [id, exec.rate, exec.tradeRef],
         );
         return hedgeView(rows[0], pair);
       } catch (err) {
-        this.log.warn({ err, lp, pair: pair.symbol }, 'LP rejected hedge clip');
+        // The LP traded; the clip stays PENDING (counted in the position) and is confirmed by the next lookup.
+        this.log.error({ err, lp, ref, tradeRef: exec.tradeRef }, 'hedge executed but not recorded as done');
+        return 'UNKNOWN';
       }
     }
     return undefined;
   }
 
+  /** Looks up clips left PENDING or UNKNOWN (crash, timeout, database error) at their LP by reference. */
+  async resolveOpenClips(pairSymbol?: string) {
+    const { rows } = await this.db.query(
+      `select id, lp, lp_ref, created_at from hedges where status in ('PENDING', 'UNKNOWN') and lp_ref is not null and ($1::text is null or pair = $1) order by seq`,
+      [pairSymbol ?? null],
+    );
+    for (const r of rows) {
+      try {
+        const exec = await this.lp.findExecution(r.lp, r.lp_ref);
+        if (exec) await this.db.query(`update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1`, [r.id, exec.rate, exec.tradeRef]);
+        // "Not found" only counts once a late arrival at the LP is no longer plausible.
+        else if (Date.now() - new Date(r.created_at).getTime() > UNKNOWN_SETTLE_MS) await this.db.query(`update hedges set status = 'REJECTED' where id = $1`, [r.id]);
+      } catch (err) {
+        this.log.warn({ err, hedgeId: r.id }, 'hedge clip lookup failed; it stays open');
+      }
+    }
+  }
+
   async recentHedges(limit = 20) {
     const c = this.config.get().data;
-    const { rows } = await this.db.query('select * from hedges order by seq desc limit $1', [limit]);
+    const { rows } = await this.db.query(`select * from hedges where status <> 'REJECTED' order by seq desc limit $1`, [limit]);
     return rows.map((r) => hedgeView(r, findPair(c, r.pair)));
   }
 }
@@ -223,6 +304,7 @@ function hedgeView(r: Record<string, any>, pair: PairConfig | undefined) {
     rate: formatPrice(parsePrice(r.rate)),
     lp: r.lp,
     lpTradeRef: r.lp_trade_ref,
+    status: r.status,
     batchId: r.batch_id,
     reason: r.reason,
     at: new Date(r.created_at).toISOString(),

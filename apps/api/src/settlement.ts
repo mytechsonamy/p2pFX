@@ -3,6 +3,7 @@ import { CoreBankingError, type CoreBankingAdapter, type FxLeg, type FxTransacti
 import type { FastifyBaseLogger } from 'fastify';
 import type { Db } from './db/pool.js';
 import { audit } from './audit.js';
+import { ApiError, conflict } from './errors.js';
 import type { ConfigService } from './config-service.js';
 
 export interface SettlementOptions {
@@ -12,18 +13,25 @@ export interface SettlementOptions {
   baseDelayMs: number;
 }
 
-export type SettlementOutcome = 'SETTLED' | 'FAILED_NEEDS_REVIEW';
+export type SettlementOutcome = 'SETTLED' | 'FAILED_NEEDS_REVIEW' | 'UNKNOWN_OUTCOME';
 
 const LEGS: FxLeg[] = ['BANK_BUY', 'BANK_SELL'];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** How one leg ended: posted, definitely not posted, or unknown (timeouts and the lookup failed too). */
+type LegResult = { ok: true; txnRef: string; receiptRef: string } | { ok: false; unknown: boolean; error: string };
 
 /**
  * Settles a fill as two bank FX transactions in core banking:
  *   BANK_BUY  — the bank buys the FX from the seller
  *   BANK_SELL — the bank sells the FX to the buyer
  * Each leg has a deterministic idempotency key, so retries and restarts are safe.
- * If a leg still fails after retries, any posted leg is reversed and the fill
- * goes to FAILED_NEEDS_REVIEW for the operations screen.
+ *
+ * A timeout or lost response is not a failure: the posting may have been booked. After the
+ * attempts run out the leg is looked up by its key; only a leg core banking confirms it does not
+ * have is a failure. If the lookup fails too, the leg is UNKNOWN_OUTCOME: nothing is reversed and
+ * no new key is ever issued for it until a lookup settles the question.
+ * A leg that definitely failed reverses any posted leg and sends the fill to FAILED_NEEDS_REVIEW.
  */
 export class SettlementService {
   constructor(
@@ -50,60 +58,110 @@ export class SettlementService {
     for (const leg of LEGS) {
       const s = legs.find((l) => l.leg === leg);
       if (!s || s.status !== 'PENDING') continue;
-      const req = this.request(fill, leg, s.idempotency_key, s.hold_ids);
-      let lastError = '';
-      let ok = false;
-      for (let attempt = 1; attempt <= this.opts.attempts; attempt++) {
-        if (attempt > 1) await sleep(this.opts.baseDelayMs * 2 ** (attempt - 2));
-        try {
-          const res = await this.core.postFxTransaction(req);
-          await this.db.query(
-            `update settlements set status = 'SETTLED', core_txn_ref = $2, receipt_ref = $3, attempts = attempts + 1,
-               last_error = null, updated_at = now() where id = $1`,
-            [s.id, res.txnRef, res.receiptRef],
-          );
-          ok = true;
-          break;
-        } catch (err) {
-          lastError = err instanceof Error ? err.message : String(err);
-          await this.db.query('update settlements set attempts = attempts + 1, last_error = $2, updated_at = now() where id = $1', [s.id, lastError]);
-          this.log.warn({ fillId, leg, attempt, err: lastError }, 'settlement leg failed');
-          // Business rejections will not succeed on retry.
-          if (err instanceof CoreBankingError && err.code !== 'UNAVAILABLE') break;
-        }
+      const res = await this.post(s, this.request(fill, leg, s.idempotency_key, s.hold_ids));
+      if (res.ok) continue;
+      if (res.unknown) {
+        await this.db.query(`update settlements set status = 'UNKNOWN_OUTCOME', last_error = $2, updated_at = now() where id = $1`, [s.id, res.error]);
+        await audit(this.db, 'system', 'settlement.unknown', { fillId, leg, error: res.error });
+        this.log.error({ fillId, leg, error: res.error }, 'settlement outcome unknown: needs a lookup before anything is re-sent');
+        return 'UNKNOWN_OUTCOME';
       }
-      if (!ok) {
-        await this.failFill(fillId, leg, lastError);
-        return 'FAILED_NEEDS_REVIEW';
-      }
+      await this.failFill(fillId, leg, res.error);
+      return 'FAILED_NEEDS_REVIEW';
     }
     return 'SETTLED';
   }
 
-  /** Re-runs settlement for a fill that needs review, with fresh idempotency keys for the failed or reversed legs. */
+  /** Posts one leg with retries on the same key, then resolves an unclear ending with a lookup. */
+  private async post(s: Record<string, any>, req: FxTransactionRequest): Promise<LegResult> {
+    let lastError = '';
+    let unclear = false;
+    for (let attempt = 1; attempt <= this.opts.attempts; attempt++) {
+      if (attempt > 1) await sleep(this.opts.baseDelayMs * 2 ** (attempt - 2));
+      try {
+        const res = await this.core.postFxTransaction(req);
+        await this.markSettled(s.id, res.txnRef, res.receiptRef);
+        return { ok: true, ...res };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        await this.db.query('update settlements set attempts = attempts + 1, last_error = $2, updated_at = now() where id = $1', [s.id, lastError]);
+        this.log.warn({ fillId: s.fill_id, leg: s.leg, attempt, err: lastError }, 'settlement leg failed');
+        // Business rejections are definite and will not succeed on retry.
+        if (err instanceof CoreBankingError && err.code !== 'UNAVAILABLE') return { ok: false, unknown: false, error: lastError };
+        unclear = true;
+      }
+    }
+    if (!unclear) return { ok: false, unknown: false, error: lastError };
+    return this.lookup(s, lastError);
+  }
+
+  /** Asks core banking whether the leg's current key was booked. */
+  private async lookup(s: Record<string, any>, lastError: string): Promise<LegResult> {
+    try {
+      const found = await this.core.findFxTransaction(s.idempotency_key);
+      if (found) {
+        await this.markSettled(s.id, found.txnRef, found.receiptRef);
+        this.log.warn({ fillId: s.fill_id, leg: s.leg }, 'settlement leg was booked although the response was lost');
+        return { ok: true, ...found };
+      }
+      return { ok: false, unknown: false, error: lastError };
+    } catch (err) {
+      return { ok: false, unknown: true, error: `${lastError}; lookup failed: ${(err as Error).message}` };
+    }
+  }
+
+  private async markSettled(id: string, txnRef: string, receiptRef: string) {
+    await this.db.query(
+      `update settlements set status = 'SETTLED', core_txn_ref = $2, receipt_ref = $3, attempts = attempts + 1,
+         last_error = null, updated_at = now() where id = $1`,
+      [id, txnRef, receiptRef],
+    );
+  }
+
+  /**
+   * Operations: settles a fill that needs review. A failed or unknown leg is first looked up by its
+   * current key; if core banking has it, it is marked settled and never re-sent. Only a leg core banking
+   * confirms it does not have is posted again (same key), and only a leg proven reversed gets a new key.
+   */
   async retry(fillId: string, actor: string): Promise<SettlementOutcome> {
     const { rows } = await this.db.query(
-      `select id, leg, retry_round from settlements where fill_id = $1 and status in ('FAILED_NEEDS_REVIEW', 'REVERSED')`,
+      `select * from settlements where fill_id = $1 and status in ('FAILED_NEEDS_REVIEW', 'UNKNOWN_OUTCOME', 'REVERSED') order by leg`,
       [fillId],
     );
+    if (!rows.length) throw conflict('NOTHING_TO_RETRY', 'this fill has no failed, unknown or reversed leg');
     for (const r of rows) {
-      const round = r.retry_round + 1;
-      await this.db.query(
-        `update settlements set status = 'PENDING', retry_round = $2, idempotency_key = $3, attempts = 0,
-           core_txn_ref = null, receipt_ref = null, reversal_ref = null, updated_at = now() where id = $1`,
-        [r.id, round, SettlementService.idempotencyKey(fillId, r.leg, round)],
-      );
+      if (r.status === 'REVERSED') {
+        const round = r.retry_round + 1;
+        await this.db.query(
+          `update settlements set status = 'PENDING', retry_round = $2, idempotency_key = $3, attempts = 0,
+             core_txn_ref = null, receipt_ref = null, reversal_ref = null, updated_at = now() where id = $1 and status = 'REVERSED'`,
+          [r.id, round, SettlementService.idempotencyKey(fillId, r.leg, round)],
+        );
+        continue;
+      }
+      let found;
+      try {
+        found = await this.core.findFxTransaction(r.idempotency_key);
+      } catch (err) {
+        throw new ApiError(503, 'OUTCOME_UNKNOWN', `core banking lookup failed for ${r.leg}, nothing was re-sent: ${(err as Error).message}`);
+      }
+      if (found) await this.markSettled(r.id, found.txnRef, found.receiptRef);
+      else await this.db.query(`update settlements set status = 'PENDING', attempts = 0, updated_at = now() where id = $1 and status = $2`, [r.id, r.status]);
     }
     await audit(this.db, actor, 'settlement.retry', { fillId, legs: rows.map((r) => r.leg) });
     return this.settle(fillId);
   }
 
-  /** Settles fills left PENDING by a restart. */
-  async resumePending(): Promise<void> {
+  /** Settles fills left PENDING by a restart or an interrupted settlement (same keys, so it is safe to repeat). */
+  async resumePending(olderThanMs = 0): Promise<void> {
     const { rows } = await this.db.query(
-      `select distinct s.fill_id, f.seq from settlements s join fills f on f.id = s.fill_id where s.status = 'PENDING' order by f.seq`,
+      `select distinct s.fill_id, f.seq from settlements s join fills f on f.id = s.fill_id
+        where s.status = 'PENDING' and s.updated_at <= now() - make_interval(secs => $1::double precision / 1000) order by f.seq`,
+      [olderThanMs],
     );
-    for (const r of rows) await this.settle(r.fill_id);
+    for (const r of rows) {
+      await this.settle(r.fill_id).catch((err) => this.log.error({ err, fillId: r.fill_id }, 'resuming settlement failed'));
+    }
   }
 
   private async failFill(fillId: string, failedLeg: FxLeg, error: string) {

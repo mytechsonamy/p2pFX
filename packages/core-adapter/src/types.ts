@@ -88,6 +88,11 @@ export interface CoreBankingAdapter {
   adjustHold(holdId: string, newAmount: bigint): Promise<void>;
   releaseHold(holdId: string): Promise<void>;
   postFxTransaction(req: FxTransactionRequest): Promise<FxTransactionResult>;
+  /**
+   * Looks a posting up by its idempotency key: the result if core banking booked it, undefined if it did not.
+   * Used to resolve a posting whose outcome is unknown (timeout, lost response) before anything is re-sent.
+   */
+  findFxTransaction(idempotencyKey: string): Promise<FxTransactionResult | undefined>;
   reverseFxTransaction(txnRef: string, idempotencyKey: string): Promise<{ reversalRef: string }>;
   getReceipt(receiptRef: string): Promise<Receipt>;
   getReferenceRate(pair: string): Promise<ReferenceRate>;

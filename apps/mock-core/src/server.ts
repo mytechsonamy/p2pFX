@@ -17,7 +17,8 @@ export function buildMockCore(
   const liquidity = opts.liquidity ?? new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs() });
 
   app.setErrorHandler((err, _req, reply) => {
-    if (err instanceof LiquidityError) return reply.status(503).send({ code: 'UNAVAILABLE', message: err.message });
+    // An LP rejection is definite (4xx); 5xx would mean the outcome is unknown.
+    if (err instanceof LiquidityError) return reply.status(422).send({ code: 'REJECTED', message: err.message });
     if (err instanceof CoreBankingError) {
       return reply.status(STATUS[err.code] ?? 500).send({ code: err.code, message: (err as Error).message });
     }
@@ -44,6 +45,11 @@ export function buildMockCore(
   });
 
   app.post<{ Body: Record<string, unknown> }>('/fx-transactions', async (req) => bank.postFxTransaction(fxRequestFromWire(req.body)));
+  app.get<{ Querystring: { idempotencyKey: string } }>('/fx-transactions', async (req) => {
+    const found = await bank.findFxTransaction(req.query.idempotencyKey ?? '');
+    if (!found) throw new CoreBankingError('NOT_FOUND', 'no transaction with this idempotency key');
+    return found;
+  });
   app.post<{ Params: { ref: string }; Body: { idempotencyKey: string } }>('/fx-transactions/:ref/reverse', async (req) =>
     bank.reverseFxTransaction(req.params.ref, req.body.idempotencyKey),
   );
@@ -65,6 +71,10 @@ export function buildMockCore(
   app.get('/lp/instruments', async () => liquidity.instruments());
   app.get<{ Params: { pair: string } }>('/lp/quotes/:pair', async (req) => liquidity.quotes(req.params.pair));
   app.post<{ Body: LpExecutionRequest }>('/lp/executions', async (req) => liquidity.execute(req.body));
+  app.get<{ Params: { lp: string; ref: string } }>('/lp/executions/:lp/:ref', async (req, reply) => {
+    const found = await liquidity.findExecution(req.params.lp, req.params.ref);
+    return found ?? reply.status(404).send({ code: 'NOT_FOUND', message: 'execution not found' });
+  });
 
   // ---- admin (prototype only) ----
 

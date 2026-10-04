@@ -35,11 +35,14 @@ export class ConfigService {
   /** Loads the latest version, creating version 1 from `initial` on an empty database. */
   async init(initial: BankConfig = DEFAULT_CONFIG): Promise<VersionedConfig> {
     if (!(await this.reload())) {
-      await this.db.query('select pg_advisory_lock(727275)');
+      // A session lock must be taken and released on the same connection, so it gets a dedicated client.
+      const lock = await this.db.connect();
       try {
+        await lock.query('select pg_advisory_lock(727275)');
         if (!(await this.reload())) await this.save(BankConfigSchema.parse(initial), 'system', 'İlk yapılandırma (prototip varsayılanları)', []);
       } finally {
-        await this.db.query('select pg_advisory_unlock(727275)');
+        await lock.query('select pg_advisory_unlock(727275)').catch(() => {});
+        lock.release();
       }
     }
     return this.get();

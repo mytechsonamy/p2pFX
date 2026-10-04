@@ -34,6 +34,11 @@ export interface AppOptions {
   /** Used only when the database has no configuration yet. */
   initialConfig?: BankConfig;
   clock?: () => Date;
+  /**
+   * Runs matching, the scheduler and the bank's ladder (default). Only one instance per database may: a second
+   * one with matching on refuses to start. Instances with it off serve reads, config and streams only.
+   */
+  matching?: boolean;
   /** Overrides the configuration's settlement retry policy (tests). */
   settlement?: SettlementOptions;
   /** Scheduler interval; 0 disables it (tests call tick()). */
@@ -80,9 +85,9 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const auth = new AuthService(db, { bankPublicKeyPem: opts.bankPublicKeyPem, sessionSecret: opts.sessionSecret, opsToken: opts.opsToken, clock, config });
   await auth.bootstrapAdmin(opts.opsAdminPassword);
   const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
-  const exchange = new Exchange(db, opts.core, config, settlement, events, app.log);
+  const exchange = new Exchange(db, opts.core, config, settlement, events, app.log, clock);
   const entry = new OrderEntry(db, opts.core, config, exchange, clock);
-  const scheduler = new Scheduler(db, exchange, config, clock, app.log);
+  const scheduler = new Scheduler(db, exchange, settlement, config, clock, app.log);
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
   const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);
@@ -119,10 +124,14 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   streamRoutes(app, ctx);
   dealingRoutes(app, ctx);
 
-  await exchange.start();
-  if (opts.schedulerIntervalMs) scheduler.start(opts.schedulerIntervalMs);
+  const matching = opts.matching ?? true;
+  if (matching) {
+    await exchange.start();
+    await positions.resolveOpenClips().catch((err) => app.log.error({ err }, 'resolving open hedge clips failed'));
+    if (opts.schedulerIntervalMs) scheduler.start(opts.schedulerIntervalMs);
+    if (opts.bankBookIntervalMs) bankBook.start(opts.bankBookIntervalMs);
+  }
   if (opts.priceIntervalMs) prices.start(opts.priceIntervalMs);
-  if (opts.bankBookIntervalMs) bankBook.start(opts.bankBookIntervalMs);
 
   const close = async () => {
     scheduler.stop();
@@ -130,6 +139,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     bankBook.stop();
     await app.close();
     await exchange.idle();
+    await exchange.stop();
     await events.stop();
     await config.stop();
     await db.end();

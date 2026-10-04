@@ -151,11 +151,11 @@ export function opsRoutes(app: FastifyInstance, ctx: AppContext) {
 
   app.get<{ Querystring: { status?: string } }>('/ops/settlements', async (req) => {
     await auth.ops(req);
-    const status = req.query.status ?? 'FAILED_NEEDS_REVIEW';
+    const statuses = req.query.status ? [req.query.status] : ['FAILED_NEEDS_REVIEW', 'UNKNOWN_OUTCOME'];
     const { rows } = await db.query(
       `select s.*, f.pair, f.qty, f.book_price, f.created_at as fill_created_at from settlements s join fills f on f.id = s.fill_id
-        where s.status = $1 order by f.seq desc limit 500`,
-      [status],
+        where s.status = any($1) order by f.seq desc limit 500`,
+      [statuses],
     );
     return rows.map((r) => ({
       id: r.id,

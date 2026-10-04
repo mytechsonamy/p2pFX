@@ -37,7 +37,7 @@ export interface Harness {
 
 export const OPS = 'ops-secret';
 
-export async function startHarness(opts: { bank?: MockCoreBank; config?: BankConfig; reset?: boolean } = {}): Promise<Harness> {
+export async function startHarness(opts: { bank?: MockCoreBank; config?: BankConfig; reset?: boolean; matching?: boolean } = {}): Promise<Harness> {
   if (opts.reset !== false) await resetDb();
   const { publicKey, privateKey } = await keys;
   const bank = opts.bank ?? new MockCoreBank();
@@ -56,6 +56,7 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     opsToken: OPS,
     opsAdminPassword: 'admin-pass-123',
     initialConfig: opts.config ?? DEFAULT_CONFIG,
+    matching: opts.matching,
     clock: () => clock.now,
     settlement: { attempts: 2, baseDelayMs: 1 },
     schedulerIntervalMs: 0,

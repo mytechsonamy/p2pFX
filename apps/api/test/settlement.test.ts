@@ -66,7 +66,9 @@ describe('settlement saga', () => {
     const [s] = (await h.req('GET', '/ops/settlements', OPS)).body;
     expect((await h.req('POST', `/ops/settlements/${s.fillId}/retry`, OPS)).body.outcome).toBe('SETTLED');
     const after = await h.ctx.db.query('select leg, status, idempotency_key from settlements order by leg');
-    expect(after.rows.every((r) => r.status === 'SETTLED' && r.idempotency_key.endsWith(':r1'))).toBe(true);
+    expect(after.rows.every((r) => r.status === 'SETTLED')).toBe(true);
+    // Only the leg proven reversed gets a new key; the failed one, confirmed absent in core, keeps its own.
+    expect(after.rows.map((r) => r.idempotency_key.endsWith(':r1'))).toEqual([true, false]);
     expect(await h.balance('alice', 'USD')).toMatchObject({ balance: 0n });
     expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49001.80') });
     expect(await h.balance('bob', 'TRY')).toMatchObject({ balance: units('100000') - units('49298.40') });

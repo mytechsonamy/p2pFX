@@ -109,8 +109,9 @@ export class DealingService {
     const settled = await this.settle(deal, session.customerRef, pair);
     if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
     const view = dealView(settled, pair);
-    await this.events.publish({ type: 'fill', customerId: session.customerId, fill: view });
     if (settled.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
+    // Only a deal that exists for the customer is announced (a rejected one is just the error above).
+    await this.events.publish({ type: 'fill', customerId: session.customerId, fill: view }).catch((err) => this.log.warn({ err }, 'deal publish failed'));
     return view;
   }
 
@@ -147,6 +148,13 @@ export class DealingService {
         if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') return this.update(deal.id, 'REJECTED', lastError);
         if (err instanceof CoreBankingError && err.code !== 'UNAVAILABLE') break;
       }
+    }
+    // A timeout may still have been booked: ask core banking before calling it failed.
+    try {
+      const found = await this.core.findFxTransaction(`deal:${deal.id}`);
+      if (found) return this.update(deal.id, 'SETTLED', null, found.txnRef, found.receiptRef);
+    } catch (err) {
+      lastError = `${lastError}; lookup failed: ${(err as Error).message}`;
     }
     await audit(this.db, 'system', 'dealing.failed', { dealId: deal.id, error: lastError });
     return this.update(deal.id, 'FAILED_NEEDS_REVIEW', lastError);
