@@ -94,7 +94,9 @@ interface Props {
   children: ReactNode;
 }
 
-export function ExchangeProvider({ api, bridge, config, branding, locale, children }: Props) {
+export function ExchangeProvider({ api, bridge, config: initialConfig, branding, locale, children }: Props) {
+  // The bank changes parameters at runtime from its back office; the stream says when to reload them.
+  const [config, setConfig] = useState(initialConfig);
   const t = useMemo(() => createTranslator(locale, branding.strings), [locale, branding.strings]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -218,7 +220,9 @@ export function ExchangeProvider({ api, bridge, config, branding, locale, childr
       () => api.sessionToken,
       (m: StreamMessage) => {
         const h = handlers.current;
-        if (m.channel.startsWith('bank:')) {
+        if (m.channel === 'config') {
+          api.config().then((next) => setConfig((cur) => ({ ...next, bank: cur.bank })), () => {});
+        } else if (m.channel.startsWith('bank:')) {
           const r = m.data as BankRates;
           setBankRates((cur) => ({ ...cur, [r.pair]: r }));
         } else if (m.channel.startsWith('book:')) {

@@ -88,7 +88,7 @@ Betik her çalıştırmada yeni bir müşteri açar, istediğiniz kadar tekrar �
 
 | Soru | Nerede |
 |---|---|
-| Komisyon, vergi oranı, bloke, geçerlilik, işlem saatleri | `GET/PUT /ops/config` (banka parametresi, anında geçerli) |
+| Komisyon, vergi oranı, bloke, geçerlilik, işlem saatleri | http://localhost:5174/backoffice.html (`admin` / `demo-admin`), anında geçerli, gerekçeli ve versiyonlu; [backoffice.md](backoffice.md) |
 | Bankanın geliri | `GET /ops/revenue` |
 | Bankanın döviz pozisyonu | http://localhost:5174/dealer.html (yalnız banka işlemleri pozisyon yaratır; P2P eşleşmede sıfır kalır) |
 | Segment marjları, kesin fiyat süresi, limitler, otomatik hedge | `dealing` ayarı, [bank-dealing.md](bank-dealing.md) |

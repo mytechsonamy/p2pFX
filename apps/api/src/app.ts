@@ -28,9 +28,12 @@ export interface AppOptions {
   bankPublicKeyPem: string;
   sessionSecret: string;
   opsToken: string;
+  /** Password for the first back office administrator (`admin`), used only while there are no operators. */
+  opsAdminPassword?: string;
   /** Used only when the database has no configuration yet. */
   initialConfig?: BankConfig;
   clock?: () => Date;
+  /** Overrides the configuration's settlement retry policy (tests). */
   settlement?: SettlementOptions;
   /** Scheduler interval; 0 disables it (tests call tick()). */
   schedulerIntervalMs?: number;
@@ -66,17 +69,18 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   const config = new ConfigService(db);
   await config.init(opts.initialConfig);
+  await config.listen(opts.databaseUrl);
   const events = new EventBus(db);
   await events.start(opts.databaseUrl);
-  const auth = new AuthService(db, { bankPublicKeyPem: opts.bankPublicKeyPem, sessionSecret: opts.sessionSecret, opsToken: opts.opsToken, clock });
-  const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement ?? { attempts: 3, baseDelayMs: 500 });
+  const auth = new AuthService(db, { bankPublicKeyPem: opts.bankPublicKeyPem, sessionSecret: opts.sessionSecret, opsToken: opts.opsToken, clock, config });
+  await auth.bootstrapAdmin(opts.opsAdminPassword);
+  const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
   const exchange = new Exchange(db, opts.core, config, settlement, events, app.log);
   const entry = new OrderEntry(db, opts.core, config, exchange, clock);
   const scheduler = new Scheduler(db, exchange, config, clock, app.log);
-  const settlementOpts = opts.settlement ?? { attempts: 3, baseDelayMs: 500 };
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
-  const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, settlementOpts);
+  const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);
 
   // Per-customer order entry rate limit (sliding window, in memory).
   const hits = new Map<string, number[]>();
@@ -117,6 +121,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     await app.close();
     await exchange.idle();
     await events.stop();
+    await config.stop();
     await db.end();
   };
   return { app, ctx, close };

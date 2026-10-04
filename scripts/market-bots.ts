@@ -7,18 +7,17 @@
 // any other order on the board. Demo only: in production resting liquidity would come from the bank's own
 // market-making account, under its rules.
 //
-// Usage: pnpm demo:bots (BOT_INTERVAL_MS, default 1500)
+// Every setting (who the bots are, pace, offsets, sizes, on/off) is the bank parameter `bots`, edited in the
+// back office and picked up within a few seconds without restarting.
+//
+// Usage: pnpm demo:bots
+import type { BotsConfig } from '../packages/shared/src/config.js';
 import { HttpError, api, login, ops, placeOrder, sleep, waitForApi, type OrderInput } from './lib/demo-client.js';
-
-const BOTS = ['demo-mm-1', 'demo-mm-2', 'demo-mm-3', 'demo-mm-4', 'demo-mm-5', 'demo-mm-6'];
-const SEGMENT = 'market-maker';
-const INTERVAL_MS = Number(process.env.BOT_INTERVAL_MS ?? 1500);
-/** Open bot orders per pair and side above which the oldest are cancelled. */
-const MAX_PER_SIDE = 10;
 
 interface Pair {
   symbol: string;
   base: string;
+  bipSize: string;
 }
 interface Level {
   price: string;
@@ -34,19 +33,33 @@ const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 const pick = <T>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)];
 const cents = (v: number) => Math.round(v * 100);
 const price = (c: number) => (c / 100).toFixed(2);
-const lot = (p: Pair) => String(Math.round(rand(p.base === 'GBP' ? 100 : 200, p.base === 'GBP' ? 1500 : 3500) / 50) * 50);
 
-/** A bot's session; logs in again when the 30-minute session runs out. */
+/** The `bots` parameter, re-read every few seconds. */
+let settings!: BotsConfig;
+let settingsAt = 0;
+async function refreshSettings() {
+  if (settings && Date.now() - settingsAt < 5000) return;
+  settings = (await ops('GET', '/ops/config')).data.bots;
+  settingsAt = Date.now();
+}
+
+const lot = (p: Pair) => {
+  const l = settings.lots[p.base] ?? settings.lots.default;
+  const step = Number(l.step) || 1;
+  return String(Math.round(rand(Number(l.min), Number(l.max)) / step) * step);
+};
+
+/** A bot's session; logs in again when its session runs out. */
 class Bot {
   private token?: string;
   constructor(readonly ref: string) {}
   async call<T>(fn: (token: string) => Promise<T>): Promise<T> {
-    this.token ??= await login(this.ref, SEGMENT);
+    this.token ??= await login(this.ref, settings.segment);
     try {
       return await fn(this.token);
     } catch (e) {
       if (!(e instanceof HttpError && e.status === 401)) throw e;
-      this.token = await login(this.ref, SEGMENT);
+      this.token = await login(this.ref, settings.segment);
       return fn(this.token);
     }
   }
@@ -56,22 +69,21 @@ class Bot {
 }
 
 await waitForApi();
+await refreshSettings();
 
-// Bots get their own customer segment with limits a demo never reaches.
-const cfg = await ops('GET', '/ops/config');
-if (!cfg.data.limits.segments[SEGMENT]) {
-  cfg.data.limits.segments[SEGMENT] = { maxOrderNotional: '100000000', maxDailyNotional: '100000000000' };
-  await ops('PUT', '/ops/config', cfg.data);
-}
-
-const bots = BOTS.map((ref) => new Bot(ref));
-const pairs: Pair[] = (await bots[0].call((t) => api('GET', '/v1/config', t))).pairs;
-console.log(`${bots.length} bots on ${pairs.map((p) => p.symbol).join(', ')}, every ${INTERVAL_MS} ms`);
+const known = new Map<string, Bot>();
+const botsNow = () => settings.refs.map((ref) => known.get(ref) ?? known.set(ref, new Bot(ref)).get(ref)!);
+console.log(`${settings.refs.length} bots, every ${settings.intervalMs} ms (bank parameter "bots")`);
 
 async function tick() {
+  const bots = botsNow();
+  const viewer = bots[0];
+  const pairs: Pair[] = (await viewer.call((t) => api('GET', '/v1/config', t))).pairs;
+  if (!pairs.length) return;
   const pair = pick(pairs);
   const bot = pick(bots);
-  const viewer = bots[0];
+  // Offsets are set in bips of the pair; the bots work in kuruş (0.01).
+  const bipCents = Math.max(1, Math.round(Number(pair.bipSize) * 100));
   const [book, rate] = await viewer.call((t) =>
     Promise.all([api('GET', `/v1/pairs/${pair.symbol}/book`, t), api('GET', `/v1/pairs/${pair.symbol}/rate`, t)]),
   );
@@ -80,7 +92,7 @@ async function tick() {
   const bestAsk = book.asks[0] ? cents(Number(book.asks[0].price)) : undefined;
   const roll = Math.random();
 
-  if (roll < 0.25 && bestBid !== undefined && bestAsk !== undefined) {
+  if (roll < settings.tradeShare && bestBid !== undefined && bestAsk !== undefined) {
     // Trade between two bots at a price inside the spread where no order rests, so only they can match.
     const taken = new Set([...book.bids, ...book.asks].map((l: Level) => cents(Number(l.price))));
     const free: number[] = [];
@@ -100,19 +112,19 @@ async function tick() {
   }
 
   const mine = (await bot.open()).filter((o) => o.pair === pair.symbol);
-  if (roll < 0.4 && mine.length) {
+  if (roll < settings.tradeShare + settings.cancelShare && mine.length) {
     await bot.cancel(pick(mine).id);
     return;
   }
 
-  // Passive order 4 to 25 kuruş off the reference rate, never crossing the other side of the book.
+  // Passive order offsetBips away from the reference rate, never crossing the other side of the book.
   const side = Math.random() < 0.5 ? 'BUY' : 'SELL';
-  const offset = Math.round(rand(4, 25));
+  const offset = Math.round(rand(settings.offsetBips.min, Math.max(settings.offsetBips.min, settings.offsetBips.max))) * bipCents;
   let at = side === 'BUY' ? ref - offset : ref + offset;
   if (side === 'BUY' && bestAsk !== undefined) at = Math.min(at, bestAsk - 2);
   if (side === 'SELL' && bestBid !== undefined) at = Math.max(at, bestBid + 2);
   const sameSide = mine.filter((o) => o.side === side).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  for (const stale of sameSide.slice(0, Math.max(0, sameSide.length - MAX_PER_SIDE + 1))) await bot.cancel(stale.id);
+  for (const stale of sameSide.slice(0, Math.max(0, sameSide.length - settings.maxOrdersPerSide + 1))) await bot.cancel(stale.id);
   await bot.place({ pair: pair.symbol, side, qty: lot(pair), price: price(at) });
 }
 
@@ -120,10 +132,11 @@ let stopping = false;
 for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => (stopping = true));
 while (!stopping) {
   try {
-    await tick();
+    await refreshSettings();
+    if (settings.enabled) await tick();
   } catch (e) {
     // A bot that hits the order rate limit (right after the seeder, say) or races another order skips this tick.
     if (!(e instanceof HttpError && e.status === 429)) console.warn(`tick skipped: ${(e as Error).message}`);
   }
-  await sleep(INTERVAL_MS * rand(0.5, 1.5));
+  await sleep((settings?.intervalMs ?? 1500) * rand(0.5, 1.5));
 }

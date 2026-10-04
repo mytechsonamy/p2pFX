@@ -73,9 +73,7 @@ services:
   bots:
     <<: *node
     command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/market-bots.ts"]
-    environment:
-      <<: *clients
-      BOT_INTERVAL_MS: "1500"
+    environment: *clients
     depends_on:
       seed: { condition: service_completed_successfully }
 

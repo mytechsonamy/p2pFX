@@ -80,6 +80,57 @@ export const DEFAULT_DEALING: DealingConfig = {
   hedging: DEFAULT_HEDGING,
 };
 
+/** Customer sessions opened from the bank app. */
+const SessionSchema = z.object({
+  /** Platform session lifetime after the launch token is exchanged. */
+  ttlMinutes: z.number().int().min(1).max(24 * 60),
+});
+
+/** Posting each fill's two bank FX legs to core banking. */
+const SettlementSchema = z.object({
+  /** Attempts per leg before the fill goes to operations review. */
+  attempts: z.number().int().min(1).max(10),
+  /** Backoff before attempt n is baseDelayMs × 2^(n−2). */
+  baseDelayMs: z.number().int().min(0).max(60_000),
+});
+
+const LotSchema = z.object({ min: decimalString, max: decimalString, step: decimalString });
+
+/** Demo order bots (market makers) that keep the board alive. Demo only. */
+const BotsSchema = z.object({
+  enabled: z.boolean(),
+  /** Customer refs the bots trade as. */
+  refs: z.array(z.string().min(1)).min(2),
+  /** Customer segment the bots log in with (its limits come from `limits.segments`). */
+  segment: z.string().min(1),
+  /** Average pause between bot actions. */
+  intervalMs: z.number().int().min(200),
+  /** Open bot orders per pair and side above which the oldest are cancelled. */
+  maxOrdersPerSide: z.number().int().min(1),
+  /** Passive orders rest this many bips (of the pair's bipSize) away from the reference rate. */
+  offsetBips: z.object({ min: z.number().int().min(1), max: z.number().int().min(1) }),
+  /** Share of actions that are a bot-to-bot trade inside the spread, and that cancel a resting order. */
+  tradeShare: z.number().min(0).max(1),
+  cancelShare: z.number().min(0).max(1),
+  /** Order size per base currency; `default` for the others. */
+  lots: z.record(LotSchema),
+});
+export type BotsConfig = z.infer<typeof BotsSchema>;
+
+export const DEFAULT_SESSION = { ttlMinutes: 30 };
+export const DEFAULT_SETTLEMENT = { attempts: 3, baseDelayMs: 500 };
+export const DEFAULT_BOTS: BotsConfig = {
+  enabled: true,
+  refs: ['demo-mm-1', 'demo-mm-2', 'demo-mm-3', 'demo-mm-4', 'demo-mm-5', 'demo-mm-6'],
+  segment: 'market-maker',
+  intervalMs: 1500,
+  maxOrdersPerSide: 10,
+  offsetBips: { min: 4, max: 25 },
+  tradeShare: 0.25,
+  cancelShare: 0.15,
+  lots: { GBP: { min: '100', max: '1500', step: '50' }, default: { min: '200', max: '3500', step: '50' } },
+};
+
 export const BankConfigSchema = z.object({
   bank: z.object({ code: z.string().min(1), name: z.string().min(1) }),
   branding: z.object({
@@ -119,6 +170,9 @@ export const BankConfigSchema = z.object({
   limits: z.object({ default: LimitsSchema, segments: z.record(LimitsSchema) }),
   orderRateLimit: z.object({ max: z.number().int().min(1), windowSeconds: z.number().int().min(1) }),
   dealing: DealingSchema.default(DEFAULT_DEALING),
+  session: SessionSchema.default(DEFAULT_SESSION),
+  settlement: SettlementSchema.default(DEFAULT_SETTLEMENT),
+  bots: BotsSchema.default(DEFAULT_BOTS),
 });
 export type BankConfig = z.infer<typeof BankConfigSchema>;
 
@@ -164,8 +218,65 @@ export const DEFAULT_CONFIG: BankConfig = {
   },
   limits: {
     default: { maxOrderNotional: '1000000', maxDailyNotional: '5000000' },
-    segments: { premium: { maxOrderNotional: '10000000', maxDailyNotional: '50000000' } },
+    segments: {
+      premium: { maxOrderNotional: '10000000', maxDailyNotional: '50000000' },
+      // Demo order bots; limits a demo never reaches.
+      'market-maker': { maxOrderNotional: '100000000', maxDailyNotional: '100000000000' },
+    },
   },
   orderRateLimit: { max: 30, windowSeconds: 60 },
   dealing: DEFAULT_DEALING,
+  session: DEFAULT_SESSION,
+  settlement: DEFAULT_SETTLEMENT,
+  bots: DEFAULT_BOTS,
 };
+
+/**
+ * Parameters the prototype ships with defaults the bank has not confirmed yet. The back office flags each
+ * until someone changes or confirms it. `paths` are dotted config paths; `*` matches any pair or key.
+ */
+export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
+  { key: 'tax', label: 'Kambiyo vergisi oranı ve matrahı', paths: ['tax'] },
+  { key: 'tradingHours', label: 'İşlem saatleri ve tatiller', paths: ['tradingHours'] },
+  { key: 'commission', label: 'P2P komisyonu (taraf başı bip)', paths: ['pairs.*.commission', 'pairs.*.bipSize'] },
+  { key: 'margins', label: 'Banka satırı segment marjları', paths: ['dealing.margins'] },
+  { key: 'balanceMode', label: 'Emir girişinde bakiye bloke', paths: ['balanceMode'] },
+  { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
+  { key: 'limits', label: 'Emir ve günlük tutar limitleri', paths: ['limits', 'orderRateLimit'] },
+  { key: 'hedging', label: 'Pozisyon limitleri ve otomatik hedge kuralı', paths: ['dealing.positionLimits', 'dealing.autoHedge', 'dealing.hedging'] },
+  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxDealQty'] },
+  { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
+  { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
+  { key: 'bots', label: 'Demo piyasa yapıcı botlar', paths: ['bots'] },
+];
+
+export interface ConfigChange {
+  path: string;
+  from: unknown;
+  to: unknown;
+}
+
+/** Leaf-level differences between two configurations; arrays of objects are compared by index. */
+export function diffConfig(a: unknown, b: unknown, path = ''): ConfigChange[] {
+  const isObj = (v: unknown) => typeof v === 'object' && v !== null;
+  const symbol = (v: unknown) => (isObj(v) ? (v as { symbol?: unknown }).symbol : undefined);
+  if (Array.isArray(a) && Array.isArray(b) && [...a, ...b].every((v) => typeof symbol(v) === 'string')) {
+    // Pairs are keyed by symbol so a path reads `pairs.USDTRY.commission.buyBips`.
+    const bySymbol = (xs: unknown[]) => new Map(xs.map((x) => [symbol(x) as string, x]));
+    const [ma, mb] = [bySymbol(a), bySymbol(b)];
+    const keys = [...new Set([...ma.keys(), ...mb.keys()])];
+    return keys.flatMap((k) => diffConfig(ma.get(k), mb.get(k), path ? `${path}.${k}` : k));
+  }
+  if (isObj(a) && isObj(b) && !Array.isArray(a) && !Array.isArray(b)) {
+    const keys = [...new Set([...Object.keys(a as object), ...Object.keys(b as object)])];
+    return keys.flatMap((k) => diffConfig((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], path ? `${path}.${k}` : k));
+  }
+  return JSON.stringify(a) === JSON.stringify(b) ? [] : [{ path, from: a, to: b }];
+}
+
+/** True when `path` (from diffConfig) falls under the assumption `pattern` (may contain `*`). */
+export function pathMatches(path: string, pattern: string): boolean {
+  const p = path.split('.');
+  const q = pattern.split('.');
+  return q.length <= p.length && q.every((seg, i) => seg === '*' || seg === p[i]);
+}

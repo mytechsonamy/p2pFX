@@ -5,6 +5,7 @@ export type StreamMessage =
   | { channel: `trades:${string}`; data: Trade }
   | { channel: 'orders'; data: Order }
   | { channel: 'fills'; data: Fill }
+  | { channel: 'config'; data: { version: number } }
   | { channel: 'ack' | 'error'; data: unknown };
 
 /**

@@ -1,5 +1,7 @@
 // The bank's FX desk (dealer screen): LP feeds and the aggregated price, segment rates, positions with P&L,
 // customer deals and LP hedges. Reads GET /ops/dealing through the demo bank backend every second.
+// Changing the hedge rule or hedging by hand needs a back office sign-in (editor), so the audit log names the dealer.
+import { canEdit, current, opsFetch } from './ops-session';
 
 interface LpQuote {
   lp: string;
@@ -152,17 +154,21 @@ function policyText(d: Desk['dealing']) {
   return `Otomatik hedge: limit aşılınca pozisyon ${target}, ${h.split === 'ACROSS_LPS' ? "parçalar LP'lere dağıtılır" : 'en iyi LP ile yapılır'}`;
 }
 
-// Hedge rule editor: reads /ops/config once, writes the dealing part back with PUT /ops/config.
+// Hedge rule editor: reads /ops/config, writes the dealing part back with PUT /ops/config and a reason.
 const policy = document.getElementById('policy')!;
 const form = document.getElementById('policy-form') as HTMLFormElement;
 const msg = document.getElementById('policy-msg')!;
-let current: { data: { dealing: Desk['dealing'] & Record<string, unknown> } & Record<string, unknown> } | undefined;
+let current_: { data: { dealing: Desk['dealing'] & Record<string, unknown> } & Record<string, unknown> } | undefined;
+const operator = current()?.operator;
+const editable = canEdit(operator);
 
 async function loadPolicy() {
-  const res = await fetch('/bank/ops/config');
-  if (!res.ok) return;
-  current = await res.json();
-  const d = current!.data.dealing;
+  try {
+    current_ = await opsFetch('GET', '/config');
+  } catch {
+    return;
+  }
+  const d = current_!.data.dealing;
   (form.elements.namedItem('autoHedge') as HTMLInputElement).checked = d.autoHedge;
   (form.elements.namedItem('targetPct') as HTMLInputElement).value = String(d.hedging.targetPct);
   (form.elements.namedItem('split') as HTMLSelectElement).value = d.hedging.split;
@@ -174,14 +180,18 @@ async function loadPolicy() {
       </fieldset>`,
     )
     .join('');
+  for (const el of form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>('input, select, button')) el.disabled = !editable;
+  msg.innerHTML = editable
+    ? `${esc(operator!.displayName)} olarak değiştiriyorsunuz`
+    : `Değiştirmek için <a href="/backoffice.html">backoffice'e</a> editör olarak giriş yapın`;
   policy.hidden = false;
 }
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!current) return;
+  if (!current_) return;
   const f = new FormData(form);
-  const d = current.data.dealing;
+  const d = current_.data.dealing;
   const positionLimits: Record<string, string> = {};
   const maxClipQty: Record<string, string> = {};
   for (const c of Object.keys(d.positionLimits)) {
@@ -195,13 +205,14 @@ form.addEventListener('submit', async (e) => {
     positionLimits,
     hedging: { targetPct: Number(f.get('targetPct')), split: f.get('split'), maxClipQty },
   };
-  const res = await fetch('/bank/ops/config', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...current.data, dealing }),
-  });
-  msg.textContent = res.ok ? 'Kaydedildi' : `Kaydedilemedi: ${(await res.text()).slice(0, 120)}`;
-  if (res.ok) await loadPolicy();
+  try {
+    await opsFetch('PUT', '/config', { config: { ...current_.data, dealing }, reason: String(f.get('reason') ?? '') });
+    msg.textContent = 'Kaydedildi, hemen geçerli';
+    (form.elements.namedItem('reason') as HTMLInputElement).value = '';
+    await loadPolicy();
+  } catch (err) {
+    msg.textContent = `Kaydedilemedi: ${(err as Error).message.slice(0, 120)}`;
+  }
 });
 
 async function refresh() {
@@ -220,11 +231,13 @@ async function refresh() {
 root.addEventListener('click', async (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-flatten]');
   if (!b) return;
+  if (!editable) {
+    statusEl.textContent = 'Manuel hedge için backoffice girişi gerekli';
+    return;
+  }
   b.disabled = true;
-  await fetch('/bank/ops/dealing/hedges', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ pair: b.dataset.flatten, side: b.dataset.side, qty: b.dataset.qty }),
+  await opsFetch('POST', '/dealing/hedges', { pair: b.dataset.flatten, side: b.dataset.side, qty: b.dataset.qty }).catch((err) => {
+    statusEl.textContent = `Hedge yapılamadı: ${(err as Error).message.slice(0, 80)}`;
   });
   refresh();
 });

@@ -16,6 +16,7 @@ const { app, close } = await buildApp({
   bankPublicKeyPem: env('BANK_JWT_PUBLIC_KEY').replace(/\\n/g, '\n'),
   sessionSecret: env('SESSION_SECRET'),
   opsToken: env('OPS_TOKEN'),
+  opsAdminPassword: process.env.OPS_ADMIN_PASSWORD,
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 5000),
   logger: true,
 });

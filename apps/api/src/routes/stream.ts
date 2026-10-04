@@ -8,7 +8,8 @@ import { ratesView } from '../dealing/price-engine.js';
 /**
  * WebSocket /v1/stream?token=<session>. Client sends
  *   { "op": "subscribe", "channels": ["book:USDTRY", "trades:USDTRY", "bank:USDTRY", "orders", "fills"] }
- * and receives { channel, data } messages. Book subscriptions get a snapshot first.
+ * and receives { channel, data } messages. Book subscriptions get a snapshot first. Every client also gets
+ * { channel: "config", data: { version } } when the bank changes a parameter, to reload GET /v1/config.
  */
 export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
   app.get<{ Querystring: { token?: string } }>('/v1/stream', { websocket: true }, (socket, req) => {
@@ -59,6 +60,12 @@ export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
       }
       send('ack', { channels: [...channels] });
     });
-    socket.on('close', unsubscribe);
+    const unwatch = ctx.config.onChange(({ version }) => {
+      if (session) send('config', { version });
+    });
+    socket.on('close', () => {
+      unsubscribe();
+      unwatch();
+    });
   });
 }

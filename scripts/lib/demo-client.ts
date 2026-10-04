@@ -36,10 +36,23 @@ async function call(base: string, method: string, path: string, opts: { token?: 
 
 export const api = (method: string, path: string, token?: string, body?: unknown) => call(API_URL, method, path, { token, body });
 export const core = (method: string, path: string, body?: unknown) => call(CORE_URL, method, path, { body });
+/** Ops API as a service integration; the audit log names the script (`service:demo-walkthrough`). */
+const actor = (process.argv[1] ?? 'script').split(/[\\/]/).pop()!.replace(/\.ts$/, '');
 export const ops = (method: string, path: string, body?: unknown) => {
   if (!OPS_TOKEN) throw new Error('OPS_TOKEN missing: run pnpm dev:keys');
-  return call(API_URL, method, path, { token: OPS_TOKEN, body });
+  return call(API_URL, method, path, { token: OPS_TOKEN, body, headers: { 'x-ops-actor': actor } });
 };
+
+/** Changes one part of the bank configuration with a reason; a no-op change is skipped. */
+export async function changeConfig(reason: string, patch: (data: any) => any) {
+  const cfg = await ops('GET', '/ops/config');
+  try {
+    return await ops('PUT', '/ops/config', { config: patch(structuredClone(cfg.data)), reason });
+  } catch (e) {
+    if (e instanceof HttpError && e.body?.error === 'NO_CHANGE') return cfg;
+    throw e;
+  }
+}
 
 /** Logs a customer in the way the bank app does: a bank-signed launch token exchanged for a session. */
 export async function login(customerRef: string, segment = 'default'): Promise<string> {

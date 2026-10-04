@@ -107,22 +107,51 @@ export class PriceEngine {
   }
 }
 
+interface PairPricing {
+  bip: bigint;
+  tick: bigint;
+  /** Margin in price units per segment, and for segments without their own margin. */
+  segments: Map<string, { buy: bigint; sell: bigint; buyBips: number; sellBips: number }>;
+  fallback: { buy: bigint; sell: bigint; buyBips: number; sellBips: number };
+}
+
+/**
+ * Segment pricing compiled once per configuration version. LPs tick several times a second per pair and
+ * every tick is priced for every connected customer, so the hot path is a map lookup and two additions.
+ * A back office change produces a new configuration object, which compiles a fresh table on first use.
+ */
+const compiled = new WeakMap<BankConfig, Map<string, PairPricing>>();
+
+function pricingTable(config: BankConfig): Map<string, PairPricing> {
+  let table = compiled.get(config);
+  if (table) return table;
+  table = new Map();
+  for (const pair of config.pairs) {
+    const bip = parsePrice(pair.bipSize);
+    const margin = (m: { buyBips: number; sellBips: number }) => ({ buy: BigInt(m.buyBips) * bip, sell: BigInt(m.sellBips) * bip, ...m });
+    table.set(pair.symbol, {
+      bip,
+      tick: parsePrice(pair.tickSize),
+      segments: new Map(Object.entries(config.dealing.margins.segments).map(([s, m]) => [s, margin(m)])),
+      fallback: margin(config.dealing.margins.default),
+    });
+  }
+  compiled.set(config, table);
+  return table;
+}
+
 /**
  * Bank rates for a segment: ask + buy margin and bid − sell margin, rounded to the pair's tick in the
  * bank's favour.
  */
 export function segmentRates(config: BankConfig, pair: PairConfig, agg: { bid: bigint; ask: bigint }, segment: string): SegmentRates {
-  const m = config.dealing.margins.segments[segment] ?? config.dealing.margins.default;
-  const bip = parsePrice(pair.bipSize);
-  const tick = parsePrice(pair.tickSize);
+  const p = pricingTable(config).get(pair.symbol);
+  if (!p) throw new ApiError(404, 'NOT_FOUND', `pair ${pair.symbol} not found`);
+  const m = p.segments.get(segment) ?? p.fallback;
+  const tick = p.tick;
   const up = (v: bigint) => ((v + tick - 1n) / tick) * tick;
   const down = (v: bigint) => (v / tick) * tick;
-  return {
-    buy: up(agg.ask + BigInt(m.buyBips) * bip),
-    sell: down(agg.bid - BigInt(m.sellBips) * bip),
-    buyBips: m.buyBips,
-    sellBips: m.sellBips,
-  };
+  return { buy: up(agg.ask + m.buy), sell: down(agg.bid - m.sell), buyBips: m.buyBips, sellBips: m.sellBips };
 }
 
 export function ratesView(config: BankConfig, pairSymbol: string, agg: { bid: bigint; ask: bigint; at: Date | string }, segment: string) {
