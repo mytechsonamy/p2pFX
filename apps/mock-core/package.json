@@ -1,0 +1,14 @@
+{
+  "name": "@p2p/mock-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@p2p/core-adapter": "workspace:*",
+    "@p2p/shared": "workspace:*",
+    "fastify": "^5.12.5"
+  }
+}

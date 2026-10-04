@@ -1,0 +1,26 @@
+{
+  "name": "p2p-exchange",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev:keys": "tsx scripts/dev-keys.ts",
+    "dev:token": "node --env-file=.env --import tsx scripts/dev-token.ts",
+    "db:migrate": "node --env-file=.env --import tsx apps/api/src/db/migrate-cli.ts",
+    "dev:mock-core": "tsx watch apps/mock-core/src/main.ts",
+    "dev:api": "node --env-file=.env --import tsx --watch apps/api/src/main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/pg": "^8.23.1",
+    "jose": "^6.2.12",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
+  }
+}
