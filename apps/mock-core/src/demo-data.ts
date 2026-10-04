@@ -9,10 +9,15 @@ export const DEMO_CUSTOMERS: Record<string, Record<string, string>> = {
   'demo-ali': { TRY: '20000', USD: '100' },
 };
 
+/** Liquidity providers the market seeder trades with, so the board has depth and a trade history. */
+export const MARKET_MAKERS = ['demo-mm-1', 'demo-mm-2', 'demo-mm-3', 'demo-mm-4', 'demo-mm-5', 'demo-mm-6'];
+const MARKET_MAKER_BALANCES = { TRY: '50000000', USD: '500000', EUR: '500000', GBP: '500000' };
+
 export const DEMO_RATES: Record<string, string> = { USDTRY: '49.15', EURTRY: '53.40', GBPTRY: '62.10' };
 
 export function seedDemo(bank: MockCoreBank) {
-  for (const [ref, balances] of Object.entries(DEMO_CUSTOMERS)) {
+  const customers = { ...DEMO_CUSTOMERS, ...Object.fromEntries(MARKET_MAKERS.map((ref) => [ref, MARKET_MAKER_BALANCES])) };
+  for (const [ref, balances] of Object.entries(customers)) {
     for (const [ccy, amount] of Object.entries(balances)) bank.createAccount(ref, ccy, parseDecimal(amount, 2));
   }
   for (const [pair, rate] of Object.entries(DEMO_RATES)) bank.setReferenceRate(pair, rate);

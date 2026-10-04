@@ -1,10 +1,12 @@
-// Writes .env with a demo bank signing key pair and local secrets.
+// Writes .env (or the file after --out) with a demo bank signing key pair and local secrets.
 import { randomBytes } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 import { exportPKCS8, exportSPKI, generateKeyPair } from 'jose';
 
-if (existsSync('.env') && !process.argv.includes('--force')) {
-  console.log('.env already exists (use --force to overwrite)');
+const outAt = process.argv.indexOf('--out');
+const out = outAt > 0 ? process.argv[outAt + 1] : '.env';
+if (existsSync(out) && !process.argv.includes('--force')) {
+  console.log(`${out} already exists (use --force to overwrite)`);
   process.exit(0);
 }
 const { publicKey, privateKey } = await generateKeyPair('RS256', { extractable: true });
@@ -18,5 +20,5 @@ const env = {
   SESSION_SECRET: randomBytes(32).toString('hex'),
   OPS_TOKEN: randomBytes(16).toString('hex'),
 };
-writeFileSync('.env', Object.entries(env).map(([k, v]) => `${k}="${v}"`).join('\n') + '\n');
-console.log('wrote .env');
+writeFileSync(out, Object.entries(env).map(([k, v]) => `${k}="${v}"`).join('\n') + '\n');
+console.log(`wrote ${out}`);

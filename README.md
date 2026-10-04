@@ -21,6 +21,33 @@ packages/
 db/migrations/  Postgres schema
 ```
 
+## Demo in one command
+
+Requires Docker only.
+
+```sh
+docker compose up --build      # or: pnpm demo
+```
+
+Open **http://localhost:5174**: the demo bank app with Ayşe and Mehmet side by side. The stack generates
+its own demo keys, starts Postgres, the mock core banking service, the API and the web app, and seeds every
+pair with a trade history and a resting order book. Then, in a second terminal, the scripted end-to-end
+trade (narrated in Turkish) while the phones update live:
+
+```sh
+docker compose run --rm walkthrough
+```
+
+Restarting the stack resets the demo (Postgres and the mock core both run in memory). The presenter's
+script is in [docs/demo.md](docs/demo.md).
+
+| | |
+|---|---|
+| http://localhost:5174 | demo bank app (two phones, bank brand switch, bridge message log) |
+| http://localhost:5173 | the embeddable web app on its own |
+| http://localhost:4000 | P2P API |
+| http://localhost:4100 | mock core banking (`/admin/bank-accounts`, `/admin/notifications`, `/admin/faults`) |
+
 ## Run locally
 
 Requires Node 20+, pnpm and Postgres 16.
@@ -44,9 +71,10 @@ In the demo, sell USD as Ayşe and tap her offer in Mehmet's order book to buy i
 shows the same build in a second bank's colours. See [apps/web/README.md](apps/web/README.md) and
 [packages/sdk-bridge/README.md](packages/sdk-bridge/README.md).
 
-Or the backend in Docker: `pnpm dev:keys && docker compose up --build`.
+`pnpm demo:seed` fills the board with market-maker orders and trades, and `pnpm demo:walkthrough` runs the
+scripted trade, both against this local setup.
 
-Try a trade (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`):
+Try a trade by hand (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`; `demo-mm-1` to `demo-mm-6` are the seeder's market makers):
 
 ```sh
 login() { curl -s localhost:4000/v1/session -H 'content-type: application/json' \
