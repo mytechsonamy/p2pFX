@@ -68,6 +68,8 @@ export class MockCoreBank implements CoreBankingAdapter {
   private seq = 0;
   /** Fault injection for tests and demos: the next N postings fail with UNAVAILABLE. */
   failNextPostings = 0;
+  /** When set, the injected faults only hit postings for these customers (others keep settling). */
+  faultCustomers: Set<string> | undefined;
 
   private nextId(prefix: string) {
     return `${prefix}-${String(++this.seq).padStart(6, '0')}`;
@@ -169,7 +171,7 @@ export class MockCoreBank implements CoreBankingAdapter {
   async postFxTransaction(req: FxTransactionRequest): Promise<FxTransactionResult> {
     const existing = this.txnsByKey.get(req.idempotencyKey);
     if (existing) return this.result(existing);
-    if (this.failNextPostings > 0) {
+    if (this.failNextPostings > 0 && (!this.faultCustomers || this.faultCustomers.has(req.customerRef))) {
       this.failNextPostings--;
       throw new CoreBankingError('UNAVAILABLE', 'core banking temporarily unavailable (injected fault)');
     }
@@ -266,8 +268,8 @@ export class MockCoreBank implements CoreBankingAdapter {
       lines: [
         { label: 'İşlem', value: isBuy ? `${r.currency} alış` : `${r.currency} satış` },
         { label: 'Tutar', value: `${formatDecimal(r.qty, decimalsOf(r.currency))} ${r.currency}` },
-        { label: 'Eşleşme kuru', value: r.bookPrice },
-        { label: 'İşlem kuru', value: r.effectivePrice },
+        { label: 'Eşleşme kuru', value: rate4(r.bookPrice) },
+        { label: 'İşlem kuru', value: rate4(r.effectivePrice) },
         { label: 'İşlem tutarı', value: q(r.notional) },
         { label: 'Banka komisyonu', value: q(r.commission) },
         { label: 'Kambiyo vergisi', value: q(r.tax) },
@@ -348,4 +350,10 @@ export class MockCoreBank implements CoreBankingAdapter {
   private result(t: Txn): FxTransactionResult {
     return { txnRef: t.txnRef, receiptRef: t.receiptRef, postedAt: t.postedAt };
   }
+}
+
+/** Rates on a dekont carry four decimals, as banks publish them: 49.2 → 49.2000. */
+function rate4(rate: string): string {
+  const [int, frac = ''] = rate.split('.');
+  return `${int}.${frac.padEnd(4, '0')}`;
 }

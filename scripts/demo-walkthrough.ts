@@ -138,7 +138,8 @@ await pause();
 
 step(9, 'Çekirdek bankacılık yanıt vermezse eşleşme operasyon kuyruğuna düşer, tekrar denenince tamamlanır');
 const zeynep = await login('demo-zeynep');
-await core('POST', '/admin/faults', { failNextPostings: 3 });
+// Scoped to the two customers, so the bots' trades running in the background don't use up the faults.
+await core('POST', '/admin/faults', { failNextPostings: 3, customers: ['demo-zeynep', 'demo-mehmet'] });
 line('Mock çekirdek bankacılık', 'sonraki 3 kayıt denemesi hata verecek');
 const zSell = await placeOrder(zeynep, { pair: PAIR, side: 'SELL', qty: '100', price: PRICE });
 const zBuy = await placeOrder(mehmet, { pair: PAIR, side: 'BUY', qty: '100', price: PRICE });

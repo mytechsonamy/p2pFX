@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useExchange, usePair } from './store';
 import { Row, Segmented, Sheet } from './components';
-import { compareDecimal, currencySymbol, formatDecimal, formatBankRate, formatMoney, formatRate, sanitizeAmountInput, toApiDecimal } from './format';
+import { compareDecimal, currencySymbol, formatDecimal, formatMoney, formatPrice, formatRate, sanitizeAmountInput, toApiDecimal } from './format';
 import type { BankQuote, PairInfo, Side } from './types';
 
 /** The bank's live rates for this customer, on top of the order book: tap to deal instantly. */
@@ -20,11 +20,11 @@ export function BankRow({ pair }: { pair: PairInfo }) {
       <div className="bank-prices">
         <button className="bank-price buy" disabled={!r} onClick={() => openBankDeal({ side: 'BUY' })}>
           <small>{t('bank.buy')}</small>
-          <strong>{r ? formatBankRate(r.buy, locale) : '—'}</strong>
+          <strong>{r ? formatPrice(r.buy, locale) : '—'}</strong>
         </button>
         <button className="bank-price sell" disabled={!r} onClick={() => openBankDeal({ side: 'SELL' })}>
           <small>{t('bank.sell')}</small>
-          <strong>{r ? formatBankRate(r.sell, locale) : '—'}</strong>
+          <strong>{r ? formatPrice(r.sell, locale) : '—'}</strong>
         </button>
       </div>
     </section>
@@ -44,7 +44,7 @@ export function BetterAtBank({ side, effectivePrice, qty }: { side: Side; effect
   if (!better) return null;
   return (
     <div className="notice bank-better">
-      {t('bank.better', { bank: config.bank.name, rate: formatBankRate(bank, locale) })}{' '}
+      {t('bank.better', { bank: config.bank.name, rate: formatPrice(bank, locale) })}{' '}
       <button className="link" onClick={() => openBankDeal({ side, qty })}>
         {t('bank.betterAction')}
       </button>
@@ -122,8 +122,8 @@ export function BankDealSheet() {
           setQuote(undefined);
         }}
         options={[
-          { value: 'BUY', label: `${t('bank.buy')} · ${live ? formatBankRate(live.buy, locale) : '—'}`, tone: 'buy' },
-          { value: 'SELL', label: `${t('bank.sell')} · ${live ? formatBankRate(live.sell, locale) : '—'}`, tone: 'sell' },
+          { value: 'BUY', label: `${t('bank.buy')} · ${live ? formatPrice(live.buy, locale) : '—'}`, tone: 'buy' },
+          { value: 'SELL', label: `${t('bank.sell')} · ${live ? formatPrice(live.sell, locale) : '—'}`, tone: 'sell' },
         ]}
       />
       <label className="field">
@@ -145,8 +145,8 @@ export function BankDealSheet() {
 
       {quote && (
         <div className="breakdown">
-          <Row label={t('bank.rate')} value={`${formatBankRate(quote.rate, locale)} ${currencySymbol(pair.quote)}`} strong />
-          <Row label={t('bank.notional', { qty: `${formatDecimal(quote.qty, locale, pair.baseDecimals)} ${pair.base}`, rate: formatBankRate(quote.rate, locale) })} value={money(quote.notional)} />
+          <Row label={t('bank.rate')} value={`${formatPrice(quote.rate, locale)} ${currencySymbol(pair.quote)}`} strong />
+          <Row label={t('bank.notional', { qty: `${formatDecimal(quote.qty, locale, pair.baseDecimals)} ${pair.base}`, rate: formatPrice(quote.rate, locale) })} value={money(quote.notional)} />
           <Row label={t('quote.tax', { rate: formatRate(quote.taxRate, locale) })} value={`${buy ? '+' : '−'} ${money(quote.tax)}`} />
           <div className="divider" />
           <Row label={buy ? t('quote.totalBuy') : t('quote.totalSell')} value={money(quote.total)} strong />

@@ -10,14 +10,17 @@
 #   demo-host  the fake bank app with two phones side by side (http://localhost:5174)
 #
 # Scripted end-to-end trade, narrated in Turkish: `docker compose run --rm walkthrough`.
+# One image for every Node service. Only `keys` builds it: when several services share an image name and
+# each has a build section, Compose builds them in parallel and the exports collide ("image already exists").
 x-node: &node
-  build: .
   image: p2pfx-demo
+  pull_policy: never
   volumes: ["keys:/keys"]
 
 services:
   keys:
     <<: *node
+    build: .
     command: ["node", "--import", "tsx", "scripts/dev-keys.ts", "--out", "/keys/.env"]
 
   postgres:

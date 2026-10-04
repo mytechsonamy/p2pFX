@@ -51,9 +51,13 @@ export function TradeScreen() {
   );
 }
 
+/** Reference rate and the top of the P2P book, the same prices the order book below shows. */
 function RateStrip({ pair }: { pair: PairInfo }) {
-  const { rates, t, locale } = useExchange();
+  const { rates, books, t, locale } = useExchange();
   const r = rates[pair.symbol];
+  const book = books[pair.symbol];
+  const bid = book?.bids[0]?.price;
+  const ask = book?.asks[0]?.price;
   return (
     <section className="card rates">
       <div>
@@ -61,13 +65,14 @@ function RateStrip({ pair }: { pair: PairInfo }) {
         <strong>{r ? formatPrice(r.rate, locale) : '—'}</strong>
       </div>
       <div className="buy-text">
-        <small>{t('rate.indicativeBuy')}</small>
-        <strong>{r ? formatPrice(r.buyPrice, locale) : '—'}</strong>
+        <small>{t('rate.bestBid')}</small>
+        <strong>{bid ? formatPrice(bid, locale) : '—'}</strong>
       </div>
       <div className="sell-text">
-        <small>{t('rate.indicativeSell')}</small>
-        <strong>{r ? formatPrice(r.sellPrice, locale) : '—'}</strong>
+        <small>{t('rate.bestAsk')}</small>
+        <strong>{ask ? formatPrice(ask, locale) : '—'}</strong>
       </div>
+      <p className="rates-note">{t('rate.p2pNote')}</p>
     </section>
   );
 }

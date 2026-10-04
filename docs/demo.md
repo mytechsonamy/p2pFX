@@ -28,17 +28,19 @@ botun emrini alabilir). Stack yeniden başlatılınca demo baştan başlar.
 ## 2. Tahta (1 dk)
 
 Mehmet'te **Tahta**: son işlem ve günlük değişim, açılış/en yüksek/en düşük, hacim, derinlik merdiveni,
-derinlik grafiği, son işlemler. Banka kuru 49,15; en iyi alış ve satış 49,11 ile 49,20 civarında, botlar
+derinlik grafiği, son işlemler. Referans kur 49,1500; tahtada en iyi alış ve satış 49,1100 ile 49,2000 civarında, botlar
 oynattıkça değişir.
 
 ## 3. İşlem (3 dk)
 
-1. Ayşe: **Al-Sat** → Sat, 1.000 USD, fiyat 49,15, geçerlilik Gün sonu. Onay ekranında işlem kuru 49,10
-   (49,15 − 0,05 komisyon), binde 2 kambiyo vergisi, hesabına yatacak 49.001,80 TL. Onayla: 1.000 USD bloke.
-2. Mehmet'in emir defterinde 49,15'te Ayşe'nin teklifi anında belirir. Fiyata dokun: alış emri dolu gelir.
-   Onay ekranı: **49,15 + 0,05 = 49,20**, 50 TL komisyon, 98,40 TL vergi, hesabından çekilecek 49.298,40 TL.
-3. Onayla. İki telefon da güncellenir, yeni işlem tahtaya düşer.
-4. **İşlemlerim** → işlem → dekont. Banka Ayşe'den aldı, Mehmet'e sattı; iki ayrı kayıt müşterilerin vadesiz
+1. Al-Sat ekranının üstündeki kart referans kuru ve tahtadaki en iyi alış/satışı gösterir (emir defteriyle
+   aynı fiyatlar, komisyonsuz). Kurlar 4 hanelidir.
+2. Ayşe: **Al-Sat** → Sat, 1.000 USD, fiyat 49,15, geçerlilik Gün sonu. Onay ekranında işlem kuru 49,1000
+   (49,1500 − 0,0500 komisyon), binde 2 kambiyo vergisi, hesabına yatacak 49.001,80 TL. Onayla: 1.000 USD bloke.
+3. Mehmet'in emir defterinde 49,15'te Ayşe'nin teklifi anında belirir. Fiyata dokun: alış emri dolu gelir.
+   Onay ekranı: **49,1500 + 0,0500 = 49,2000**, 50 TL komisyon, 98,40 TL vergi, hesabından çekilecek 49.298,40 TL.
+4. Onayla. İki telefon da güncellenir, yeni işlem tahtaya düşer.
+5. **İşlemlerim** → işlem → dekont. Banka Ayşe'den aldı, Mehmet'e sattı; iki ayrı kayıt müşterilerin vadesiz
    hesaplarına atıldı, ayrı cüzdan yok.
 
 Mesaj: banka 1.000 USD'lik eşleşmeden 50 TL alış, 50 TL satış komisyonu kazandı ve iki taraftan kambiyo
