@@ -21,6 +21,22 @@ import { PositionKeeper } from './dealing/positions.js';
 import { DealingService } from './dealing/dealing.js';
 import { BankBook } from './dealing/bank-book.js';
 
+/**
+ * Commands that move money or risk (orders, cancels, bank deals, hedges, settlement retries). They run only on the
+ * matching instance: it owns the book, the per-pair and per-hedge serialisation and the recovery jobs. Any other
+ * instance refuses them before touching the database, core banking or an LP.
+ */
+const FINANCIAL_COMMANDS = new Set([
+  'POST /v1/orders',
+  'DELETE /v1/orders/:id',
+  'POST /v1/bank/quotes',
+  'POST /v1/bank/deals',
+  'POST /ops/dealing/hedges',
+  'POST /ops/dealing/hedges/:id/resolve',
+  'POST /ops/dealing/deals/:id/retry',
+  'POST /ops/settlements/:id/retry',
+]);
+
 export interface AppOptions {
   databaseUrl: string;
   core: CoreBankingAdapter;
@@ -105,7 +121,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
   const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);
   const bankBook = new BankBook(db, config, entry, exchange, prices, positions, app.log);
-  const scheduler = new Scheduler(db, exchange, settlement, dealing, config, clock, app.log);
+  const scheduler = new Scheduler(db, exchange, settlement, dealing, positions, config, clock, app.log);
 
   // Per-customer order entry rate limit (sliding window, in memory).
   const hits = new Map<string, number[]>();
@@ -142,7 +158,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     try {
       const { rows } = await db.query(
         `select
-           (select count(*)::int from settlements where status in ('FAILED_NEEDS_REVIEW', 'UNKNOWN_OUTCOME')) as settlements_needing_review,
+           (select count(*)::int from settlements where status in ('FAILED_NEEDS_REVIEW', 'UNKNOWN_OUTCOME', 'REVERSAL_PENDING')) as settlements_needing_review,
+           (select count(*)::int from settlements where status = 'REVERSAL_PENDING') as reversals_unconfirmed,
            (select extract(epoch from now() - min(updated_at))::int from settlements where status = 'PENDING') as oldest_pending_settlement_s,
            (select count(*)::int from bank_deals where status in ('PENDING', 'FAILED_NEEDS_REVIEW')) as deals_open,
            (select count(*)::int from hedges where status in ('PENDING', 'UNKNOWN')) as hedges_unresolved,
@@ -159,6 +176,12 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const c = config.get().data;
     checks.lpPricesFresh = c.dealing.enabled ? c.pairs.filter((p) => p.enabled).every((p) => !!prices.fresh(p.symbol)) : null;
     return reply.status(ok ? 200 : 503).send({ ok, ...checks });
+  });
+  // Checked before authentication and the handler, so a refused command has no side effect at all. This also
+  // covers the matching instance after it lost its lock.
+  app.addHook('onRequest', async (req) => {
+    if (exchange.running || !FINANCIAL_COMMANDS.has(`${req.method} ${req.routeOptions.url}`)) return;
+    throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'this instance does not process trading commands; send them to the matching instance');
   });
   customerRoutes(app, ctx);
   opsRoutes(app, ctx);

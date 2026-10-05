@@ -101,6 +101,13 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
     return positions.hedge(pair, body.side, qty, 'MANUAL', actor);
   });
 
+  /** Closes a hedge clip whose outcome the LP never confirmed, after operations checked with the LP. */
+  app.post<{ Params: { id: string } }>('/ops/dealing/hedges/:id/resolve', async (req) => {
+    const actor = await auth.ops(req, 'editor');
+    const body = parse(z.object({ outcome: z.literal('REJECTED'), note: z.string().min(3).max(500) }), req.body);
+    return positions.resolveClip(req.params.id, body.outcome, body.note, actor);
+  });
+
   app.post<{ Params: { id: string } }>('/ops/dealing/deals/:id/retry', async (req) => {
     const actor = await auth.ops(req, 'editor');
     return dealing.retry(req.params.id, actor);

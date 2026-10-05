@@ -95,9 +95,8 @@ export class Exchange {
     for (const o of interrupted) {
       await this.db.query(`update orders set status = 'REJECTED', cancel_reason = 'ENTRY_INTERRUPTED', updated_at = now() where id = $1 and status = 'NEW'`, [o.id]);
       // The hold may exist in core banking without its id ever reaching the database: find it by reference.
-      const holds = new Set(o.hold_id ? [o.hold_id] : []);
-      for (const h of await this.core.findHolds(`order:${o.id}`).catch(() => [])) holds.add(h);
-      for (const h of holds) await this.releaseHold(h);
+      if (o.hold_id) await this.releaseHold(o.hold_id);
+      await this.releaseHoldsByRef(`order:${o.id}`);
     }
     await this.settlement.resumePending();
     const due = await loadOrders(this.db, `o.status = any($1) and o.expires_at <= $2 order by o.seq`, [['OPEN', 'PARTIAL', 'QUEUED'], this.clock()]);
@@ -132,6 +131,8 @@ export class Exchange {
 
   /** Cancels (or expires) a live or queued order and releases its hold. Returns the updated row. */
   async cancel(orderId: string, reason: 'USER' | 'EXPIRED'): Promise<OrderRow | undefined> {
+    // Only the instance that holds the book may take an order out of it.
+    if (!this.active) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
     const row = await loadOrder(this.db, orderId);
     if (!row) return undefined;
     const w = this.worker(row.pair);
@@ -184,9 +185,14 @@ export class Exchange {
     const takerBook = bookOrder(taker);
     try {
       const result = await matchIncoming(w.book, takerBook, async (c) => {
+        // Every fill is a new decision: the taker's validity and the session are checked again, not only on arrival
+        // (an earlier fill's settlement can take long enough for either to run out).
+        const at = this.clock();
+        if (current.expires_at <= at) return { action: 'cancelTaker', reason: 'EXPIRED' };
+        if (!isMarketOpen(at, this.config.get().data.tradingHours)) return { action: 'stop' };
         const maker = w.resting.get(c.maker.id)!;
         // A maker past its validity is expired here, not traded, even if the scheduler has not reached it yet.
-        if (maker.expires_at <= this.clock()) {
+        if (maker.expires_at <= at) {
           w.resting.delete(maker.id);
           await this.closeOrder(maker, 'EXPIRED', 'EXPIRED');
           return { action: 'cancelMaker', reason: 'EXPIRED' };
@@ -214,7 +220,7 @@ export class Exchange {
 
       if (result.takerCancelled) {
         current = (await loadOrder(this.db, orderId))!;
-        await this.closeOrder(current, 'CANCELLED', result.takerCancelled);
+        await this.closeOrder(current, result.takerCancelled === 'EXPIRED' ? 'EXPIRED' : 'CANCELLED', result.takerCancelled);
       } else if (result.rested) {
         w.resting.set(orderId, current);
       }
@@ -435,13 +441,51 @@ export class Exchange {
     await this.core.notify(customerRef, event).catch((err) => this.log.warn({ err }, 'notify failed'));
   }
 
-  /** Releases a hold; if core banking does not confirm it, a hold task retries it until it does. */
-  private async releaseHold(holdId: string) {
-    await this.core.releaseHold(holdId).catch((err) => this.holdTask(holdId, 'RELEASE', null, err));
+  /**
+   * Releases a hold; if core banking does not confirm it, a hold task retries it until it does. A confirmed
+   * release supersedes every change still queued for the hold.
+   */
+  async releaseHold(holdId: string) {
+    try {
+      await this.core.releaseHold(holdId);
+    } catch (err) {
+      return this.holdTask(holdId, 'RELEASE', null, err);
+    }
+    await this.supersede(holdId);
+  }
+
+  /**
+   * Releases every hold core banking has under a reference (a hold whose id never reached us: lost response,
+   * crash). If the lookup or a release fails, a hold task repeats the whole cleanup until it succeeds.
+   */
+  async releaseHoldsByRef(ref: string) {
+    try {
+      for (const h of await this.core.findHolds(ref)) await this.releaseHold(h);
+    } catch (err) {
+      this.log.warn({ err, ref }, 'hold cleanup by reference failed; queued for retry');
+      await this.db
+        .query(`insert into hold_tasks (ref, action, last_error) values ($1, 'RELEASE_BY_REF', $2)`, [ref, (err as Error)?.message ?? String(err)])
+        .catch((e) => this.log.error({ err: e, ref }, 'could not queue the hold cleanup'));
+    }
   }
 
   private async adjustHold(holdId: string, amount: bigint) {
-    await this.core.adjustHold(holdId, amount).catch((err) => this.holdTask(holdId, 'ADJUST', amount, err));
+    try {
+      await this.core.adjustHold(holdId, amount);
+    } catch (err) {
+      return this.holdTask(holdId, 'ADJUST', amount, err);
+    }
+    await this.supersede(holdId, 'ADJUST');
+  }
+
+  /** Marks queued changes of a hold done after a newer change was confirmed (all of them, or only adjustments). */
+  private async supersede(holdId: string, action?: 'ADJUST') {
+    await this.db
+      .query(`update hold_tasks set done = true, last_error = 'superseded', updated_at = now() where hold_id = $1 and not done and ($2::text is null or action = $2)`, [
+        holdId,
+        action ?? null,
+      ])
+      .catch((err) => this.log.warn({ err, holdId }, 'could not mark queued hold changes superseded'));
   }
 
   private async holdTask(holdId: string, action: 'RELEASE' | 'ADJUST', amount: bigint | null, err: unknown) {
@@ -451,17 +495,35 @@ export class Exchange {
       .catch((e) => this.log.error({ err: e, holdId, action }, 'could not queue the hold change'));
   }
 
-  /** Retries queued hold changes: per hold, a pending release wins over adjustments, else the latest adjustment. */
+  /**
+   * Retries queued hold changes. A queued amount is never replayed blindly: per hold, a pending release wins;
+   * otherwise the target is worked out from the order's current state (released once the order is no longer
+   * live, else adjusted to what its remaining quantity needs now).
+   */
   async retryHoldTasks() {
     const { rows } = await this.db.query('select * from hold_tasks where not done order by id');
+    for (const t of rows.filter((r) => r.action === 'RELEASE_BY_REF')) {
+      try {
+        for (const h of await this.core.findHolds(t.ref)) await this.core.releaseHold(h);
+        await this.db.query('update hold_tasks set done = true, updated_at = now() where id = $1', [t.id]);
+      } catch (err) {
+        await this.db.query('update hold_tasks set attempts = attempts + 1, last_error = $2, updated_at = now() where id = $1', [t.id, (err as Error).message]);
+      }
+    }
     const byHold = new Map<string, Record<string, any>[]>();
-    for (const r of rows) byHold.set(r.hold_id, [...(byHold.get(r.hold_id) ?? []), r]);
+    for (const r of rows.filter((r) => r.hold_id)) byHold.set(r.hold_id, [...(byHold.get(r.hold_id) ?? []), r]);
     for (const [holdId, tasks] of byHold) {
-      const release = tasks.some((t) => t.action === 'RELEASE');
       const ids = tasks.map((t) => t.id);
       try {
+        let release = tasks.some((t) => t.action === 'RELEASE');
+        let target: bigint | undefined;
+        if (!release) {
+          const o = (await loadOrders(this.db, 'o.hold_id = $1', [holdId]))[0];
+          if (!o || !['OPEN', 'PARTIAL', 'QUEUED'].includes(o.status) || remainingOf(o) <= 0n) release = true;
+          else target = requirementFor(o, remainingOf(o));
+        }
         if (release) await this.core.releaseHold(holdId);
-        else await this.core.adjustHold(holdId, BigInt(tasks[tasks.length - 1].amount));
+        else await this.core.adjustHold(holdId, target!);
         await this.db.query('update hold_tasks set done = true, updated_at = now() where id = any($1)', [ids]);
       } catch (err) {
         // A hold core banking no longer has is as good as released.

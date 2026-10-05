@@ -97,24 +97,35 @@ export class DealingService {
     const margin = marginOf(pair, BigInt(quote.qty), parsePrice(quote.rate), parsePrice(quote.lp_rate));
 
     // Claiming the quote, the daily limit and the deal record commit together: a used quote always has its deal.
+    // Policy: a quote is valid until it is claimed. Validity is checked again at the claim, with the clock read
+    // after the quote's row lock is taken (so neither a slow account lookup nor a wait on a concurrent execute
+    // stretches it), not with the time the request arrived.
     const deal = await tx(this.db, async (client) => {
+      await client.query('select 1 from bank_quotes where id = $1 for update', [quoteId]);
+      const claimedAt = this.clock();
       const { rows } = await client.query(
         `update bank_quotes set status = 'EXECUTED' where id = $1 and customer_id = $2 and status = 'OPEN' and expires_at > $3 returning *`,
-        [quoteId, session.customerId, now],
+        [quoteId, session.customerId, claimedAt],
       );
       const q = rows[0];
       if (!q) return undefined;
-      await reserveDailyLimit(client, config, session, BigInt(q.notional), pair, now);
+      await reserveDailyLimit(client, config, session, BigInt(q.notional), pair, claimedAt);
       const { rows: deals } = await client.query(
         `insert into bank_deals (quote_id, customer_id, pair, side, qty, rate, lp_rate, notional, tax, total, margin, fx_account_id, try_account_id, status)
          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'PENDING') returning *`,
         [q.id, session.customerId, q.pair, q.side, q.qty, q.rate, q.lp_rate, q.notional, q.tax, q.total, margin, fx.id, tl.id],
       );
-      await audit(client, `customer:${session.customerId}`, 'dealing.deal', { dealId: deals[0].id, quoteId: q.id, pair: q.pair, side: q.side, rate: q.rate });
+      await audit(client, `customer:${session.customerId}`, 'dealing.deal', {
+        dealId: deals[0].id, quoteId: q.id, pair: q.pair, side: q.side, rate: q.rate, claimedAt: claimedAt.toISOString(), expiresAt: new Date(q.expires_at).toISOString(),
+      });
       return deals[0];
     });
-    // Lost a race with a concurrent execute of the same quote.
-    if (!deal) return this.executed(quoteId);
+    if (!deal) {
+      // Either a concurrent execute of the same quote won (it has the deal), or the quote ran out before the claim.
+      const { rows } = await this.db.query('select status from bank_quotes where id = $1', [quoteId]);
+      if (rows[0]?.status !== 'EXECUTED') throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
+      return this.executed(quoteId);
+    }
     const settled = await this.settle(deal, session.customerRef, pair);
     if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
     const view = dealView(settled, pair);

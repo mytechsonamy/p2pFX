@@ -118,12 +118,15 @@ export interface MatchCandidate {
  * - `cancelTaker`: the incoming order cannot trade and was cancelled; matching stops.
  * - `skipMaker`: the book's view of the resting order was stale (the caller resyncs it); it leaves the
  *   book and matching continues with the next resting order.
+ * - `stop`: the incoming order may not trade any further right now (e.g. the session closed); matching stops and
+ *   what is left of it rests in the book.
  */
 export type MatchDecision =
   | { action: 'filled' }
   | { action: 'cancelMaker'; reason: string }
   | { action: 'cancelTaker'; reason: string }
-  | { action: 'skipMaker' };
+  | { action: 'skipMaker' }
+  | { action: 'stop' };
 
 export interface MatchResult {
   fills: { makerId: string; qty: bigint; price: bigint }[];
@@ -173,6 +176,8 @@ export async function matchIncoming(
       result.cancelledMakers.push({ id: maker.id, reason: decision.reason });
     } else if (decision.action === 'skipMaker') {
       book.remove(maker.id);
+    } else if (decision.action === 'stop') {
+      break;
     } else {
       result.takerCancelled = decision.reason;
       break;

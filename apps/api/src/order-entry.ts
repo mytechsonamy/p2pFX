@@ -49,6 +49,8 @@ export class OrderEntry {
    * subject to customer segment limits.
    */
   async place(session: Session, body: PlaceOrderRequest, idempotencyKey: string | undefined, opts: { house?: boolean } = {}) {
+    // Nothing is recorded or held on an instance that cannot match the order.
+    if (!this.exchange.running) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
     if (!idempotencyKey || idempotencyKey.length > 200) throw badRequest('IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key header is required');
     const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
 
@@ -118,6 +120,10 @@ export class OrderEntry {
       const reason = err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS' ? 'INSUFFICIENT_BALANCE' : 'CORE_UNAVAILABLE';
       await this.db.query(`update orders set status = 'REJECTED', cancel_reason = $2, updated_at = now() where id = $1`, [orderId, reason]);
       await audit(this.db, session.customerRef, 'order.rejected', { orderId, reason });
+      // Only a definite refusal proves no hold was placed. After anything else (timeout, lost response) the hold
+      // may exist without its id: it is found by the order's reference and released, or queued until it is.
+      const definite = err instanceof CoreBankingError && err.code !== 'UNAVAILABLE';
+      if (config.balanceMode === 'block' && !definite) await this.exchange.releaseHoldsByRef(`order:${orderId}`);
       const rejected = (await loadOrder(this.db, orderId))!;
       throw unprocessable(reason, reason === 'INSUFFICIENT_BALANCE' ? 'insufficient balance' : 'core banking unavailable', {
         order: orderView(rejected, config),
@@ -128,7 +134,7 @@ export class OrderEntry {
     const moved = await this.db.query(`update orders set status = $2, hold_id = $3, updated_at = now() where id = $1 and status = 'NEW'`, [orderId, status, holdId]);
     if (moved.rowCount !== 1) {
       // Rejected meanwhile (e.g. a restart treated the entry as interrupted): give the hold back.
-      if (holdId) await this.core.releaseHold(holdId).catch(() => {});
+      if (holdId) await this.exchange.releaseHold(holdId);
       throw new ApiError(503, 'ENTRY_INTERRUPTED', 'order entry was interrupted, please try again');
     }
     await audit(this.db, session.customerRef, 'order.placed', { orderId, pair: pair.symbol, side: body.side, qty: body.qty, price: body.price, validity: body.validity, status });
