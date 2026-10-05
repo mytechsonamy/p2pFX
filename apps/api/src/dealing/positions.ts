@@ -53,8 +53,12 @@ export function positionOf(pair: PairConfig, trades: Trade[]): Position {
   return { pair: pair.symbol, currency: pair.base, qty, avgRate: avg, realized };
 }
 
-/** How long a clip the LP does not know about may still turn up there (a request still in flight). */
-const UNKNOWN_SETTLE_MS = 30_000;
+/**
+ * How long a clip the LP does not know about may plausibly still turn up there. Past it the clip is escalated to
+ * operations, not rejected: the LP's silence is not proof it never traded, so the clip keeps counting in the
+ * position until the LP shows it or an operator who checked with the LP rejects it.
+ */
+const UNKNOWN_ESCALATE_MS = 30_000;
 
 export interface Clip {
   lp: string;
@@ -115,7 +119,7 @@ export class PositionKeeper {
            join orders o on o.id in (f.buy_order_id, f.sell_order_id)
            join customers c on c.id = o.customer_id
           where f.pair = $1 and c.customer_ref = $2
-            and not exists (select 1 from settlements s where s.fill_id = f.id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED'))
+            and not exists (select 1 from settlements s where s.fill_id = f.id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED', 'REVERSAL_PENDING'))
        ) t order by at, src, seq`,
       [pair.symbol, this.config.get().data.bankBook.customerRef],
     );
@@ -151,6 +155,8 @@ export class PositionKeeper {
         deals: rows[0].deals,
         marginEarned: q(BigInt(rows[0].margin)),
         quoteCurrency: pair.quote,
+        // Part of qty: hedge clips whose outcome the LP has not confirmed yet (kept in the position as a reserve).
+        unconfirmedHedgeQty: formatDecimal(await this.unconfirmed(pair.symbol), pair.baseDecimals),
       });
     }
     return out;
@@ -270,7 +276,10 @@ export class PositionKeeper {
     return undefined;
   }
 
-  /** Looks up clips left PENDING or UNKNOWN (crash, timeout, database error) at their LP by reference. */
+  /**
+   * Looks up clips left PENDING or UNKNOWN (crash, timeout, database error) at their LP by reference. A clip
+   * the LP shows becomes DONE; any other stays open (and in the position) and is looked up again on the next run.
+   */
   async resolveOpenClips(pairSymbol?: string) {
     const { rows } = await this.db.query(
       `select id, lp, lp_ref, created_at from hedges where status in ('PENDING', 'UNKNOWN') and lp_ref is not null and ($1::text is null or pair = $1) order by seq`,
@@ -279,13 +288,50 @@ export class PositionKeeper {
     for (const r of rows) {
       try {
         const exec = await this.lp.findExecution(r.lp, r.lp_ref);
-        if (exec) await this.db.query(`update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1`, [r.id, exec.rate, exec.tradeRef]);
-        // "Not found" only counts once a late arrival at the LP is no longer plausible.
-        else if (Date.now() - new Date(r.created_at).getTime() > UNKNOWN_SETTLE_MS) await this.db.query(`update hedges set status = 'REJECTED' where id = $1`, [r.id]);
+        if (exec) {
+          await this.db.query(`update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1 and status in ('PENDING', 'UNKNOWN')`, [r.id, exec.rate, exec.tradeRef]);
+        } else if (Date.now() - new Date(r.created_at).getTime() > UNKNOWN_ESCALATE_MS) {
+          this.log.error({ hedgeId: r.id, lp: r.lp, ref: r.lp_ref }, 'hedge clip still unknown at its LP: check with the LP and resolve it in operations');
+        }
       } catch (err) {
         this.log.warn({ err, hedgeId: r.id }, 'hedge clip lookup failed; it stays open');
       }
     }
+  }
+
+  /**
+   * Operations: closes a clip still open after checking with the LP. The LP is asked once more first; a clip it
+   * shows is recorded as DONE whatever the operator chose. Only a clip the LP still does not show is rejected.
+   */
+  async resolveClip(id: string, outcome: 'REJECTED', note: string, actor: string) {
+    const { rows } = await this.db.query(`select * from hedges where id::text = $1`, [id]);
+    const r = rows[0];
+    if (!r) throw new ApiError(404, 'NOT_FOUND', 'hedge not found');
+    if (!['PENDING', 'UNKNOWN'].includes(r.status)) throw new ApiError(409, 'NOT_OPEN', `hedge is ${r.status}`);
+    let exec;
+    try {
+      exec = await this.lp.findExecution(r.lp, r.lp_ref);
+    } catch (err) {
+      throw new ApiError(503, 'LP_LOOKUP_FAILED', `the LP lookup failed, nothing was changed: ${(err as Error).message}`);
+    }
+    const status = exec ? 'DONE' : outcome;
+    const { rows: updated } = await this.db.query(
+      `update hedges set status = $2, rate = coalesce($3, rate), lp_trade_ref = coalesce($4, lp_trade_ref), resolved_by = $5, resolution_note = $6
+        where id = $1 and status in ('PENDING', 'UNKNOWN') returning *`,
+      [r.id, status, exec?.rate ?? null, exec?.tradeRef ?? null, actor, note],
+    );
+    if (!updated.length) throw new ApiError(409, 'NOT_OPEN', 'hedge was resolved meanwhile');
+    await audit(this.db, actor, 'dealing.hedge.resolve', { hedgeId: r.id, requested: outcome, status, note });
+    return hedgeView(updated[0], findPair(this.config.get().data, r.pair));
+  }
+
+  /** Base quantity of clips sent but not confirmed by their LP yet (signed: + the bank is buying), per pair. */
+  private async unconfirmed(pair: string): Promise<bigint> {
+    const { rows } = await this.db.query(
+      `select coalesce(sum(case side when 'BUY' then qty else -qty end), 0)::bigint as q from hedges where pair = $1 and status in ('PENDING', 'UNKNOWN')`,
+      [pair],
+    );
+    return BigInt(rows[0].q);
   }
 
   async recentHedges(limit = 20) {

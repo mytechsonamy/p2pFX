@@ -6,13 +6,14 @@ import type { Exchange } from './engine/exchange.js';
 import { audit } from './audit.js';
 import type { SettlementService } from './settlement.js';
 import type { DealingService } from './dealing/dealing.js';
+import type { PositionKeeper } from './dealing/positions.js';
 
 /** A settlement leg still PENDING this long after its last update was interrupted and is resumed. */
 const STUCK_SETTLEMENT_MS = 60_000;
 
 /**
  * Periodic jobs: expire orders past their validity (releasing holds), when the session
- * opens move queued orders into matching, and resume settlements that were interrupted.
+ * opens move queued orders into matching, resume settlements that were interrupted, retry hold changes and look up unconfirmed hedge clips.
  */
 export class Scheduler {
   private timer?: NodeJS.Timeout;
@@ -23,6 +24,7 @@ export class Scheduler {
     private readonly exchange: Exchange,
     private readonly settlement: SettlementService,
     private readonly dealing: DealingService,
+    private readonly positions: PositionKeeper,
     private readonly config: ConfigService,
     private readonly clock: () => Date,
     private readonly log: FastifyBaseLogger,
@@ -64,6 +66,8 @@ export class Scheduler {
     await this.settlement.resumePending(STUCK_SETTLEMENT_MS);
     await this.dealing.resumePending(STUCK_SETTLEMENT_MS);
     await this.exchange.retryHoldTasks();
+    // Hedge clips the LPs have not confirmed are looked up on every tick until they are.
+    await this.positions.resolveOpenClips().catch((err) => this.log.error({ err }, 'resolving open hedge clips failed'));
     return { expired: due.length, released };
   }
 }
