@@ -87,7 +87,14 @@ export interface CoreBankingAdapter {
   /** Sets the hold to a new amount (used to release excess after a fill). */
   adjustHold(holdId: string, newAmount: bigint): Promise<void>;
   releaseHold(holdId: string): Promise<void>;
+  /** Active holds placed with this reference (finds a hold whose id was never recorded, e.g. after a crash). */
+  findHolds(ref: string): Promise<string[]>;
   postFxTransaction(req: FxTransactionRequest): Promise<FxTransactionResult>;
+  /**
+   * Looks a posting up by its idempotency key: the result if core banking booked it, undefined if it did not.
+   * Used to resolve a posting whose outcome is unknown (timeout, lost response) before anything is re-sent.
+   */
+  findFxTransaction(idempotencyKey: string): Promise<FxTransactionResult | undefined>;
   reverseFxTransaction(txnRef: string, idempotencyKey: string): Promise<{ reversalRef: string }>;
   getReceipt(receiptRef: string): Promise<Receipt>;
   getReferenceRate(pair: string): Promise<ReferenceRate>;

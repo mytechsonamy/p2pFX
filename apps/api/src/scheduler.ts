@@ -4,10 +4,15 @@ import type { Db } from './db/pool.js';
 import type { ConfigService } from './config-service.js';
 import type { Exchange } from './engine/exchange.js';
 import { audit } from './audit.js';
+import type { SettlementService } from './settlement.js';
+import type { DealingService } from './dealing/dealing.js';
+
+/** A settlement leg still PENDING this long after its last update was interrupted and is resumed. */
+const STUCK_SETTLEMENT_MS = 60_000;
 
 /**
- * Periodic jobs: expire orders past their validity (releasing holds) and, when
- * the session opens, move queued orders into matching.
+ * Periodic jobs: expire orders past their validity (releasing holds), when the session
+ * opens move queued orders into matching, and resume settlements that were interrupted.
  */
 export class Scheduler {
   private timer?: NodeJS.Timeout;
@@ -16,6 +21,8 @@ export class Scheduler {
   constructor(
     private readonly db: Db,
     private readonly exchange: Exchange,
+    private readonly settlement: SettlementService,
+    private readonly dealing: DealingService,
     private readonly config: ConfigService,
     private readonly clock: () => Date,
     private readonly log: FastifyBaseLogger,
@@ -54,6 +61,9 @@ export class Scheduler {
         released++;
       }
     }
+    await this.settlement.resumePending(STUCK_SETTLEMENT_MS);
+    await this.dealing.resumePending(STUCK_SETTLEMENT_MS);
+    await this.exchange.retryHoldTasks();
     return { expired: due.length, released };
   }
 }

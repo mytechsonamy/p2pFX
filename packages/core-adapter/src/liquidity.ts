@@ -31,13 +31,27 @@ export interface LiquidityAdapter {
   /** Pair symbols the LPs quote (e.g. USDTRY, XAUTRY): what the bank can open for trading. */
   instruments(): Promise<string[]>;
   quotes(pair: string): Promise<LpQuote[]>;
+  /**
+   * Trades with an LP. Throws LiquidityError when the LP definitely did not trade (rejection), and
+   * LiquidityOutcomeUnknownError when the trade may have happened (timeout, lost response).
+   */
   execute(req: LpExecutionRequest): Promise<LpExecution>;
+  /** The execution with this reference at the LP, or undefined if the LP has none. */
+  findExecution(lp: string, ref: string): Promise<LpExecution | undefined>;
 }
 
 export class LiquidityError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'LiquidityError';
+  }
+}
+
+/** The LP may or may not have traded: never re-send the trade elsewhere before it is looked up. */
+export class LiquidityOutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LiquidityOutcomeUnknownError';
   }
 }
 
@@ -76,6 +90,8 @@ export class MockLiquidity implements LiquidityAdapter {
   private seq = 0;
   /** LPs that reject every execution (to simulate an LP going down). */
   readonly rejecting = new Set<string>();
+  /** LPs that execute but lose the response (to simulate a timeout after the trade). */
+  readonly losingResponses = new Set<string>();
   private readonly volatility: number;
   private readonly reversion: number;
   private readonly clock: () => number;
@@ -138,26 +154,48 @@ export class MockLiquidity implements LiquidityAdapter {
       at: quote.at,
     };
     this.executions.set(key, exec);
+    if (this.losingResponses.has(req.lp)) throw new LiquidityOutcomeUnknownError(`${req.lp} timed out`);
     return exec;
+  }
+
+  async findExecution(lp: string, ref: string) {
+    return this.executions.get(`${lp}:${ref}`);
+  }
+
+  /** Number of executions the LPs made (tests). */
+  get executionCount() {
+    return this.executions.size;
   }
 }
 
 /** LiquidityAdapter over HTTP: the mock core's `/lp` routes, or a bank's price-module facade. */
 export class HttpLiquidityAdapter implements LiquidityAdapter {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey?: string,
+    /** Per-call deadline. */
+    private readonly timeoutMs = 5_000,
+  ) {}
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /** `trade`: a call that may have traded, so transport failures and 5xx are an unknown outcome, not a rejection. */
+  private async call<T>(method: string, path: string, body?: unknown, trade = false): Promise<T> {
+    const unknown = (message: string) => (trade ? new LiquidityOutcomeUnknownError(message) : new LiquidityError(message));
     let res: Response;
     try {
       res = await fetch(new URL(path, this.baseUrl), {
         method,
-        headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+        headers: {
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+        },
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
-      throw new LiquidityError(`liquidity unreachable: ${(err as Error).message}`);
+      throw unknown(`liquidity unreachable: ${(err as Error).message}`);
     }
     const json = (await res.json().catch(() => undefined)) as { message?: string } | undefined;
+    if (res.status >= 500) throw unknown(json?.message ?? `liquidity returned ${res.status}`);
     if (!res.ok) throw new LiquidityError(json?.message ?? `liquidity returned ${res.status}`);
     return json as T;
   }
@@ -169,6 +207,14 @@ export class HttpLiquidityAdapter implements LiquidityAdapter {
     return this.call<LpQuote[]>('GET', `/lp/quotes/${pair}`);
   }
   execute(req: LpExecutionRequest) {
-    return this.call<LpExecution>('POST', '/lp/executions', req);
+    return this.call<LpExecution>('POST', '/lp/executions', req, true);
+  }
+  async findExecution(lp: string, ref: string) {
+    try {
+      return await this.call<LpExecution>('GET', `/lp/executions/${encodeURIComponent(lp)}/${encodeURIComponent(ref)}`);
+    } catch (err) {
+      if (err instanceof LiquidityError && /not found/i.test(err.message)) return undefined;
+      throw err;
+    }
   }
 }

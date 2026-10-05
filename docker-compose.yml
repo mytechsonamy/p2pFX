@@ -10,6 +10,10 @@
 #   demo-host  the fake bank app with two phones side by side (http://localhost:5174)
 #
 # Scripted end-to-end trade, narrated in Turkish: `docker compose run --rm walkthrough`.
+#
+# DEMO ONLY. Ports are published on 127.0.0.1: the demo bank app mints launch tokens for any customer and
+# mock-core has no authentication, so this stack must never be reachable from a network. Production
+# deployments ship the api (and the built web app) only, with the bank's own core, LP gateway and secrets.
 # One image for every Node service. Only `keys` builds it: when several services share an image name and
 # each has a build section, Compose builds them in parallel and the exports collide ("image already exists").
 x-node: &node
@@ -30,7 +34,7 @@ services:
       POSTGRES_DB: p2pfx
     # In memory, like the mock core, so a restart starts both from the same clean demo state.
     tmpfs: ["/var/lib/postgresql/data"]
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 2s
@@ -39,10 +43,12 @@ services:
   mock-core:
     <<: *node
     command: ["node", "--import", "tsx", "apps/mock-core/src/main.ts"]
+    # Needs no secrets.
+    volumes: []
     environment:
       PORT: "4100"
       SEED_DEMO: "1"
-    ports: ["4100:4100"]
+    ports: ["127.0.0.1:4100:4100"]
 
   api:
     <<: *node
@@ -51,7 +57,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/p2pfx
       CORE_BANKING_URL: http://mock-core:4100
       PORT: "4000"
-    ports: ["4000:4000"]
+    ports: ["127.0.0.1:4000:4000"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 2s
@@ -81,12 +87,13 @@ services:
     <<: *node
     working_dir: /app/apps/web
     command: ["node", "node_modules/vite/bin/vite.js"]
+    volumes: []
     environment:
       API_URL: http://api:4000
       # Only the demo bank app may embed the marketplace; opened directly in a browser it refuses to start.
       VITE_HOST_ORIGINS: http://localhost:5174
       FRAME_ANCESTORS: http://localhost:5174
-    ports: ["5173:5173"]
+    ports: ["127.0.0.1:5173:5173"]
     depends_on:
       api: { condition: service_healthy }
 
@@ -99,7 +106,7 @@ services:
     environment:
       WEB_APP_URL: http://localhost:5173
       API_URL: http://api:4000
-    ports: ["5174:5174"]
+    ports: ["127.0.0.1:5174:5174"]
     depends_on:
       keys: { condition: service_completed_successfully }
       web: { condition: service_started }

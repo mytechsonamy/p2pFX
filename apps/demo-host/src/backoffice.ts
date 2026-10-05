@@ -770,7 +770,7 @@ async function save() {
     ${diffTable(preview.diff, labels(draft!))}${reasonField('Örn. Hazine komitesi 4.10.2026 kararı')}`);
   if (!form) return;
   try {
-    await opsFetch('PUT', '/config', { config: draft, reason: String(form.get('reason')) });
+    await opsFetch('PUT', '/config', { config: draft, reason: String(form.get('reason')), expectedVersion: live!.version });
     await refresh();
     toast(`Kaydedildi: v${live!.version} yürürlükte`);
   } catch (e) {

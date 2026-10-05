@@ -155,6 +155,10 @@ export class MockCoreBank implements CoreBankingAdapter {
     return { holdId: hold.id };
   }
 
+  async findHolds(ref: string) {
+    return [...this.holds.values()].filter((h) => h.ref === ref && h.active).map((h) => h.id);
+  }
+
   async adjustHold(holdId: string, newAmount: bigint) {
     const hold = this.hold(holdId);
     if (newAmount <= 0n) {
@@ -242,6 +246,11 @@ export class MockCoreBank implements CoreBankingAdapter {
     this.txnsByKey.set(req.idempotencyKey, txn);
     this.txnsByRef.set(txnRef, txn);
     return this.result(txn);
+  }
+
+  async findFxTransaction(idempotencyKey: string): Promise<FxTransactionResult | undefined> {
+    const txn = this.txnsByKey.get(idempotencyKey);
+    return txn && this.result(txn);
   }
 
   async reverseFxTransaction(txnRef: string, idempotencyKey: string) {

@@ -172,7 +172,7 @@ describe('back office', () => {
 
   it('reloads the configuration on other API instances', async () => {
     h = await startHarness();
-    other = await startHarness({ reset: false });
+    other = await startHarness({ reset: false, matching: false });
     await h.setConfig((c) => ({ ...c, balanceMode: 'no_block' }));
     const target = h.ctx.config.get().version;
     for (let i = 0; i < 50 && other.ctx.config.get().version < target; i++) await new Promise((r) => setTimeout(r, 20));

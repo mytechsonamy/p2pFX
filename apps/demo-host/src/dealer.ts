@@ -181,7 +181,7 @@ function policyText(d: Desk['dealing']) {
 const policy = document.getElementById('policy')!;
 const form = document.getElementById('policy-form') as HTMLFormElement;
 const msg = document.getElementById('policy-msg')!;
-let current_: { data: { dealing: Desk['dealing'] & Record<string, unknown> } & Record<string, unknown> } | undefined;
+let current_: { version: number; data: { dealing: Desk['dealing'] & Record<string, unknown> } & Record<string, unknown> } | undefined;
 const operator = current()?.operator;
 const editable = canEdit(operator);
 
@@ -229,7 +229,7 @@ form.addEventListener('submit', async (e) => {
     hedging: { targetPct: Number(f.get('targetPct')), split: f.get('split'), maxClipQty },
   };
   try {
-    await opsFetch('PUT', '/config', { config: { ...current_.data, dealing }, reason: String(f.get('reason') ?? '') });
+    await opsFetch('PUT', '/config', { config: { ...current_.data, dealing }, reason: String(f.get('reason') ?? ''), expectedVersion: current_.version });
     msg.textContent = 'Kaydedildi, hemen geçerli';
     (form.elements.namedItem('reason') as HTMLInputElement).value = '';
     await loadPolicy();

@@ -33,6 +33,8 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey?: string,
+    /** Per-call deadline; a call that runs out is UNAVAILABLE with an unknown outcome. */
+    private readonly timeoutMs = 10_000,
   ) {}
 
   private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -45,6 +47,7 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
           ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
         },
         body: body !== undefined ? JSON.stringify(toWire(body)) : undefined,
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
       throw new CoreBankingError('UNAVAILABLE', `core banking unreachable: ${(err as Error).message}`);
@@ -71,8 +74,19 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
   async releaseHold(holdId: string) {
     await this.call('DELETE', `/holds/${holdId}`);
   }
+  findHolds(ref: string) {
+    return this.call<string[]>('GET', `/holds?ref=${encodeURIComponent(ref)}`);
+  }
   postFxTransaction(req: FxTransactionRequest) {
     return this.call<FxTransactionResult>('POST', '/fx-transactions', req);
+  }
+  async findFxTransaction(idempotencyKey: string) {
+    try {
+      return await this.call<FxTransactionResult>('GET', `/fx-transactions?idempotencyKey=${encodeURIComponent(idempotencyKey)}`);
+    } catch (err) {
+      if (err instanceof CoreBankingError && err.code === 'NOT_FOUND') return undefined;
+      throw err;
+    }
   }
   reverseFxTransaction(txnRef: string, idempotencyKey: string) {
     return this.call<{ reversalRef: string }>('POST', `/fx-transactions/${txnRef}/reverse`, { idempotencyKey });

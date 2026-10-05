@@ -102,7 +102,8 @@ export class BankBook {
     const key = `${pair.symbol}:${side}`;
     const orderSide = side === 'asks' ? 'SELL' : 'BUY';
     const open = await this.openOrders(session, pair.symbol, orderSide);
-    const agg = this.prices.cached(pair.symbol);
+    // A stale or missing LP price withdraws the bank's orders: the bank never rests prices it cannot hedge at.
+    const agg = this.prices.fresh(pair.symbol);
     const wanted = config.bankBook.enabled && pair.enabled && agg && config.bankBook.pairs[pair.symbol]?.[side].enabled;
     if (!wanted) {
       await this.cancelAll(open);

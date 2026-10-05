@@ -19,7 +19,8 @@ function bankBackend(privateKeyPem: string | undefined, apiUrl: string, opsToken
         }
         const operator = req.headers.authorization;
         const isLogin = req.url === '/login';
-        if (!operator && !isLogin && req.method !== 'GET') {
+        // Without an operator login only the dealer screen's read-only view goes through with the service token.
+        if (!operator && !isLogin && !(req.method === 'GET' && req.url === '/dealing')) {
           res.statusCode = 401;
           res.setHeader('content-type', 'application/json');
           return res.end(JSON.stringify({ error: 'UNAUTHORIZED', message: 'ops login required' }));

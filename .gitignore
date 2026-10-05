@@ -1,4 +1,12 @@
 node_modules/
 dist/
+coverage/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.dump
+*.sql.gz
 *.log

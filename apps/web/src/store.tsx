@@ -245,13 +245,15 @@ export function ExchangeProvider({ api, bridge, config: initialConfig, branding,
           setFills((cur) => (cur.some((x) => x.id === f.id) ? cur : [f, ...cur]));
           h.refreshAccounts();
           h.refreshFills();
+          // A match is only "done" once the bank has booked it; anything else says it is still being processed.
+          const settled = !f.settlementStatus || f.settlementStatus === 'SETTLED';
           h.toast(
-            h.t('fills.toast', {
+            h.t(settled ? 'fills.toast' : 'fills.toastProcessing', {
               side: h.t(`side.${f.side}`),
               qty: `${formatDecimal(f.qty, h.locale)} ${f.pair.slice(0, 3)}`,
               price: formatPrice(f.effectivePrice, h.locale),
             }),
-            'success',
+            settled ? 'success' : 'info',
           );
         }
       },
