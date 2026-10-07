@@ -41,6 +41,8 @@ export interface SimulationInput {
   flow: FlowEvent[];
   /** LP half spread in pips around the mid (default 50). */
   lpHalfSpreadPips?: number;
+  /** How much worse than the LP touch a hedge fills, in pips (default 0). */
+  hedgeSlippagePips?: number;
   /** Deterministic randomness for the bot (default: a fixed seed). */
   seed?: number;
 }
@@ -53,15 +55,21 @@ export interface SimulationResult {
   fillRate: number;
   volume: { c2c: bigint; c2bLadder: bigint; c2bBot: bigint; direct: bigint };
   customerLegVolume: bigint;
-  /** Share of customer leg volume matched with another customer. */
+  /** Board match ratio: C2C / (C2C + C2B), each fill counted once (0 without board volume). */
   p2pMatchRatio: number;
+  /** Share of customer leg volume that met another customer: 2×C2C / (2×C2C + C2B + Direct). */
+  customerLegP2PShare: number;
   /** Quote minor units. */
   fees: bigint;
   directMargin: bigint;
-  /** The bank's spread over the LP on its principal fills on the board (marked at the LP price of the moment). */
+  /**
+   * The bank's price on its principal fills on the board over the LP touch of the moment (as the live report values
+   * it: the LP spread a hedge pays is already in the figure).
+   */
   principalContribution: bigint;
-  /** What hedging cost against the LP mid. */
+  /** Hedge slippage: what hedges filled worse than the LP touch (as the live report). */
   hedgeCost: bigint;
+  /** fees + directMargin + principalContribution − hedgeCost (the live report's netContribution). */
   netRevenue: bigint;
   netRevenuePerLeg: bigint;
   /** All-in improvement against Direct for the same customer, side and moment (quote minor units, + = better). */
@@ -94,6 +102,7 @@ export async function simulate(input: SimulationInput): Promise<SimulationResult
   const pip = parsePrice(pair.pipSize);
   const tick = parsePrice(pair.tickSize);
   const half = BigInt(input.lpHalfSpreadPips ?? 50) * pip;
+  const slippage = BigInt(input.hedgeSlippagePips ?? 0) * pip;
   const random = rng(input.seed ?? 42);
   const book = new OrderBook();
   const owners = new Map<string, { source: 'CUSTOMER' | 'BANK_MM' | 'BOT_MM'; customer?: string; expires?: number; event?: FlowEvent }>();
@@ -102,7 +111,7 @@ export async function simulate(input: SimulationInput): Promise<SimulationResult
 
   const r: SimulationResult = {
     pair: pair.symbol, orders: input.flow.length, filledOrders: 0, fillRate: 0,
-    volume: { c2c: 0n, c2bLadder: 0n, c2bBot: 0n, direct: 0n }, customerLegVolume: 0n, p2pMatchRatio: 0,
+    volume: { c2c: 0n, c2bLadder: 0n, c2bBot: 0n, direct: 0n }, customerLegVolume: 0n, p2pMatchRatio: 0, customerLegP2PShare: 0,
     fees: 0n, directMargin: 0n, principalContribution: 0n, hedgeCost: 0n, netRevenue: 0n, netRevenuePerLeg: 0n,
     priceImprovement: 0n, peakInventory: 0n, hedges: 0, baseline: { directMargin: 0n, netRevenuePerLeg: 0n }, bankSelfTrades: 0,
   };
@@ -164,7 +173,7 @@ export async function simulate(input: SimulationInput): Promise<SimulationResult
     const qty = autoHedgeQty(position, hedgeLimit, config.dealing.hedging.targetPct);
     if (qty === 0n) return;
     r.hedges++;
-    r.hedgeCost += money(qty, half);
+    r.hedgeCost += money(qty, slippage);
     position += position > 0n ? -qty : qty;
   };
 
@@ -255,7 +264,9 @@ export async function simulate(input: SimulationInput): Promise<SimulationResult
 
   r.filledOrders = filled.size;
   r.fillRate = flow.length ? filled.size / flow.length : 0;
-  r.p2pMatchRatio = r.customerLegVolume ? Number((2n * r.volume.c2c * 10_000n) / r.customerLegVolume) / 10_000 : 0;
+  const boardVolume = r.volume.c2c + r.volume.c2bLadder + r.volume.c2bBot;
+  r.p2pMatchRatio = boardVolume ? Number((r.volume.c2c * 10_000n) / boardVolume) / 10_000 : 0;
+  r.customerLegP2PShare = r.customerLegVolume ? Number((2n * r.volume.c2c * 10_000n) / r.customerLegVolume) / 10_000 : 0;
   r.netRevenue = r.fees + r.directMargin + r.principalContribution - r.hedgeCost;
   r.netRevenuePerLeg = legs ? r.netRevenue / legs : 0n;
   r.baseline.netRevenuePerLeg = flow.length ? r.baseline.directMargin / BigInt(flow.length) : 0n;

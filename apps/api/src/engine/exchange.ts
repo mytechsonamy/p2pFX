@@ -19,6 +19,14 @@ const BOOK_DEPTH = 20;
 /** Advisory lock held by the one API instance that runs matching against a database. */
 const MATCHING_LOCK = 727276;
 
+/**
+ * Settlement leg statuses whose customer funds are still owed: not posted yet (PENDING), maybe posted (UNKNOWN_OUTCOME,
+ * until a lookup settles it) or failed and waiting for the operations retry, which posts it again from the same holds
+ * (FAILED_NEEDS_REVIEW). A hold covering such a leg stays. Only a captured leg (SETTLED, and REVERSAL_PENDING / REVERSED,
+ * which were captured before) lets it go.
+ */
+const OWED_LEG_STATUSES = ['PENDING', 'UNKNOWN_OUTCOME', 'FAILED_NEEDS_REVIEW'];
+
 /** The fill transaction found the order already filled further than the book knew: the book was stale. */
 class StaleBookError extends Error {}
 
@@ -86,10 +94,12 @@ export interface ExchangeHooks {
    * liquidity already rests on that side. Undefined: no limit.
    */
   headroom?: (pair: string, bankSide: Side, restingElsewhere: bigint) => bigint | undefined;
-  /** Whether the bank may take a principal execution of `delta` (the hard inventory cap at the moment of the fill). */
-  allowExecution?: (pair: string, delta: bigint) => boolean;
-  /** A trade with the bank as principal committed (position delta in base minor units, + = the bank bought). */
-  onPrincipalExecution?: (pair: string, delta: bigint) => void;
+  /**
+   * Reserves the bank's inventory for a principal execution of `delta` (base minor units, + = the bank buys) before
+   * the fill awaits anything, against the same reservations Direct uses; undefined when the hard cap does not allow
+   * it. The fill commits the reservation once its transaction commits, and releases it on any other ending.
+   */
+  reserveExecution?: (pair: string, delta: bigint) => { commit(): void; release(): void } | undefined;
 }
 
 /**
@@ -310,7 +320,6 @@ export class Exchange {
       const result: GenerationResult = { applied: false, generationId: cmd.generationId.toString(), placed: 0, removed: 0, skipped: 0, fills: [] };
       const last = w.generations.get(key);
       if (last !== undefined && cmd.generationId <= last) return result;
-      w.generations.set(key, cmd.generationId);
 
       const { data: config, version } = this.config.get();
       const pair = findPair(config, cmd.pair);
@@ -354,22 +363,52 @@ export class Exchange {
         });
       });
 
-      // Committed: swap in the book. Nothing below this line can leave half a ladder behind.
-      for (const o of old) {
-        w.book.remove(o.id);
-        w.resting.delete(o.id);
-        if (o.hold_id) await this.releaseHold(o.hold_id);
+      // Committed: the watermark moves only now, so a command whose transaction failed can be sent again as it was.
+      w.generations.set(key, cmd.generationId);
+      // Swap in the book. If anything fails from here on, the generation is withdrawn as a whole (see below), so the
+      // database and the book never disagree about which of its orders are live.
+      try {
+        for (const o of old) {
+          w.book.remove(o.id);
+          w.resting.delete(o.id);
+          if (o.hold_id) await this.releaseHold(o.hold_id);
+        }
+        result.removed = old.length;
+        for (const id of inserted) {
+          const r = await this.process(w, id, false);
+          result.fills.push(...r.fills);
+          result.placed++;
+        }
+        result.applied = true;
+      } catch (err) {
+        this.log.error({ err, pair: cmd.pair, generationId: cmd.generationId.toString() }, 'bank liquidity generation failed after commit; withdrawing it');
+        await this.withdrawGeneration(w, inserted, old.map((o) => o.id));
+        throw err;
+      } finally {
+        await this.publishBook(w);
       }
-      result.removed = old.length;
-      result.applied = true;
-      for (const id of inserted) {
-        const r = await this.process(w, id, false);
-        result.fills.push(...r.fills);
-        result.placed++;
-      }
-      await this.publishBook(w);
       return result;
     });
+  }
+
+  /**
+   * Recovery of a generation that failed after its transaction committed: every one of its orders still live in the
+   * database is cancelled (bank liquidity comes back with the next generation), and the book is rebuilt from the
+   * database for all of them, the orders they replaced and everything resting, so the book matches the database.
+   */
+  private async withdrawGeneration(w: PairWorker, inserted: string[], replaced: string[]) {
+    const ids = [...inserted, ...replaced, ...w.book.orders().map((o) => o.id)];
+    try {
+      for (const id of inserted) {
+        w.book.remove(id);
+        w.resting.delete(id);
+        const row = await loadOrder(this.db, id);
+        if (row && LIVE_STATUSES.includes(row.status)) await this.closeOrder(row, 'CANCELLED', 'GENERATION_FAILED');
+      }
+    } catch (err) {
+      this.log.error({ err, pair: w.pair }, 'withdrawing a failed generation failed; startup recovery replays the database');
+    }
+    await this.resync(w, ids).catch((err) => this.log.error({ err, pair: w.pair }, 'book resync after a failed generation failed'));
   }
 
   /** The levels of a command that may go in: inside the price band and within the bank's inventory headroom. */
@@ -534,16 +573,43 @@ export class Exchange {
     | { action: 'filled'; fillId: string; taker: OrderRow; maker: OrderRow }
     | Exclude<MatchDecision, { action: 'filled' }>
   > {
+    const buy = taker.side === 'BUY' ? taker : maker;
+    const sell = taker.side === 'SELL' ? taker : maker;
+    // The bank's inventory cap holds at the fill too (the ladder was cut to it, but Direct deals move the position):
+    // the capacity is reserved now, before the holds and the transaction are awaited, so a Direct deal or another
+    // fill in that window cannot take the same headroom.
+    const bankOrder = buy.principal_id === BANK_PRINCIPAL_ID ? buy : sell.principal_id === BANK_PRINCIPAL_ID ? sell : undefined;
+    const bankOnly = buy.principal_id === BANK_PRINCIPAL_ID && sell.principal_id === BANK_PRINCIPAL_ID;
+    let reservation: { commit(): void; release(): void } | undefined;
+    if (bankOrder && !bankOnly && this.hooks.reserveExecution) {
+      reservation = this.hooks.reserveExecution(w.pair, bankOrder === buy ? c.qty : -c.qty);
+      if (!reservation) {
+        return bankOrder.id === taker.id ? { action: 'cancelTaker', reason: 'INVENTORY_LIMIT' } : { action: 'cancelMaker', reason: 'INVENTORY_LIMIT' };
+      }
+    }
+    try {
+      return await this.fillWithReservation(w, taker, maker, c, buy, sell, reservation);
+    } finally {
+      // Any ending but a committed fill (no-op after commit).
+      reservation?.release();
+    }
+  }
+
+  private async fillWithReservation(
+    w: PairWorker,
+    taker: OrderRow,
+    maker: OrderRow,
+    c: MatchCandidate,
+    buy: OrderRow,
+    sell: OrderRow,
+    reservation: { commit(): void } | undefined,
+  ): Promise<
+    | { action: 'filled'; fillId: string; taker: OrderRow; maker: OrderRow }
+    | Exclude<MatchDecision, { action: 'filled' }>
+  > {
     const releasePlaced = async () => {
       for (const h of placed) await this.releaseHold(h);
     };
-    const buy = taker.side === 'BUY' ? taker : maker;
-    const sell = taker.side === 'SELL' ? taker : maker;
-    // The bank's inventory cap holds at the fill too (the ladder was cut to it, but Direct deals move the position).
-    const bankOrder = buy.principal_id === BANK_PRINCIPAL_ID ? buy : sell.principal_id === BANK_PRINCIPAL_ID ? sell : undefined;
-    if (bankOrder && this.hooks.allowExecution && !this.hooks.allowExecution(w.pair, bankOrder === buy ? c.qty : -c.qty)) {
-      return bankOrder.id === taker.id ? { action: 'cancelTaker', reason: 'INVENTORY_LIMIT' } : { action: 'cancelMaker', reason: 'INVENTORY_LIMIT' };
-    }
     const buyParams = fromSnapshot(buy.pricing);
     const sellParams = fromSnapshot(sell.pricing);
     const buyer = priceSide(c.qty, c.price, buyParams);
@@ -674,14 +740,13 @@ export class Exchange {
     }
     const { fillId, fill, updated } = committed;
 
-    // The fill is committed and firm: from here on nothing may undo it in the book. The bank's position moves now
-    // (not when settlement finishes), and settlement is dispatched; failures are logged and left to recovery.
-    if (bankBuys !== bankSells) {
-      try {
-        this.hooks.onPrincipalExecution?.(w.pair, bankBuys ? c.qty : -c.qty);
-      } catch (err) {
-        this.log.error({ err, fillId }, 'position update after a fill failed');
-      }
+    // The fill is committed and firm: from here on nothing may undo it in the book. The bank's reserved capacity
+    // becomes position now (not when settlement finishes), and settlement is dispatched; failures are logged and left
+    // to recovery.
+    try {
+      reservation?.commit();
+    } catch (err) {
+      this.log.error({ err, fillId }, 'position update after a fill failed');
     }
     await this.announceFill(fill, updated[buy.id], updated[sell.id]).catch((err) =>
       this.log.error({ err, fillId }, 'announcing a fill failed; clients pick it up on their next load'),
@@ -722,8 +787,9 @@ export class Exchange {
 
   /**
    * After each settlement run of a fill (dispatcher, scheduler, startup recovery or an operations retry): per-fill
-   * holds of no_block orders are released, block-mode order holds are brought to what the orders still need, and
-   * the customers hear about a settlement status they have not been told yet.
+   * holds of no_block orders are released once their leg is captured (never while it is pending, unknown or failed
+   * and waiting for a retry), block-mode order holds are brought to what the orders still owe, and the customers hear
+   * about a settlement status they have not been told yet.
    */
   async afterSettlement(fillId: string, outcome: SettlementOutcome) {
     try {
@@ -732,10 +798,11 @@ export class Exchange {
       if (!fill) return;
       const buy = (await loadOrder(this.db, fill.buy_order_id))!;
       const sell = (await loadOrder(this.db, fill.sell_order_id))!;
-      const { rows: legs } = await this.db.query('select leg, hold_ids from settlements where fill_id = $1', [fillId]);
+      const { rows: legs } = await this.db.query('select leg, status, hold_ids from settlements where fill_id = $1', [fillId]);
       for (const leg of legs) {
         const o = leg.leg === 'BANK_BUY' ? sell : buy;
-        if (o.balance_mode !== 'block') for (const h of leg.hold_ids as string[]) await this.releaseHold(h);
+        if (o.balance_mode === 'block' || OWED_LEG_STATUSES.includes(leg.status)) continue;
+        for (const h of leg.hold_ids as string[]) await this.releaseHold(h);
       }
       for (const o of [buy, sell]) if (o.balance_mode === 'block' && o.hold_id) await this.maintainHold(o);
       if (fill.notified_status !== outcome) {
@@ -755,7 +822,8 @@ export class Exchange {
 
   /**
    * What a block-mode order's hold must still cover: the remaining quantity while the order is live, plus the fills
-   * whose legs have not been posted yet (core banking captures them from this hold when it books them).
+   * whose leg is still owed (pending, unknown or failed and waiting for a retry: core banking captures them from this
+   * hold when it books them).
    */
   private async holdTarget(o: OrderRow): Promise<bigint> {
     const live = ['OPEN', 'PARTIAL', 'QUEUED'].includes(o.status);
@@ -764,13 +832,28 @@ export class Exchange {
     const amount = o.side === 'BUY' ? 'f.buyer_total' : 'f.qty';
     const { rows } = await this.db.query(
       `select coalesce(sum(${amount}), 0)::bigint as pending from fills f join settlements s on s.fill_id = f.id and s.leg = $2
-        where (f.buy_order_id = $1 or f.sell_order_id = $1) and s.status = 'PENDING'`,
-      [o.id, leg],
+        where (f.buy_order_id = $1 or f.sell_order_id = $1) and s.status = any($3)`,
+      [o.id, leg, OWED_LEG_STATUSES],
     );
     return open + BigInt(rows[0].pending);
   }
 
+  /**
+   * Whether a leg of the order's side has an unknown outcome: core banking may or may not have captured it from the
+   * hold already, so the hold is left exactly as core banking has it until a lookup settles the leg (resizing it to
+   * the target would hold the same funds twice if the leg was captured, and releasing it would free them if not).
+   */
+  private async inDoubt(o: OrderRow): Promise<boolean> {
+    const { rows } = await this.db.query(
+      `select 1 from fills f join settlements s on s.fill_id = f.id and s.leg = $2
+        where (f.buy_order_id = $1 or f.sell_order_id = $1) and s.status = 'UNKNOWN_OUTCOME' limit 1`,
+      [o.id, o.side === 'BUY' ? 'BANK_SELL' : 'BANK_BUY'],
+    );
+    return rows.length > 0;
+  }
+
   private async maintainHold(o: OrderRow) {
+    if (await this.inDoubt(o)) return;
     const target = await this.holdTarget(o);
     if (target === 0n) await this.releaseHold(o.hold_id!);
     else await this.adjustHold(o.hold_id!, target);
@@ -938,6 +1021,8 @@ export class Exchange {
         let target: bigint | undefined;
         if (!release) {
           const o = (await loadOrders(this.db, 'o.hold_id = $1', [holdId]))[0];
+          // Left for a later run while a leg it covers is in doubt (see inDoubt).
+          if (o && (await this.inDoubt(o))) continue;
           target = o ? await this.holdTarget(o) : 0n;
           if (target === 0n) release = true;
         }

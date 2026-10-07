@@ -124,8 +124,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const exchange = new Exchange(db, opts.core, config, settlement, events, app.log, clock, {
     evidence: (pair) => priceEvidence(config, prices, pair),
     headroom: (pair, side, resting) => positions.headroom(pair, side, resting),
-    allowExecution: (pair, delta) => positions.allows(pair, delta),
-    onPrincipalExecution: (pair, delta) => positions.afterExecution(pair, delta),
+    reserveExecution: (pair, delta) => positions.tryReserve(pair, delta),
   });
   const entry = new OrderEntry(db, opts.core, config, exchange, prices, clock);
   const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);

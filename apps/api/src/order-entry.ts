@@ -116,7 +116,8 @@ export class OrderEntry {
     const halted = haltReason(config, body.pair, 'customer');
     if (halted) throw unprocessable('TRADING_HALTED', halted);
     const market = body.type === 'MARKET';
-    const { pair, qty, price } = await this.validatePriceAndQty(config, body);
+    const { pair, qty, price: current } = await this.validatePriceAndQty(config, body);
+    const price = market ? this.bindProtection(pair, body, current) : current;
     const params = pricingParams(config, pair, body.side);
     const pricing = priceSide(qty, price, params);
 
@@ -225,6 +226,23 @@ export class OrderEntry {
     if (price <= 0n || price % tick !== 0n) throw badRequest('INVALID_PRICE', `price must be a positive multiple of ${pair.tickSize}`);
     await this.checkPriceBand(pair, price);
     return { pair, qty, price };
+  }
+
+  /**
+   * A market order trades within the protection price the customer confirmed. If the protection the bank would give
+   * now is worse for them (higher to buy, lower to sell), the order is refused so they can confirm the new one; if it
+   * is better, the better one is used.
+   */
+  private bindProtection(pair: PairConfig, body: PlaceOrderRequest, current: bigint): bigint {
+    const confirmed = parseOr(body.protectionPrice ?? '', 8, 'PROTECTION_PRICE_REQUIRED', 'the confirmed protection price is required for a market order');
+    const worse = body.side === 'BUY' ? current > confirmed : current < confirmed;
+    if (worse) {
+      throw new ApiError(409, 'PROTECTION_PRICE_CHANGED', 'the price moved against you since you confirmed; review the new protection price', {
+        confirmed: formatPrice(confirmed),
+        protectionPrice: formatPrice(current),
+      });
+    }
+    return current;
   }
 
   /** The protection price a market order would get now; refused without a live LP price. */

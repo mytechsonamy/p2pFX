@@ -15,6 +15,14 @@ interface Trade {
   rate: bigint;
 }
 
+/** Capacity taken for one principal execution; it ends exactly once, by commit (into the position) or release. */
+export interface Reservation {
+  id: number;
+  delta: bigint;
+  commit(): void;
+  release(): void;
+}
+
 export interface Position {
   pair: string;
   currency: string;
@@ -104,26 +112,32 @@ export class PositionKeeper {
   ) {}
 
   /**
-   * Position per pair, in base minor units, as the inventory guard sees it: updated synchronously when a principal
-   * execution commits (the board's fills with the ladder or bot, Direct deals), and reloaded from the database
-   * after hedges and periodically.
+   * Committed position per pair, in base minor units: the database's principal executions and hedges, plus the
+   * executions committed since it was last read. Reloads replace only this part.
    */
-  private readonly live = new Map<string, bigint>();
-  /** Bumped on every in-memory change, so a reload that raced one is not applied over it. */
+  private readonly committed = new Map<string, bigint>();
+  /**
+   * Capacity taken by executions that have not committed yet (a board fill waiting on its holds and transaction, a
+   * Direct deal waiting on its claim), per pair and reservation id. Reloads never touch it: a reservation ends only
+   * by its own commit or release, each at most once.
+   */
+  private readonly reserved = new Map<string, Map<number, bigint>>();
+  private nextReservation = 0;
+  /** Bumped on every in-memory change of the committed part, so a reload that raced one is not applied over it. */
   private epoch = 0;
 
   async position(pair: PairConfig): Promise<Position> {
     // The bank's principal executions (board fills with its ladder or bot and Direct deals) count from the moment
-    // they commit, not when settlement finishes. A board fill whose settlement failed or was reversed, and a Direct
-    // deal core banking rejected, are taken out again. Hedge clips count from the moment they are sent (PENDING,
-    // UNKNOWN), so a clip whose outcome is not known yet is never hedged a second time.
+    // they commit, not when settlement finishes. A board fill is firm whatever happens to its settlement legs
+    // (review, reversal): the obligation to the customer stands until it is economically cancelled, and no such flow
+    // exists. Only a Direct deal core banking definitely rejected never happened. Hedge clips count from the moment
+    // they are sent (PENDING, UNKNOWN), so a clip whose outcome is not known yet is never hedged a second time.
     const { rows } = await this.db.query(
       `select at, side, qty, rate from (
          select e.created_at as at, e.seq, e.bank_side as side, e.qty, e.price as rate, 0 as src
            from principal_executions e
           where e.pair = $1
             and not (e.channel = 'DIRECT' and exists (select 1 from bank_deals d where d.id = e.ref_id and d.status = 'REJECTED'))
-            and not (e.channel = 'BOARD' and exists (select 1 from settlements s where s.fill_id = e.ref_id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED', 'REVERSAL_PENDING')))
          union all
          select created_at, seq, side, qty, rate, 1 from hedges where pair = $1 and status <> 'REJECTED'
        ) t order by at, src, seq`,
@@ -137,23 +151,40 @@ export class PositionKeeper {
     for (const pair of this.config.get().data.pairs) await this.reload(pair.symbol);
   }
 
-  /** Reloads one pair's position from the database, unless an execution changed it meanwhile (then it tries again). */
+  /**
+   * Reloads one pair's committed position from the database. Reservations are kept as they are. The read is applied
+   * only if it was quiet: no execution committed in memory meanwhile, and no reservation of the pair was open during
+   * it (an open reservation may commit in the database before the read and in memory after it, which would count it
+   * twice). Otherwise it reads again.
+   */
   async reload(pairSymbol: string) {
     const pair = findPair(this.config.get().data, pairSymbol);
     if (!pair) return;
-    for (let i = 0; i < 3; i++) {
+    const open = () => this.reserved.get(pair.symbol)?.size ?? 0;
+    for (let i = 0; i < 10; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 5 * i));
+      if (open()) continue;
       const epoch = this.epoch;
+      const taken = this.nextReservation;
       const p = await this.position(pair);
-      if (epoch === this.epoch) {
-        this.live.set(pair.symbol, p.qty);
+      if (epoch === this.epoch && taken === this.nextReservation && !open()) {
+        this.committed.set(pair.symbol, p.qty);
         return;
       }
     }
+    this.log.warn({ pair: pair.symbol }, 'position reload kept racing executions; the in-memory position stays as it is');
   }
 
-  /** The position the inventory guard works with (base minor units, + long). */
+  /** The exposure the inventory guard works with: committed plus reserved (base minor units, + long). */
   current(pairSymbol: string): bigint {
-    return this.live.get(pairSymbol) ?? 0n;
+    let sum = this.committed.get(pairSymbol) ?? 0n;
+    for (const d of this.reserved.get(pairSymbol)?.values() ?? []) sum += d;
+    return sum;
+  }
+
+  /** The committed part of the position, without reservations. */
+  committedPosition(pairSymbol: string): bigint {
+    return this.committed.get(pairSymbol) ?? 0n;
   }
 
   /** The hard inventory cap for the pair's base currency (base minor units), if one is set. */
@@ -176,7 +207,7 @@ export class PositionKeeper {
     return room > 0n ? room : 0n;
   }
 
-  /** Whether a principal execution of `delta` keeps the position within the cap (one that reduces it always may). */
+  /** Whether a principal execution of `delta` keeps the exposure within the cap (one that reduces it always may). */
   allows(pairSymbol: string, delta: bigint): boolean {
     const max = this.maxPosition(pairSymbol);
     if (max === undefined || delta === 0n) return true;
@@ -187,26 +218,62 @@ export class PositionKeeper {
   }
 
   /**
-   * Takes `delta` into the position before a Direct deal commits, so two deals at once cannot both use the last
-   * headroom. Returns the undo for a deal that does not go through.
+   * Takes capacity for a principal execution before anything is awaited (Direct claim, board fill holds and
+   * transaction), so two executions at once can never both use the last headroom. The check and the take happen
+   * in one synchronous step. Undefined when the cap does not allow it.
    */
-  reserve(pairSymbol: string, delta: bigint): () => void {
-    if (!this.allows(pairSymbol, delta)) {
-      throw new ApiError(422, 'INVENTORY_LIMIT', 'the bank cannot take more of this currency on this side right now');
-    }
-    this.change(pairSymbol, delta);
-    return () => this.change(pairSymbol, -delta);
+  tryReserve(pairSymbol: string, delta: bigint): Reservation | undefined {
+    if (!this.allows(pairSymbol, delta)) return undefined;
+    const id = ++this.nextReservation;
+    let byId = this.reserved.get(pairSymbol);
+    if (!byId) this.reserved.set(pairSymbol, (byId = new Map()));
+    byId.set(id, delta);
+    let done = false;
+    const end = () => {
+      if (done) return false;
+      done = true;
+      byId!.delete(id);
+      return true;
+    };
+    return {
+      id,
+      delta,
+      commit: () => {
+        // Into the committed position in the same step it leaves the reservations: the exposure never dips.
+        if (end()) this.afterExecution(pairSymbol, delta);
+      },
+      release: () => {
+        end();
+      },
+    };
   }
 
-  /** A principal execution committed: the position moves now, and auto-hedge looks at it (in the background). */
+  /** As tryReserve, for Direct: a deal the cap does not allow is refused with INVENTORY_LIMIT. */
+  reserve(pairSymbol: string, delta: bigint): Reservation {
+    const r = this.tryReserve(pairSymbol, delta);
+    if (!r) throw new ApiError(422, 'INVENTORY_LIMIT', 'the bank cannot take more of this currency on this side right now');
+    return r;
+  }
+
+  /** Active reservations of a pair (operations, tests). */
+  reservations(pairSymbol: string): bigint[] {
+    return [...(this.reserved.get(pairSymbol)?.values() ?? [])];
+  }
+
+  /** A principal execution committed: the committed position moves now, and auto-hedge looks at it (in the background). */
   afterExecution(pairSymbol: string, delta: bigint) {
     this.change(pairSymbol, delta);
     this.afterDeal(pairSymbol).catch(() => {});
   }
 
+  /** A committed execution turned out never to have happened (a Direct deal core banking rejected). */
+  reverseExecution(pairSymbol: string, delta: bigint) {
+    this.change(pairSymbol, -delta);
+  }
+
   private change(pairSymbol: string, delta: bigint) {
     this.epoch++;
-    this.live.set(pairSymbol, this.current(pairSymbol) + delta);
+    this.committed.set(pairSymbol, this.committedPosition(pairSymbol) + delta);
   }
 
   /** Positions with unrealized P&L at the LP mid, and the limit. */
@@ -338,8 +405,8 @@ export class PositionKeeper {
       const expected = quote ? (side === 'BUY' ? quote.ask : quote.bid) : formatPrice(side === 'BUY' ? agg.ask : agg.bid);
       const ref = randomUUID();
       const { rows: intent } = await this.db.query(
-        `insert into hedges (pair, side, qty, rate, lp, lp_ref, batch_id, reason, actor, status)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING') returning id`,
+        `insert into hedges (pair, side, qty, rate, expected_rate, lp, lp_ref, batch_id, reason, actor, status)
+         values ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, 'PENDING') returning id`,
         [pair.symbol, side, clip.qty, expected, lp, ref, batchId, reason, actor],
       );
       const id = intent[0].id as string;

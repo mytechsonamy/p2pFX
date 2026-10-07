@@ -125,7 +125,9 @@ create table principal_executions (
   unique (channel, ref_id)
 );
 create index principal_executions_pair_idx on principal_executions (pair, seq);
--- History: bank-side fills and settled Direct deals become executions.
+-- History: bank-side fills and every Direct deal not definitely rejected become executions. A deal still PENDING at the
+-- upgrade is an obligation already (its claim committed); recovery only posts it, so its execution must exist now.
+-- One core banking rejects later is left out of the position by the REJECTED rule, like a new deal.
 insert into principal_executions (channel, ref_id, pair, source, bank_side, qty, price, position_delta, config_version, created_at)
 select 'BOARD', f.id, f.pair, case when b.principal_id = '00000000-0000-0000-0000-000000000001' then b.source else s.source end,
        case when b.principal_id = '00000000-0000-0000-0000-000000000001' then 'BUY' else 'SELL' end,
@@ -137,7 +139,11 @@ select 'BOARD', f.id, f.pair, case when b.principal_id = '00000000-0000-0000-000
 insert into principal_executions (channel, ref_id, pair, source, bank_side, qty, price, position_delta, created_at)
 select 'DIRECT', d.id, d.pair, 'BANK_DIRECT', case d.side when 'BUY' then 'SELL' else 'BUY' end, d.qty, d.rate,
        case d.side when 'BUY' then -d.qty else d.qty end, d.created_at
-  from bank_deals d where d.status in ('SETTLED', 'FAILED_NEEDS_REVIEW');
+  from bank_deals d where d.status <> 'REJECTED';
+
+-- The LP price a hedge clip was sent at (its rate becomes the executed one): reports measure hedge slippage from it.
+alter table hedges add column expected_rate numeric(24, 8);
+update hedges set expected_rate = rate;
 
 -- ---- Direct: margins are in pips now (1 bip = 100 pips) ----
 

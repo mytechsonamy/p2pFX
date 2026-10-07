@@ -102,27 +102,29 @@ export class DealingService {
     const tl = pick(accounts, pair.quote);
     const margin = marginOf(pair, BigInt(quote.qty), parsePrice(quote.rate), parsePrice(quote.lp_rate));
     const delta = quote.side === 'BUY' ? -BigInt(quote.qty) : BigInt(quote.qty);
-    // The deal is a principal execution: it takes its place in the bank's inventory before it commits.
-    const undo = this.positions.reserve(pair.symbol, delta);
+    // The deal is a principal execution: it reserves its place in the bank's inventory before anything is awaited,
+    // through the same reservations the board's fills with the ladder and bot use.
+    const reservation = this.positions.reserve(pair.symbol, delta);
 
     let deal;
     try {
       deal = await this.claim(quoteId, session, pair, config, margin, fx.id, tl.id, delta);
     } catch (err) {
-      undo();
+      reservation.release();
       throw err;
     }
     if (!deal) {
-      undo();
+      reservation.release();
       // Either a concurrent execute of the same quote won (it has the deal), or the quote ran out before the claim.
       const { rows } = await this.db.query('select status from bank_quotes where id = $1', [quoteId]);
       if (rows[0]?.status !== 'EXECUTED') throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
       return this.executed(quoteId);
     }
-    // Committed: auto-hedge looks at the new position (in the background).
-    this.positions.afterDeal(pair.symbol).catch(() => {});
+    // Committed: the reservation becomes position (once), and auto-hedge looks at it (in the background).
+    reservation.commit();
     const settled = await this.settle(deal, session.customerRef, pair);
-    if (settled.status === 'REJECTED') undo();
+    // Core banking definitely rejected the deal: it never happened, and leaves the position again.
+    if (settled.status === 'REJECTED') this.positions.reverseExecution(pair.symbol, delta);
     const view = dealView(settled, pair);
     if (settled.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
     // Only a deal that exists for the customer is announced (a rejected one is just the error above).

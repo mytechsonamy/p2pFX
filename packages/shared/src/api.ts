@@ -64,8 +64,15 @@ export const PlaceOrderSchema = QuoteFields.extend({
   fxAccountId: z.string().optional(),
   /** Customer's TRY account (core banking id). Defaults to their first account in the quote currency. */
   tryAccountId: z.string().optional(),
+  /**
+   * Market orders: the protection price the customer confirmed (from the quote). It binds: the order never trades
+   * beyond it, and if the protection the bank would give now is worse for the customer the order is refused
+   * (PROTECTION_PRICE_CHANGED) so they can confirm the new one.
+   */
+  protectionPrice: decimal.optional(),
 })
   .refine(priceForLimit, priceRule)
+  .refine((r) => r.type !== 'MARKET' || !!r.protectionPrice, { message: 'the confirmed protection price is required for a market order', path: ['protectionPrice'] })
   .refine((r) => r.type === 'MARKET' || !!r.validity, { message: 'validity is required for a limit order', path: ['validity'] });
 export type PlaceOrderRequest = z.infer<typeof PlaceOrderSchema>;
 

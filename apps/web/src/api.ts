@@ -21,6 +21,8 @@ export interface PlaceOrder {
   /** Limit orders only. */
   validity?: Validity;
   expiresAt?: string;
+  /** Market orders: the protection price the customer confirmed (binding). */
+  protectionPrice?: string;
 }
 
 /**

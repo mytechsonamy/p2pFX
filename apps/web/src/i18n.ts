@@ -194,6 +194,7 @@ const tr = {
   'error.TRADING_HALTED': 'İşlemler şu an durduruldu. Lütfen daha sonra tekrar deneyin.',
   'error.MARKET_ORDERS_DISABLED': 'Piyasa emri şu an kullanılamıyor; limit emir verin.',
   'error.PRICE_PROTECTION_UNAVAILABLE': 'Şu an piyasa emri için koruma fiyatı oluşturulamıyor; limit emir verin.',
+  'error.PROTECTION_PRICE_CHANGED': 'Onayınızdan sonra fiyat aleyhinize değişti; yeni koruma fiyatını inceleyip tekrar onaylayın.',
   'error.INVENTORY_LIMIT': 'Banka bu yönde şu an işlem yapamıyor; tahtadan emir verebilirsiniz.',
 };
 
@@ -366,6 +367,7 @@ const en: Partial<Record<StringKey, string>> = {
   'error.TRADING_HALTED': 'Trading is halted right now. Please try again later.',
   'error.MARKET_ORDERS_DISABLED': 'Market orders are not available right now; place a limit order.',
   'error.PRICE_PROTECTION_UNAVAILABLE': 'No protection price for a market order right now; place a limit order.',
+  'error.PROTECTION_PRICE_CHANGED': 'The price moved against you after you confirmed; review the new protection price and confirm again.',
   'error.INVENTORY_LIMIT': 'The bank cannot deal this side right now; you can place an order on the board.',
 };
 

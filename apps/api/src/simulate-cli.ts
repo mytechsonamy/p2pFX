@@ -65,6 +65,7 @@ for (const s of scenarios) {
     scenario: s.name,
     fillRate: `${(r.fillRate * 100).toFixed(1)}%`,
     p2pRatio: `${(r.p2pMatchRatio * 100).toFixed(1)}%`,
+    p2pLegShare: `${(r.customerLegP2PShare * 100).toFixed(1)}%`,
     c2c: b(r.volume.c2c),
     c2b: b(r.volume.c2bLadder + r.volume.c2bBot),
     direct: b(r.volume.direct),

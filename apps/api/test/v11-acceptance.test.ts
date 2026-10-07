@@ -149,7 +149,7 @@ describe('v1.1 acceptance', () => {
     await liquidity('BANK_MM', [['SELL', '49.20', '300'], ['SELL', '49.25', '300'], ['SELL', '49.45', '1000']]);
     const q = await h.req('POST', '/v1/orders/quote', veli, { pair: 'USDTRY', side: 'BUY', qty: '1000', type: 'MARKET' });
     expect(q.body).toMatchObject({ type: 'MARKET', protectionPrice: '49.4017', estimate: { fillableQty: '600.00' } });
-    const res = await h.place(veli, { side: 'BUY', qty: '1000', type: 'MARKET', validity: undefined });
+    const res = await h.place(veli, { side: 'BUY', qty: '1000', type: 'MARKET', validity: undefined, protectionPrice: q.body.protectionPrice });
     expect(res.status).toBe(201);
     const order = (await h.req('GET', `/v1/orders/${res.body.id}`, veli)).body;
     expect(order).toMatchObject({ type: 'MARKET', status: 'CANCELLED', cancelReason: 'NO_LIQUIDITY', filledQty: '600.00' });

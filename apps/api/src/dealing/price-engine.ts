@@ -14,7 +14,10 @@ export interface Aggregate {
   bidLp: string;
   askLp: string;
   quotes: LpQuote[];
+  /** When the aggregate was built (display, streaming). Not a measure of freshness. */
   at: Date;
+  /** The LP timestamp of the older of the two quotes behind bid and ask: freshness is measured from this. */
+  sourceAt: Date;
 }
 
 export interface SegmentRates {
@@ -98,7 +101,8 @@ export class PriceEngine {
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => fresh.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
     const askQ = best((a, b) => parsePrice(a.ask) <= parsePrice(b.ask));
-    const agg: Aggregate = { pair, bid: parsePrice(bidQ.bid), ask: parsePrice(askQ.ask), bidLp: bidQ.lp, askLp: askQ.lp, quotes: fresh, at: now };
+    const sourceAt = new Date(Math.min(new Date(bidQ.at).getTime(), new Date(askQ.at).getTime()));
+    const agg: Aggregate = { pair, bid: parsePrice(bidQ.bid), ask: parsePrice(askQ.ask), bidLp: bidQ.lp, askLp: askQ.lp, quotes: fresh, at: now, sourceAt };
     this.latest.set(pair, agg);
     await this.events.publish({ type: 'lp', pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), at: now.toISOString() });
     if (now.getTime() - (this.lastTick.get(pair) ?? 0) >= TICK_EVERY_MS) {
@@ -108,11 +112,14 @@ export class PriceEngine {
     return agg;
   }
 
-  /** The latest aggregate if still fresh, otherwise a new one. */
+  /**
+   * The latest aggregate if it was built in the last second and its LP quotes are still within the staleness limit,
+   * otherwise a new one.
+   */
   async current(pair: string): Promise<Aggregate> {
     const a = this.latest.get(pair);
     const maxAge = Math.min(1000, this.config.get().data.dealing.maxStalenessMs);
-    if (a && this.clock().getTime() - a.at.getTime() <= maxAge) return a;
+    if (a && this.clock().getTime() - a.at.getTime() <= maxAge && this.live(a)) return a;
     return this.refresh(pair);
   }
 
@@ -121,11 +128,18 @@ export class PriceEngine {
     return this.latest.get(pair);
   }
 
-  /** The latest aggregate only while it is within the staleness limit; anything that trades must use this or current(). */
+  /**
+   * The latest aggregate only while the LP quotes behind it are within the staleness limit, measured from the LPs' own
+   * timestamps (refreshing the cache does not make an old quote younger). Anything that trades must use this or
+   * current().
+   */
   fresh(pair: string): Aggregate | undefined {
     const a = this.latest.get(pair);
-    if (!a) return undefined;
-    return this.clock().getTime() - a.at.getTime() <= this.config.get().data.dealing.maxStalenessMs ? a : undefined;
+    return a && this.live(a) ? a : undefined;
+  }
+
+  private live(a: Aggregate): boolean {
+    return this.clock().getTime() - a.sourceAt.getTime() <= this.config.get().data.dealing.maxStalenessMs;
   }
 }
 

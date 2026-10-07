@@ -3,7 +3,7 @@ import { useExchange, usePair } from '../store';
 import { Breakdown, Row, Segmented, Sheet } from '../components';
 import { assetName, compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
 import { endOfDay, localDate } from '../time';
-import { newIdempotencyKey, type PlaceOrder } from '../api';
+import { ApiError, newIdempotencyKey, type PlaceOrder } from '../api';
 import { BankQuick, BankRow, BetterAtBank } from '../bank';
 import type { BookLevel, OrderType, PairInfo, QuoteBreakdown, Side, Validity } from '../types';
 
@@ -190,7 +190,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
     if (!quote || !qty || (!market && !price)) return;
     setConfirming({
       order: market
-        ? { pair: pair.symbol, side: draft.side, qty, type: 'MARKET' }
+        ? { pair: pair.symbol, side: draft.side, qty, type: 'MARKET', protectionPrice: quote.protectionPrice }
         : {
             pair: pair.symbol,
             side: draft.side,
@@ -378,6 +378,12 @@ function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInf
       toast(t('confirm.placed'), 'success');
       onPlaced();
     } catch (e) {
+      // The price moved against the customer after they confirmed: back to the ticket, which shows the new quote.
+      if (e instanceof ApiError && e.code === 'PROTECTION_PRICE_CHANGED') {
+        toast(errorText(e), 'error');
+        onClose();
+        return;
+      }
       setError(errorText(e));
       setBusy(false);
     }

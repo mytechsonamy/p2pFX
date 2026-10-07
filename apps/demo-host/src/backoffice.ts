@@ -514,7 +514,7 @@ async function reports() {
     .map(
       (p: any) => `<tr><td><strong>${esc(p.pair)}</strong></td><td class="num">${n(p.c2c.qty)}</td><td class="num">${n(p.c2b.bankMarketMaker.qty)}</td>
       <td class="num">${n(p.c2b.botMarketMaker.qty)}</td><td class="num">${n(p.direct.qty)}</td><td class="num">${n(p.customerLegVolume)}</td>
-      <td class="num">${pct(p.p2pMatchRatio)}</td><td class="num">${n(p.fees)}</td><td class="num">${n(p.directMargin)}</td><td class="num"><strong>${n(p.contribution)}</strong> ${esc(p.currency)}</td></tr>`,
+      <td class="num">${pct(p.p2pMatchRatio)}</td><td class="num">${n(p.fees)}</td><td class="num">${n(p.directMargin)}</td><td class="num">${n(p.principalContribution)}</td><td class="num">${n(p.hedgeCost)}</td><td class="num"><strong>${n(p.netContribution)}</strong> ${esc(p.currency)}</td></tr>`,
     )
     .join('');
   const list = (title: string, items: any[], cols: [string, (x: any) => string][]) =>
@@ -527,7 +527,7 @@ async function reports() {
     }`;
   return `<section class="card"><h2>Akışa göre hacim</h2>
     <p class="note">P2P oranı yalnızca müşteri-müşteri (C2C) eşleşmelerin müşteri bacak hacmindeki payıdır; banka merdiveni ve botla yapılan işlemler (C2B) ve Direct P2P sayılmaz. Katkı: komisyon + Direct marjı.</p>
-    <table class="list"><thead><tr><th>Parite</th><th class="num">C2C</th><th class="num">C2B merdiven</th><th class="num">C2B bot</th><th class="num">Direct</th><th class="num">Müşteri bacak</th><th class="num">P2P oranı</th><th class="num">Komisyon</th><th class="num">Direct marjı</th><th class="num">Katkı</th></tr></thead>
+    <table class="list"><thead><tr><th>Parite</th><th class="num">C2C</th><th class="num">C2B merdiven</th><th class="num">C2B bot</th><th class="num">Direct</th><th class="num">Müşteri bacak</th><th class="num">Tahta P2P oranı</th><th class="num">Komisyon</th><th class="num">Direct marjı</th><th class="num">Tahta principal</th><th class="num">Hedge maliyeti</th><th class="num">Net katkı</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="10" class="muted">Henüz işlem yok</td></tr>'}</tbody></table></section>
     <section class="card"><h2>İstisnalar</h2>
     ${list('Settlement', ex.settlements, [['Parite', (x) => esc(x.pair)], ['Bacak', (x) => esc(x.leg)], ['Durum', (x) => esc(x.status)], ['Hata', (x) => esc(x.lastError ?? '')], ['Zaman', (x) => when(x.since)]])}
