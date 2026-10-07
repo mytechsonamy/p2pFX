@@ -1,18 +1,27 @@
 import { formatDecimal, formatPrice, parsePrice, findPair, type BankConfig, type OrderStatus, type PairConfig, type Side, type Validity } from '@p2p/shared';
 import { fromSnapshot, priceSide, toBreakdown, type PricingSnapshot } from '@p2p/pricing';
 import type { Queryable } from './db/pool.js';
+import type { LiquiditySource } from './event-store.js';
 
 export interface OrderRow {
   id: string;
   seq: bigint;
   customer_id: string;
   customer_ref: string;
+  /** Liquidity source: a customer, the bank's ladder or the bank's bot. */
+  source: LiquiditySource;
+  /** The economic owner; the bank's ladder and bot share the bank's principal. */
+  principal_id: string;
+  principal_kind: 'CUSTOMER' | 'BANK' | 'THIRD_PARTY';
+  strategy_id: string | null;
+  generation_id: string | null;
+  order_type: 'LIMIT' | 'MARKET';
   pair: string;
   side: Side;
   book_price: string;
   qty: bigint;
   filled_qty: bigint;
-  validity: Validity;
+  validity: Validity | 'IOC';
   expires_at: Date;
   fx_account_id: string;
   try_account_id: string;
@@ -31,7 +40,8 @@ export interface OrderRow {
 
 export const LIVE_STATUSES: OrderStatus[] = ['OPEN', 'PARTIAL'];
 
-const ORDER_SELECT = 'select o.*, c.customer_ref from orders o join customers c on c.id = o.customer_id';
+const ORDER_SELECT =
+  'select o.*, c.customer_ref, p.kind as principal_kind from orders o join customers c on c.id = o.customer_id join principals p on p.id = o.principal_id';
 
 export async function loadOrder(db: Queryable, id: string, forUpdate = false): Promise<OrderRow | undefined> {
   const { rows } = await db.query(`${ORDER_SELECT} where o.id = $1${forUpdate ? ' for update of o' : ''}`, [id]);
@@ -63,12 +73,15 @@ export function orderView(o: OrderRow, config: BankConfig) {
     id: o.id,
     pair: o.pair,
     side: o.side,
+    type: o.order_type,
+    /** LIMIT: the limit price. MARKET: the protection price (never traded beyond). */
     price: formatPrice(parsePrice(o.book_price)),
     qty: formatDecimal(o.qty, pair.baseDecimals),
     filledQty: formatDecimal(o.filled_qty, pair.baseDecimals),
     remainingQty: formatDecimal(remainingOf(o), pair.baseDecimals),
     status: o.status,
     cancelReason: o.cancel_reason ?? undefined,
+    clientOrderId: o.idempotency_key,
     validity: o.validity,
     expiresAt: o.expires_at.toISOString(),
     fxAccountId: o.fx_account_id,

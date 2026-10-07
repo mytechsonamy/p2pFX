@@ -10,7 +10,7 @@ function cfg(over: Partial<BankConfig['tax']> = {}, rounding: BankConfig['roundi
 }
 
 describe('priceSide', () => {
-  it('matches the worked example: 1,000 USD at 49.15 with 5 bips per side', () => {
+  it('matches the worked example: 1,000 USD at 49.15 with 500 pips (0.05 TRY) per side', () => {
     const c = cfg({ buyRate: '0.002', sellRate: '0.002' });
     const buy = toBreakdown(usd, priceSide(qty1000, parsePrice('49.15'), pricingParams(c, usd, 'BUY')), pricingParams(c, usd, 'BUY'));
     const sell = toBreakdown(usd, priceSide(qty1000, parsePrice('49.15'), pricingParams(c, usd, 'SELL')), pricingParams(c, usd, 'SELL'));
@@ -53,7 +53,7 @@ describe('priceSide', () => {
 
   it('applies the configured rounding mode', () => {
     // 0.5 kuruş tax: 2.50 TRY gross × 0.002 = 0.005
-    const pair = { ...usd, commission: { buyBips: 0, sellBips: 0 } };
+    const pair = { ...usd, commission: { mode: 'PIPS' as const, buy: 0, sell: 0 } };
     const qty = parseDecimal('1', 2);
     const price = parsePrice('2.5');
     const tax = (r: BankConfig['rounding']) => priceSide(qty, price, pricingParams(cfg({}, r), pair, 'BUY')).tax;
@@ -61,6 +61,23 @@ describe('priceSide', () => {
     expect(tax('HALF_EVEN')).toBe(0n);
     expect(tax('DOWN')).toBe(0n);
     expect(tax('UP')).toBe(1n);
+  });
+
+  it('BPS mode charges a share of the book price', () => {
+    // 10 bps of 49.15 = 0.04915 TRY per unit: 49.15 TRY on 1,000 USD
+    const pair = { ...usd, commission: { mode: 'BPS' as const, buy: 10, sell: 10 } };
+    const c = cfg({ buyRate: '0', sellRate: '0' });
+    const b = priceSide(qty1000, parsePrice('49.15'), pricingParams(c, pair, 'BUY'));
+    expect(b.commission).toBe(4915n); // 49.15 TRY
+    expect(b.effectivePrice).toBe(parsePrice('49.19915'));
+    const s = priceSide(qty1000, parsePrice('49.15'), pricingParams(c, pair, 'SELL'));
+    expect(s.effectivePrice).toBe(parsePrice('49.10085'));
+  });
+
+  it('round-trips the pricing snapshot (both fee modes)', () => {
+    const bps = { ...usd, commission: { mode: 'BPS' as const, buy: 7, sell: 3 } };
+    const q = pricingParams(DEFAULT_CONFIG, bps, 'BUY');
+    expect(fromSnapshot(JSON.parse(JSON.stringify(toSnapshot(q))))).toEqual(q);
   });
 
   it('round-trips the pricing snapshot', () => {

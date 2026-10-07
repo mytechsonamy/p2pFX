@@ -7,6 +7,11 @@ const hhmm = z.string().regex(/^([01]\d|2[0-4]):[0-5]\d$/, 'expected HH:MM');
 export const ValiditySchema = z.enum(['DAY', 'GTD', 'GTC']);
 export type Validity = z.infer<typeof ValiditySchema>;
 
+export const FeeModeSchema = z.enum(['PIPS', 'BPS']);
+export type FeeMode = z.infer<typeof FeeModeSchema>;
+
+const CommissionSchema = z.object({ mode: FeeModeSchema, buy: z.number().int().min(0), sell: z.number().int().min(0) });
+
 export const PairConfigSchema = z.object({
   symbol: z.string().regex(/^[A-Z]{6}$/),
   base: z.string().length(3),
@@ -19,10 +24,17 @@ export const PairConfigSchema = z.object({
   minQty: decimalString,
   /** Orders priced more than this percentage away from the reference rate are rejected. */
   priceBandPct: decimalString,
-  /** Bank commission per side, in bips. Added to the book price for buyers, subtracted for sellers. */
-  commission: z.object({ buyBips: z.number().int().min(0), sellBips: z.number().int().min(0) }),
-  /** Value of one bip in quote currency per unit of base, e.g. "0.01". */
-  bipSize: decimalString,
+  /**
+   * The pair's market pip: the price unit fees and margins are counted in, in quote currency per unit of base,
+   * e.g. "0.0001" (5 pips = 0.0005 TRY). Never a basis point: bps are always a fraction of the price.
+   */
+  pipSize: decimalString,
+  /**
+   * Bank commission per side. PIPS: an absolute fee of `buy`/`sell` pips per unit of base (500 pips × 0.0001 =
+   * 0.05 TRY per USD). BPS: a share of the book price (5 bps = 0.05 %). Added to the book price for buyers,
+   * subtracted for sellers, and shown before the customer confirms.
+   */
+  commission: CommissionSchema,
   enabled: z.boolean(),
 });
 export type PairConfig = z.infer<typeof PairConfigSchema>;
@@ -36,7 +48,8 @@ export const LimitsSchema = z.object({
   maxOrdersPerWindow: z.number().int().min(1).optional(),
 });
 
-const MarginSchema = z.object({ buyBips: z.number().int().min(0), sellBips: z.number().int().min(0) });
+/** The bank's margin over the LP price, in pips of the pair. */
+const MarginSchema = z.object({ buyPips: z.number().int().min(0), sellPips: z.number().int().min(0) });
 
 /** The bank's own FX desk: prices aggregated from liquidity providers plus a margin per customer segment. */
 const HedgingSchema = z.object({
@@ -56,12 +69,11 @@ export const DEFAULT_HEDGING: HedgingConfig = {
 };
 
 export const DealingSchema = z.object({
-  enabled: z.boolean(),
   /** How long a firm bank quote can be executed. */
   quoteTtlSeconds: z.number().int().min(1).max(120),
   /** LP quotes older than this are ignored. */
   maxStalenessMs: z.number().int().min(100),
-  /** Bips (of the pair's bipSize) over the best LP price: customers buy at ask + buyBips, sell at bid − sellBips. */
+  /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
   margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
   /** Largest single deal per base currency. */
   maxDealQty: z.record(decimalString),
@@ -73,10 +85,9 @@ export const DealingSchema = z.object({
 export type DealingConfig = z.infer<typeof DealingSchema>;
 
 export const DEFAULT_DEALING: DealingConfig = {
-  enabled: true,
   quoteTtlSeconds: 10,
   maxStalenessMs: 3000,
-  margins: { default: { buyBips: 10, sellBips: 10 }, segments: { premium: { buyBips: 4, sellBips: 4 } } },
+  margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
   maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
   positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },
   autoHedge: true,
@@ -95,30 +106,35 @@ const SettlementSchema = z.object({
   attempts: z.number().int().min(1).max(10),
   /** Backoff before attempt n is baseDelayMs × 2^(n−2). */
   baseDelayMs: z.number().int().min(0).max(60_000),
+  /**
+   * ASYNC: matching commits the fill and moves on; the legs (the fill's outbox) are posted by the settlement
+   * dispatcher. INLINE: the pair waits for core banking before the next match.
+   */
+  dispatch: z.enum(['ASYNC', 'INLINE']).default('ASYNC'),
 });
 
 const LotSchema = z.object({ min: decimalString, max: decimalString, step: decimalString });
 
-/** Demo order bots (market makers) that keep the board alive. Demo only. */
-const BotsSchema = z.object({
-  enabled: z.boolean(),
-  /** Customer refs the bots trade as. */
-  refs: z.array(z.string().min(1)).min(2),
-  /** Customer segment the bots log in with (its limits come from `limits.segments`). */
-  segment: z.string().min(1),
-  /** Average pause between bot actions. */
-  intervalMs: z.number().int().min(200),
-  /** Open bot orders per pair and side above which the oldest are cancelled. */
-  maxOrdersPerSide: z.number().int().min(1),
-  /** Passive orders rest this many bips (of the pair's bipSize) away from the reference rate. */
-  offsetBips: z.object({ min: z.number().int().min(1), max: z.number().int().min(1) }),
-  /** Share of actions that are a bot-to-bot trade inside the spread, and that cancel a resting order. */
-  tradeShare: z.number().min(0).max(1),
-  cancelShare: z.number().min(0).max(1),
+
+/**
+ * The bank's algorithmic market maker (BOT_MM): extra levels around the LP reference, entered as real orders for
+ * the bank (the principal) under one strategy id. It shares the bank's inventory limit with the ladder and the
+ * Direct channel, never trades with them (self trade prevention) and withdraws on a stale feed.
+ */
+const BotMarketMakerSchema = z.object({
+  strategyId: z.string().min(1),
+  /** Levels per side. */
+  levels: z.number().int().min(1).max(20),
+  /** Distance of the first level from the LP mid, in pips; each level is placed somewhere in this range. */
+  offsetPips: z.object({ min: z.number().int().min(1), max: z.number().int().min(1) }),
+  /** Minimum distance between consecutive levels, in pips. */
+  stepPips: z.number().int().min(1),
+  /** How often the strategy refreshes its levels (a new generation). */
+  refreshMs: z.number().int().min(200),
   /** Order size per base currency; `default` for the others. */
   lots: z.record(LotSchema),
 });
-export type BotsConfig = z.infer<typeof BotsSchema>;
+export type BotMarketMakerConfig = z.infer<typeof BotMarketMakerSchema>;
 
 /** One side of the bank's ladder in a pair: levels moving away from the bank's own rate. */
 const LadderSchema = z.object({
@@ -133,15 +149,17 @@ const LadderSchema = z.object({
 
 /** The bank's own orders in the P2P book, priced off its published rate and repriced as the LPs move. */
 const BankBookSchema = z.object({
-  enabled: z.boolean(),
-  /** The bank's own trading account in core banking that the orders are entered for. */
+  /** The bank's own trading account in core banking that its orders (ladder and bot) are entered for. */
   customerRef: z.string().min(1),
   /** Segment whose bank-row rate anchors the ladder (asks above its buy rate, bids below its sell rate). */
   anchorSegment: z.string().min(1),
-  /** Price levels so that, once the customer's commission is added, no level beats the bank's own rate. */
+  /**
+   * Bank L1 parity: price levels so that, once the customer's commission is added, no level beats the bank's own
+   * Direct rate (L1 ask = Direct ask − buyer fee, L1 bid = Direct bid + seller fee).
+   */
   includeCommission: z.boolean(),
-  /** Reprice a side when its anchor rate has moved at least this many bips (of the pair's bipSize). */
-  repriceBips: z.number().int().min(1),
+  /** Reprice a side when its anchor rate has moved at least this many pips. */
+  repricePips: z.number().int().min(1),
   /** Per pair symbol; a pair without an entry has no bank orders. */
   pairs: z.record(z.object({ asks: LadderSchema, bids: LadderSchema })),
 });
@@ -149,11 +167,10 @@ export type BankBookConfig = z.infer<typeof BankBookSchema>;
 
 const ladder = (levels: string[]) => ({ enabled: true, startPct: '0.02', stepPct: '0.02', levels });
 export const DEFAULT_BANK_BOOK: BankBookConfig = {
-  enabled: true,
   customerRef: 'bank-desk',
   anchorSegment: 'default',
   includeCommission: true,
-  repriceBips: 2,
+  repricePips: 200,
   pairs: {
     USDTRY: { asks: ladder(['5000', '10000', '20000']), bids: ladder(['5000', '10000', '20000']) },
     EURTRY: { asks: ladder(['5000', '10000', '20000']), bids: ladder(['5000', '10000', '20000']) },
@@ -162,20 +179,59 @@ export const DEFAULT_BANK_BOOK: BankBookConfig = {
 };
 
 export const DEFAULT_SESSION = { ttlMinutes: 30 };
-export const DEFAULT_SETTLEMENT = { attempts: 3, baseDelayMs: 500 };
-export const DEFAULT_BOTS: BotsConfig = {
-  enabled: true,
-  refs: ['demo-mm-1', 'demo-mm-2', 'demo-mm-3', 'demo-mm-4', 'demo-mm-5', 'demo-mm-6'],
-  segment: 'market-maker',
-  intervalMs: 1500,
-  maxOrdersPerSide: 10,
-  offsetBips: { min: 4, max: 25 },
-  tradeShare: 0.25,
-  cancelShare: 0.15,
+export const DEFAULT_CHANNELS: ChannelsConfig = { bankDirect: true, bankMarketMaker: true, botMarketMaker: true };
+export const DEFAULT_KILL_SWITCH = { allTrading: false, newCustomerOrders: false, haltedPairs: [] as string[], disabledLps: [] as string[] };
+export const DEFAULT_INVENTORY = { maxPosition: { USD: '250000', EUR: '250000', GBP: '120000' } as Record<string, string> };
+export const DEFAULT_MARKET_ORDERS = { enabled: true, maxSlippageBps: 50 };
+export const DEFAULT_SETTLEMENT = { attempts: 3, baseDelayMs: 500, dispatch: 'ASYNC' as const };
+export const DEFAULT_BOT_MM: BotMarketMakerConfig = {
+  strategyId: 'bot-mm-1',
+  levels: 4,
+  offsetPips: { min: 400, max: 2500 },
+  stepPips: 100,
+  refreshMs: 3000,
   lots: { GBP: { min: '100', max: '1500', step: '50' }, default: { min: '200', max: '3500', step: '50' } },
 };
 
-export const BankConfigSchema = z.object({
+/** The three liquidity sources the bank switches on and off independently (each under the kill switch). */
+const ChannelsSchema = z.object({
+  /** BANK_DIRECT: the bank's instant quote-and-deal channel (the bank row). */
+  bankDirect: z.boolean(),
+  /** BANK_MM: the bank's ladder resting in the board. */
+  bankMarketMaker: z.boolean(),
+  /** BOT_MM: the bank's algorithmic market maker resting in the board. */
+  botMarketMaker: z.boolean(),
+});
+export type ChannelsConfig = z.infer<typeof ChannelsSchema>;
+
+/**
+ * Stopping trading at different levels. Stopping new entries is configuration (below); cancelling open orders is a
+ * separate, audited operation (POST /ops/controls/cancel-orders). Fills already made keep settling and hedging.
+ */
+const KillSwitchSchema = z.object({
+  /** No new orders, quotes, deals or bank liquidity anywhere. */
+  allTrading: z.boolean(),
+  /** No new customer orders (bank liquidity and Direct may continue unless switched off too). */
+  newCustomerOrders: z.boolean(),
+  /** Pairs where nothing new is accepted and bank liquidity is withdrawn. */
+  haltedPairs: z.array(z.string()),
+  /** Liquidity providers left out of prices and hedging. */
+  disabledLps: z.array(z.string()),
+});
+
+/** The bank's inventory: open position per base currency that its principal channels together may not exceed. */
+const InventorySchema = z.object({
+  /** Hard cap per currency: at the cap the side that would increase the position is closed (ladder, bot, Direct). */
+  maxPosition: z.record(decimalString),
+});
+
+const MarketOrdersSchema = z.object({
+  enabled: z.boolean(),
+  /** Price protection: a market order never trades worse than the LP price ± this many bps. */
+  maxSlippageBps: z.number().int().min(1).max(1000),
+});
+
+export const BankConfigShape = z.object({
   bank: z.object({ code: z.string().min(1), name: z.string().min(1) }),
   branding: z.object({
     productName: z.string(),
@@ -218,10 +274,23 @@ export const BankConfigSchema = z.object({
   dealing: DealingSchema.default(DEFAULT_DEALING),
   session: SessionSchema.default(DEFAULT_SESSION),
   settlement: SettlementSchema.default(DEFAULT_SETTLEMENT),
-  bots: BotsSchema.default(DEFAULT_BOTS),
   bankBook: BankBookSchema.default(DEFAULT_BANK_BOOK),
+  botMarketMaker: BotMarketMakerSchema.default(DEFAULT_BOT_MM),
+  channels: ChannelsSchema.default(DEFAULT_CHANNELS),
+  /** SEPARATE: the bank's Direct rates and the board in two areas. UNIFIED: one executable board, Direct as a quick path. */
+  marketPresentation: z.enum(['SEPARATE', 'UNIFIED']).default('SEPARATE'),
+  /** Whether customers see which price levels hold bank liquidity (the bank's UX and compliance decision). */
+  sourceDisclosure: z.boolean().default(false),
+  /** Two orders of the same principal never trade: cancel the incoming order's remainder, or the resting order. */
+  selfTradePrevention: z.enum(['CANCEL_TAKER', 'CANCEL_MAKER']).default('CANCEL_TAKER'),
+  killSwitch: KillSwitchSchema.default(DEFAULT_KILL_SWITCH),
+  inventory: InventorySchema.default(DEFAULT_INVENTORY),
+  marketOrders: MarketOrdersSchema.default(DEFAULT_MARKET_ORDERS),
 });
-export type BankConfig = z.infer<typeof BankConfigSchema>;
+
+/** Configuration as stored and edited; older shapes are upgraded on the way in (see `upgradeConfig`). */
+export const BankConfigSchema = z.preprocess((v) => upgradeConfig(v).data, BankConfigShape);
+export type BankConfig = z.infer<typeof BankConfigShape>;
 
 export function findPair(config: BankConfig, symbol: string): PairConfig | undefined {
   return config.pairs.find((p) => p.symbol === symbol);
@@ -260,16 +329,21 @@ const BASE_CONFIG: BankConfig = {
     default: { maxOrderNotional: '1000000', maxDailyNotional: '5000000' },
     segments: {
       premium: { maxOrderNotional: '10000000', maxDailyNotional: '50000000' },
-      // Demo order bots; limits a demo never reaches.
-      'market-maker': { maxOrderNotional: '100000000', maxDailyNotional: '100000000000', maxOrdersPerWindow: 1000 },
     },
   },
   orderRateLimit: { max: 30, windowSeconds: 60 },
   dealing: DEFAULT_DEALING,
   session: DEFAULT_SESSION,
   settlement: DEFAULT_SETTLEMENT,
-  bots: DEFAULT_BOTS,
   bankBook: DEFAULT_BANK_BOOK,
+  botMarketMaker: DEFAULT_BOT_MM,
+  channels: DEFAULT_CHANNELS,
+  marketPresentation: 'SEPARATE',
+  sourceDisclosure: false,
+  selfTradePrevention: 'CANCEL_TAKER',
+  killSwitch: DEFAULT_KILL_SWITCH,
+  inventory: DEFAULT_INVENTORY,
+  marketOrders: DEFAULT_MARKET_ORDERS,
 };
 
 /** Default configuration used by the prototype and as a template for banks. */
@@ -282,7 +356,7 @@ export const DEFAULT_CONFIG: BankConfig = DEFAULT_PAIRS.reduce((c, code) => with
 export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'tax', label: 'Kambiyo vergisi oranı ve matrahı', paths: ['tax'] },
   { key: 'tradingHours', label: 'İşlem saatleri ve tatiller', paths: ['tradingHours'] },
-  { key: 'commission', label: 'P2P komisyonu (taraf başı bip)', paths: ['pairs.*.commission', 'pairs.*.bipSize'] },
+  { key: 'commission', label: 'P2P komisyonu (taraf başı pip veya bps) ve pip değeri', paths: ['pairs.*.commission', 'pairs.*.pipSize'] },
   { key: 'margins', label: 'Banka satırı segment marjları', paths: ['dealing.margins'] },
   { key: 'balanceMode', label: 'Emir girişinde bakiye bloke', paths: ['balanceMode'] },
   { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
@@ -291,8 +365,12 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxDealQty'] },
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
-  { key: 'bots', label: 'Demo piyasa yapıcı botlar', paths: ['bots'] },
-  { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler', paths: ['bankBook'] },
+  { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler (Bank MM)', paths: ['bankBook'] },
+  { key: 'botMarketMaker', label: 'Algoritmik piyasa yapıcı stratejisi (Bot MM)', paths: ['botMarketMaker'] },
+  { key: 'channels', label: 'Likidite kaynakları ve tahta sunumu', paths: ['channels', 'marketPresentation', 'sourceDisclosure'] },
+  { key: 'inventory', label: 'Banka envanter üst sınırları', paths: ['inventory'] },
+  { key: 'marketOrders', label: 'Piyasa emri ve fiyat koruması', paths: ['marketOrders'] },
+  { key: 'selfTradePrevention', label: 'Kendi kendine işlem önleme davranışı', paths: ['selfTradePrevention'] },
 ];
 
 export interface ConfigChange {
@@ -346,16 +424,120 @@ export function configIssues(c: BankConfig): ConfigIssue[] {
     if (p.symbol !== `${p.base}${p.quote}`) issues.push({ path: at('symbol'), message: `must be ${p.base}${p.quote} (base + quote)` });
     if (seen.has(p.symbol)) issues.push({ path: at('symbol'), message: `${p.symbol} appears more than once` });
     seen.add(p.symbol);
-    for (const f of ['tickSize', 'minQty', 'bipSize', 'priceBandPct'] as const) {
+    for (const f of ['tickSize', 'minQty', 'pipSize', 'priceBandPct'] as const) {
       if (!positive(p[f])) issues.push({ path: at(f), message: 'must be greater than zero' });
     }
     const tickDecimals = p.tickSize.split('.')[1]?.length ?? 0;
     if (tickDecimals > 8) issues.push({ path: at('tickSize'), message: 'at most 8 decimals' });
+    if ((p.pipSize.split('.')[1]?.length ?? 0) > 8) issues.push({ path: at('pipSize'), message: 'at most 8 decimals' });
     const minDecimals = p.minQty.split('.')[1]?.length ?? 0;
     if (minDecimals > p.baseDecimals) issues.push({ path: at('minQty'), message: `at most ${p.baseDecimals} decimals` });
   });
+  const { min, max } = c.botMarketMaker.offsetPips;
+  if (min > max) issues.push({ path: ['botMarketMaker', 'offsetPips', 'min'], message: 'must not exceed the maximum' });
   for (const [seg, l] of Object.entries({ default: c.limits.default, ...c.limits.segments })) {
     if (!positive(l.maxOrderNotional)) issues.push({ path: ['limits', seg, 'maxOrderNotional'], message: 'must be greater than zero' });
   }
   return issues;
+}
+
+// ---- upgrading stored configurations ----
+
+/** "0.01" shifted by -2 places → "0.0001", without floating point. */
+export function shiftDecimal(dec: string, places: number): string {
+  const [i, f = ''] = dec.split('.');
+  let digits = i + f;
+  let point = i.length + places;
+  if (point < 0) {
+    digits = '0'.repeat(-point) + digits;
+    point = 0;
+  }
+  if (point > digits.length) digits += '0'.repeat(point - digits.length);
+  const int = digits.slice(0, point).replace(/^0+(?=\d)/, '') || '0';
+  const frac = digits.slice(point).replace(/0+$/, '');
+  return frac ? `${int}.${frac}` : int;
+}
+
+/**
+ * One bip of the old configuration is 100 pips of the new one: `pipSize = bipSize / 100`, and every amount
+ * counted in bips is multiplied by 100. Prices and fees stay exactly what they were (5 bips × 0.01 TRY =
+ * 500 pips × 0.0001 TRY = 0.05 TRY per USD); only the unit is renamed, so no amount moves by a factor of 100.
+ */
+export const PIPS_PER_BIP = 100;
+
+/**
+ * Upgrades a configuration stored by an earlier version to the current shape (v1.1): bips become pips (see
+ * PIPS_PER_BIP), the on/off switches of the Direct channel, the bank ladder and the demo bots become the three
+ * independent `channels`, and the demo bots (customers trading among themselves) become the bank's BOT_MM
+ * strategy. Returns the configuration unchanged (`changed: false`) when it is already current.
+ */
+export function upgradeConfig(input: unknown): { data: unknown; changed: boolean; notes: string[] } {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { data: input, changed: false, notes: [] };
+  const c = structuredClone(input) as Record<string, any>;
+  const notes: string[] = [];
+  const bipsToPips = (v: unknown) => (typeof v === 'number' ? v * PIPS_PER_BIP : v);
+
+  if (Array.isArray(c.pairs)) {
+    for (const p of c.pairs) {
+      if (!p || typeof p !== 'object') continue;
+      if (typeof p.bipSize === 'string' && p.pipSize === undefined) {
+        p.pipSize = shiftDecimal(p.bipSize, -2);
+        notes.push(`${p.symbol}: bipSize ${p.bipSize} → pipSize ${p.pipSize}`);
+      }
+      delete p.bipSize;
+      const com = p.commission;
+      if (com && typeof com === 'object' && 'buyBips' in com) {
+        p.commission = { mode: 'PIPS', buy: bipsToPips(com.buyBips), sell: bipsToPips(com.sellBips) };
+        notes.push(`${p.symbol}: komisyon ${com.buyBips}/${com.sellBips} bip → ${p.commission.buy}/${p.commission.sell} pip`);
+      }
+    }
+  }
+
+  const d = c.dealing;
+  if (d && typeof d === 'object') {
+    const margin = (m: any) => (m && typeof m === 'object' && 'buyBips' in m ? { buyPips: bipsToPips(m.buyBips), sellPips: bipsToPips(m.sellBips) } : m);
+    if (d.margins && typeof d.margins === 'object') {
+      const before = JSON.stringify(d.margins);
+      d.margins = {
+        ...d.margins,
+        default: margin(d.margins.default),
+        segments: Object.fromEntries(Object.entries(d.margins.segments ?? {}).map(([k, m]) => [k, margin(m)])),
+      };
+      if (JSON.stringify(d.margins) !== before) notes.push('Banka satırı marjları bip → pip (×100)');
+    }
+  }
+
+  const channels: Record<string, boolean> = {};
+  if (d && typeof d.enabled === 'boolean') {
+    channels.bankDirect ??= d.enabled;
+    delete d.enabled;
+  }
+  const bb = c.bankBook;
+  if (bb && typeof bb === 'object') {
+    if (typeof bb.enabled === 'boolean') {
+      channels.bankMarketMaker ??= bb.enabled;
+      delete bb.enabled;
+    }
+    if (typeof bb.repriceBips === 'number') {
+      bb.repricePips ??= bb.repriceBips * PIPS_PER_BIP;
+      delete bb.repriceBips;
+    }
+  }
+  if (c.bots && typeof c.bots === 'object') {
+    channels.botMarketMaker ??= !!c.bots.enabled;
+    c.botMarketMaker ??= {
+      ...DEFAULT_BOT_MM,
+      ...(c.bots.lots ? { lots: c.bots.lots } : {}),
+      ...(c.bots.offsetBips ? { offsetPips: { min: bipsToPips(c.bots.offsetBips.min), max: bipsToPips(c.bots.offsetBips.max) } } : {}),
+    };
+    delete c.bots;
+    notes.push('Demo botlar (müşteri olarak kendi aralarında işlem yapan) bankanın Bot MM stratejisine dönüştü; bot-bot işlem yok');
+  }
+  if (Object.keys(channels).length && !c.channels) {
+    c.channels = { ...DEFAULT_CHANNELS, ...channels };
+    notes.push('Bank Direct, Bank MM ve Bot MM bağımsız kontrollere (channels) taşındı');
+  }
+
+  const changed = JSON.stringify(c) !== JSON.stringify(input);
+  return { data: changed ? c : input, changed, notes };
 }

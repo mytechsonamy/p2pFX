@@ -103,27 +103,110 @@ export class PositionKeeper {
     private readonly log: FastifyBaseLogger,
   ) {}
 
+  /**
+   * Position per pair, in base minor units, as the inventory guard sees it: updated synchronously when a principal
+   * execution commits (the board's fills with the ladder or bot, Direct deals), and reloaded from the database
+   * after hedges and periodically.
+   */
+  private readonly live = new Map<string, bigint>();
+  /** Bumped on every in-memory change, so a reload that raced one is not applied over it. */
+  private epoch = 0;
+
   async position(pair: PairConfig): Promise<Position> {
-    // Customer BUY → the bank sells. Only settled deals change the position. P2P fills where the bank's own
-    // account (its ladder in the book) was a side count too, unless their settlement failed or was reversed;
-    // other P2P fills are back-to-back and do not. Hedge clips count from the moment they are sent (PENDING,
+    // The bank's principal executions (board fills with its ladder or bot and Direct deals) count from the moment
+    // they commit, not when settlement finishes. A board fill whose settlement failed or was reversed, and a Direct
+    // deal core banking rejected, are taken out again. Hedge clips count from the moment they are sent (PENDING,
     // UNKNOWN), so a clip whose outcome is not known yet is never hedged a second time.
     const { rows } = await this.db.query(
       `select at, side, qty, rate from (
-         select created_at as at, seq, case side when 'BUY' then 'SELL' else 'BUY' end as side, qty, rate, 0 as src
-           from bank_deals where pair = $1 and status = 'SETTLED'
+         select e.created_at as at, e.seq, e.bank_side as side, e.qty, e.price as rate, 0 as src
+           from principal_executions e
+          where e.pair = $1
+            and not (e.channel = 'DIRECT' and exists (select 1 from bank_deals d where d.id = e.ref_id and d.status = 'REJECTED'))
+            and not (e.channel = 'BOARD' and exists (select 1 from settlements s where s.fill_id = e.ref_id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED', 'REVERSAL_PENDING')))
          union all
          select created_at, seq, side, qty, rate, 1 from hedges where pair = $1 and status <> 'REJECTED'
-         union all
-         select f.created_at, f.seq, o.side, f.qty, f.book_price, 2 from fills f
-           join orders o on o.id in (f.buy_order_id, f.sell_order_id)
-           join customers c on c.id = o.customer_id
-          where f.pair = $1 and c.customer_ref = $2
-            and not exists (select 1 from settlements s where s.fill_id = f.id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED', 'REVERSAL_PENDING'))
        ) t order by at, src, seq`,
-      [pair.symbol, this.config.get().data.bankBook.customerRef],
+      [pair.symbol],
     );
     return positionOf(pair, rows.map((r) => ({ side: r.side, qty: BigInt(r.qty), rate: parsePrice(r.rate) })));
+  }
+
+  /** Loads every pair's position into memory (startup). */
+  async load() {
+    for (const pair of this.config.get().data.pairs) await this.reload(pair.symbol);
+  }
+
+  /** Reloads one pair's position from the database, unless an execution changed it meanwhile (then it tries again). */
+  async reload(pairSymbol: string) {
+    const pair = findPair(this.config.get().data, pairSymbol);
+    if (!pair) return;
+    for (let i = 0; i < 3; i++) {
+      const epoch = this.epoch;
+      const p = await this.position(pair);
+      if (epoch === this.epoch) {
+        this.live.set(pair.symbol, p.qty);
+        return;
+      }
+    }
+  }
+
+  /** The position the inventory guard works with (base minor units, + long). */
+  current(pairSymbol: string): bigint {
+    return this.live.get(pairSymbol) ?? 0n;
+  }
+
+  /** The hard inventory cap for the pair's base currency (base minor units), if one is set. */
+  maxPosition(pairSymbol: string): bigint | undefined {
+    const c = this.config.get().data;
+    const pair = findPair(c, pairSymbol);
+    const max = pair && c.inventory.maxPosition[pair.base];
+    return pair && max ? parseDecimal(max, pair.baseDecimals) : undefined;
+  }
+
+  /**
+   * How much more the bank may buy (BUY) or sell of the pair's base, with `resting` already committed on that side by
+   * its other liquidity. Undefined: no cap.
+   */
+  headroom(pairSymbol: string, bankSide: 'BUY' | 'SELL', resting = 0n): bigint | undefined {
+    const max = this.maxPosition(pairSymbol);
+    if (max === undefined) return undefined;
+    const pos = this.current(pairSymbol);
+    const room = (bankSide === 'BUY' ? max - pos : max + pos) - resting;
+    return room > 0n ? room : 0n;
+  }
+
+  /** Whether a principal execution of `delta` keeps the position within the cap (one that reduces it always may). */
+  allows(pairSymbol: string, delta: bigint): boolean {
+    const max = this.maxPosition(pairSymbol);
+    if (max === undefined || delta === 0n) return true;
+    const pos = this.current(pairSymbol);
+    const next = pos + delta;
+    const abs = (v: bigint) => (v < 0n ? -v : v);
+    return abs(next) <= max || abs(next) < abs(pos);
+  }
+
+  /**
+   * Takes `delta` into the position before a Direct deal commits, so two deals at once cannot both use the last
+   * headroom. Returns the undo for a deal that does not go through.
+   */
+  reserve(pairSymbol: string, delta: bigint): () => void {
+    if (!this.allows(pairSymbol, delta)) {
+      throw new ApiError(422, 'INVENTORY_LIMIT', 'the bank cannot take more of this currency on this side right now');
+    }
+    this.change(pairSymbol, delta);
+    return () => this.change(pairSymbol, -delta);
+  }
+
+  /** A principal execution committed: the position moves now, and auto-hedge looks at it (in the background). */
+  afterExecution(pairSymbol: string, delta: bigint) {
+    this.change(pairSymbol, delta);
+    this.afterDeal(pairSymbol).catch(() => {});
+  }
+
+  private change(pairSymbol: string, delta: bigint) {
+    this.epoch++;
+    this.live.set(pairSymbol, this.current(pairSymbol) + delta);
   }
 
   /** Positions with unrealized P&L at the LP mid, and the limit. */
@@ -150,6 +233,7 @@ export class PositionKeeper {
         avgRate: p.qty === 0n ? null : formatPrice(p.avgRate),
         mid: mid === undefined ? null : formatPrice(mid),
         limit: c.dealing.positionLimits[pair.base] ?? null,
+        maxPosition: c.inventory.maxPosition[pair.base] ?? null,
         realizedPnl: q(p.realized),
         unrealizedPnl: q(unrealized),
         deals: rows[0].deals,
@@ -164,6 +248,11 @@ export class PositionKeeper {
 
   /** One hedge decision at a time per pair, so two deals finishing together cannot both hedge the same position. */
   private readonly hedgeChains = new Map<string, Promise<unknown>>();
+
+  /** Waits for hedge decisions in flight (tests, shutdown). */
+  async idle() {
+    await Promise.all([...this.hedgeChains.values()]);
+  }
 
   private serial<T>(pair: string, fn: () => Promise<T>): Promise<T> {
     const next = (this.hedgeChains.get(pair) ?? Promise.resolve()).then(fn, fn);
@@ -186,6 +275,8 @@ export class PositionKeeper {
         await this.execute(pair, p.qty < 0n ? 'BUY' : 'SELL', qty, 'AUTO', 'system');
       } catch (err) {
         this.log.error({ err, pair: pair.symbol }, 'auto-hedge failed');
+      } finally {
+        await this.reload(pair.symbol).catch(() => {});
       }
     });
   }
@@ -198,7 +289,11 @@ export class PositionKeeper {
   hedge(pair: PairConfig, side: 'BUY' | 'SELL', qty: bigint, reason: 'AUTO' | 'MANUAL', actor: string) {
     return this.serial(pair.symbol, async () => {
       await this.resolveOpenClips(pair.symbol);
-      return this.execute(pair, side, qty, reason, actor);
+      try {
+        return await this.execute(pair, side, qty, reason, actor);
+      } finally {
+        await this.reload(pair.symbol).catch(() => {});
+      }
     });
   }
 
@@ -341,6 +436,8 @@ export class PositionKeeper {
   }
 }
 
+const HEDGE_STATES: Record<string, string> = { PENDING: 'SENT', DONE: 'FILLED', UNKNOWN: 'UNKNOWN_OUTCOME', REJECTED: 'REJECTED' };
+
 function hedgeView(r: Record<string, any>, pair: PairConfig | undefined) {
   return {
     id: r.id,
@@ -351,6 +448,8 @@ function hedgeView(r: Record<string, any>, pair: PairConfig | undefined) {
     lp: r.lp,
     lpTradeRef: r.lp_trade_ref,
     status: r.status,
+    /** v1.1 hedge states: SENT (waiting for the LP), FILLED, UNKNOWN_OUTCOME (to be looked up), REJECTED. */
+    state: HEDGE_STATES[r.status as string] ?? r.status,
     batchId: r.batch_id,
     reason: r.reason,
     at: new Date(r.created_at).toISOString(),

@@ -20,7 +20,7 @@ async function start() {
     config: {
       ...DEFAULT_CONFIG,
       pairs: DEFAULT_CONFIG.pairs.filter((p) => ['USDTRY', 'XAUTRY'].includes(p.symbol)),
-      bankBook: { ...DEFAULT_CONFIG.bankBook, enabled: false },
+      channels: { ...DEFAULT_CONFIG.channels, bankMarketMaker: false },
     },
   });
 }
@@ -43,7 +43,7 @@ describe('instruments and pairs', () => {
     const added = await h.req('POST', '/ops/pairs', OPS, { symbol: 'DKKTRY' });
     expect(added.status).toBe(200);
     const c = h.ctx.config.get().data;
-    expect(c.pairs.find((p) => p.symbol === 'DKKTRY')).toMatchObject({ base: 'DKK', enabled: false, bipSize: '0.001', commission: { buyBips: 5, sellBips: 5 } });
+    expect(c.pairs.find((p) => p.symbol === 'DKKTRY')).toMatchObject({ base: 'DKK', enabled: false, pipSize: '0.00001', commission: { mode: 'PIPS' as const, buy: 500, sell: 500 } });
     expect(c.dealing.positionLimits.DKK).toBe(instrument('DKK').position);
     expect(c.bankBook.pairs.DKKTRY.asks.levels).toEqual(instrument('DKK').ladder);
     expect((await h.req('GET', '/ops/config/versions', OPS)).body[0]).toMatchObject({ createdBy: 'service:ops', reason: 'Yeni parite: DKK/TRY (işleme kapalı)' });
@@ -63,7 +63,7 @@ describe('instruments and pairs', () => {
     expect((await h.place(viewer, { pair: 'XAUTRY', side: 'BUY', qty: '1', price: '6320' })).body.error).toBe('UNKNOWN_PAIR');
   });
 
-  it('trades gold in grams, with the commission in bips of 1 TRY', async () => {
+  it('trades gold in grams, with the commission in pips of 0.01 TRY', async () => {
     await start();
     h.customer('ayse', { XAU: '25', TRY: '0' });
     h.customer('mehmet', { XAU: '0', TRY: '200000' });
@@ -73,7 +73,7 @@ describe('instruments and pairs', () => {
     await h.ctx.exchange.idle();
 
     const fill = (await h.req('GET', '/v1/fills', mehmet)).body[0];
-    // 5 bips × 1 TRY = 5 TRY per gram on top of the book price.
+    // 500 pips × 0.01 TRY = 5 TRY per gram on top of the book price.
     expect(fill).toMatchObject({ qty: '10.50', effectivePrice: '6335.00', commission: '52.50' });
     expect((await h.balance('mehmet', 'XAU')).balance).toBe(parseDecimal('10.5', 2));
     expect((await h.balance('ayse', 'XAU')).balance).toBe(parseDecimal('14.5', 2));
@@ -109,7 +109,7 @@ describe('order rate limit', () => {
     await h.setConfig((c) => ({
       ...c,
       orderRateLimit: { max: 2, windowSeconds: 60 },
-      limits: { ...c.limits, segments: { ...c.limits.segments, 'market-maker': { ...c.limits.segments['market-maker'], maxOrdersPerWindow: 5 } } },
+      limits: { ...c.limits, segments: { ...c.limits.segments, 'market-maker': { ...c.limits.default, maxOrdersPerWindow: 5 } } },
     }));
     h.customer('ayse', { USD: '1000', TRY: '0' });
     h.customer('mm', { USD: '1000', TRY: '0' });

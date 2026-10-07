@@ -1,4 +1,4 @@
-import { ASSUMPTIONS, BankConfigSchema, DEFAULT_CONFIG, configIssues, diffConfig, pathMatches, type BankConfig, type ConfigChange, type ConfigIssue } from '@p2p/shared';
+import { ASSUMPTIONS, BankConfigSchema, upgradeConfig, DEFAULT_CONFIG, configIssues, diffConfig, pathMatches, type BankConfig, type ConfigChange, type ConfigIssue } from '@p2p/shared';
 import { Listener, tx, type Db } from './db/pool.js';
 import { audit } from './audit.js';
 import { ApiError, badRequest, notFound } from './errors.js';
@@ -33,18 +33,38 @@ export class ConfigService {
 
   /** Loads the latest version, creating version 1 from `initial` on an empty database. */
   async init(initial: BankConfig = DEFAULT_CONFIG): Promise<VersionedConfig> {
-    if (!(await this.reload())) {
+    if (!(await this.reload()) || (await this.needsUpgrade())) {
       // A session lock must be taken and released on the same connection, so it gets a dedicated client.
       const lock = await this.db.connect();
       try {
         await lock.query('select pg_advisory_lock(727275)');
         if (!(await this.reload())) await this.save(BankConfigSchema.parse(initial), 'system', 'İlk yapılandırma (prototip varsayılanları)', []);
+        await this.upgradeStored();
       } finally {
         await lock.query('select pg_advisory_unlock(727275)').catch(() => {});
         lock.release();
       }
     }
     return this.get();
+  }
+
+  /** Whether the stored latest version has an older shape (it is read upgraded, but not stored so yet). */
+  private async needsUpgrade(): Promise<boolean> {
+    const { rows } = await this.db.query('select data from config order by version desc limit 1');
+    return rows.length > 0 && upgradeConfig(rows[0].data).changed;
+  }
+
+  /**
+   * Stores an older-shaped latest version in the current shape as a new version, with the conversion spelled out in
+   * the reason and diff (for example bips → pips: values × 100, amounts unchanged), so the audit trail shows it.
+   */
+  private async upgradeStored() {
+    const { rows } = await this.db.query('select data from config order by version desc limit 1');
+    const up = upgradeConfig(rows[0].data);
+    if (!up.changed) return;
+    const data = BankConfigSchema.parse(rows[0].data);
+    const diff = diffConfig(rows[0].data as BankConfig, data);
+    await this.save(data, 'system', `Yapılandırma v1.1 biçimine yükseltildi: ${up.notes.join('; ')}`, diff);
   }
 
   /** Follows changes made through other API instances. */

@@ -22,8 +22,8 @@ export interface SegmentRates {
   buy: bigint;
   /** The customer sells to the bank at this rate. */
   sell: bigint;
-  buyBips: number;
-  sellBips: number;
+  buyPips: number;
+  sellPips: number;
 }
 
 /** How often a price tick is written to the history. */
@@ -66,7 +66,7 @@ export class PriceEngine {
 
   async refreshAll() {
     const c = this.config.get().data;
-    if (!c.dealing.enabled) return;
+    // LP prices feed Direct, the ladder, the bot, market order protection and price evidence: always refreshed.
     for (const p of c.pairs.filter((p) => p.enabled)) {
       try {
         await this.refresh(p.symbol);
@@ -79,7 +79,8 @@ export class PriceEngine {
   /** Pulls fresh LP quotes for a pair and publishes the aggregate. */
   async refresh(pair: string): Promise<Aggregate> {
     const c = this.config.get().data;
-    const quotes = await this.lp.quotes(pair);
+    // An LP operations switched off (kill switch) is ignored entirely.
+    const quotes = (await this.lp.quotes(pair)).filter((q) => !c.killSwitch.disabledLps.includes(q.lp));
     const now = this.clock();
     // Only sane, recent quotes: positive prices, bid below ask, not stamped in the future, within the staleness limit.
     const fresh = quotes.filter((q) => {
@@ -129,11 +130,11 @@ export class PriceEngine {
 }
 
 interface PairPricing {
-  bip: bigint;
+  pip: bigint;
   tick: bigint;
   /** Margin in price units per segment, and for segments without their own margin. */
-  segments: Map<string, { buy: bigint; sell: bigint; buyBips: number; sellBips: number }>;
-  fallback: { buy: bigint; sell: bigint; buyBips: number; sellBips: number };
+  segments: Map<string, { buy: bigint; sell: bigint; buyPips: number; sellPips: number }>;
+  fallback: { buy: bigint; sell: bigint; buyPips: number; sellPips: number };
 }
 
 /**
@@ -148,10 +149,10 @@ function pricingTable(config: BankConfig): Map<string, PairPricing> {
   if (table) return table;
   table = new Map();
   for (const pair of config.pairs) {
-    const bip = parsePrice(pair.bipSize);
-    const margin = (m: { buyBips: number; sellBips: number }) => ({ buy: BigInt(m.buyBips) * bip, sell: BigInt(m.sellBips) * bip, ...m });
+    const pip = parsePrice(pair.pipSize);
+    const margin = (m: { buyPips: number; sellPips: number }) => ({ buy: BigInt(m.buyPips) * pip, sell: BigInt(m.sellPips) * pip, ...m });
     table.set(pair.symbol, {
-      bip,
+      pip,
       tick: parsePrice(pair.tickSize),
       segments: new Map(Object.entries(config.dealing.margins.segments).map(([s, m]) => [s, margin(m)])),
       fallback: margin(config.dealing.margins.default),
@@ -172,7 +173,7 @@ export function segmentRates(config: BankConfig, pair: PairConfig, agg: { bid: b
   const tick = p.tick;
   const up = (v: bigint) => ((v + tick - 1n) / tick) * tick;
   const down = (v: bigint) => (v / tick) * tick;
-  return { buy: up(agg.ask + m.buy), sell: down(agg.bid - m.sell), buyBips: m.buyBips, sellBips: m.sellBips };
+  return { buy: up(agg.ask + m.buy), sell: down(agg.bid - m.sell), buyPips: m.buyPips, sellPips: m.sellPips };
 }
 
 export function ratesView(config: BankConfig, pairSymbol: string, agg: { bid: bigint; ask: bigint; at: Date | string }, segment: string) {
