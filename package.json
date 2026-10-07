@@ -18,6 +18,7 @@
     "dev:demo-host": "pnpm --filter @p2p/demo-host dev",
     "build:web": "pnpm --filter @p2p/web build",
     "demo": "docker compose up --build",
+    "simulate": "tsx apps/api/src/simulate-cli.ts",
     "demo:walkthrough": "node --env-file=.env --import tsx scripts/demo-walkthrough.ts"
   },
   "devDependencies": {
