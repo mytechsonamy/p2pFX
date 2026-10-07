@@ -30,9 +30,10 @@ docker compose up --build      # or: pnpm demo
 ```
 
 Open **http://localhost:5174**: the demo bank app with Ayşe and Mehmet side by side. The stack generates
-its own demo keys, starts Postgres, the mock core banking service, the API and the web app, seeds every
-pair with a trade history and a resting order book, and runs order bots that keep the board moving (they post,
-cancel and trade among themselves, never taking a customer's order). Then, in a second terminal, the scripted end-to-end
+its own demo keys, starts Postgres, the mock core banking service, the API and the web app. The API keeps the
+board from looking empty with the bank's own liquidity: its ladder (BANK_MM) and its bot (BOT_MM) rest real bank
+orders around the LP price, are repriced as it moves, and never trade with each other (see
+[docs/v1.1.md](docs/v1.1.md)). Then, in a second terminal, the scripted end-to-end
 trade (narrated in Turkish) while the phones update live:
 
 ```sh
@@ -74,8 +75,9 @@ In the demo, sell USD as Ayşe and tap her offer in Mehmet's order book to buy i
 shows the same build in a second bank's colours. See [apps/web/README.md](apps/web/README.md) and
 [packages/sdk-bridge/README.md](packages/sdk-bridge/README.md).
 
-`pnpm demo:seed` fills the board with market-maker orders and trades, `pnpm demo:bots` keeps it moving and
-`pnpm demo:walkthrough` runs the scripted trade, all against this local setup.
+`pnpm demo:walkthrough` runs the scripted trade against this local setup. `pnpm simulate` runs the Phase 0
+simulation (a customer flow replayed through the matching engine under several scenarios, against the
+Direct-only baseline).
 
 ## Access
 
@@ -86,7 +88,7 @@ refuses to start when opened from a link in a browser (no host bridge) or framed
 `VITE_HOST_ORIGINS`, and the server sends `Content-Security-Policy: frame-ancestors` (`FRAME_ANCESTORS`) so
 browsers refuse other embedders. Without a bank-signed token the API answers nothing.
 
-Try a trade by hand (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`; `demo-mm-1` to `demo-mm-6` are the seeder's market makers):
+Try a trade by hand (demo customers: `demo-ayse`, `demo-mehmet`, `demo-zeynep`, `demo-ali`):
 
 ```sh
 login() { curl -s localhost:4000/v1/session -H 'content-type: application/json' \

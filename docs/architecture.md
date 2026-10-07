@@ -31,11 +31,11 @@ Each bank runs its own isolated copy of the platform (its own deployment and dat
 
 **Book price** is the customer-to-customer price that sits in the order book and is used for matching. The customer types a book price and the order ticket shows their all-in price before they confirm.
 
-**Bank commission** is a number of "bips" added to (buy) or subtracted from (sell) the book price, configured per pair and per side. One bip is 0.01 of the quote currency (`bipSize`, configurable), so the default 5 bips = 0.05 TRY per unit of FX. Confirmed by Musti on 2026-10-04: on a 1,000 USD trade the bank earns 1,000 × 0.05 on the buy side and 1,000 × 0.05 on the sell side.
+**Bank commission** is a number of "pips" added to (buy) or subtracted from (sell) the book price, configured per pair and per side (v1.1: or, with `mode: BPS`, a share of the book price in basis points). One pip is 0.0001 of the quote currency for USD/TRY (`pipSize`, per pair), so the default 500 pips = 0.05 TRY per unit of FX (before v1.1 the same amount was written as 5 bips of 0.01; stored configurations are converted ×100 on upgrade, amounts unchanged). Confirmed by Musti on 2026-10-04: on a 1,000 USD trade the bank earns 1,000 × 0.05 on the buy side and 1,000 × 0.05 on the sell side.
 
 **FX transaction tax (kambiyo vergisi)** is a configurable rate per side, applied to the TRY value of the trade, collected from the buyer and from the seller, and credited to the bank's tax-payable account. Rates are configuration, not code.
 
-Worked example, USD/TRY, commission 5 bips (0.05 TRY) per side, tax rate `t` per side, 1,000 USD:
+Worked example, USD/TRY, commission 500 pips (0.05 TRY) per side, tax rate `t` per side, 1,000 USD:
 
 | | Buyer | Seller |
 |---|---|---|
@@ -135,7 +135,7 @@ Customer identity and KYC stay at the bank. The launch token carries `customer_r
 ## 9. Data model
 
 - `customers` (id, customer_ref, segment)
-- pairs live in `config` (symbol, base, quote, decimals, tick size, min qty, price band, commission bips, bip size, enabled)
+- pairs live in `config` (symbol, base, quote, decimals, tick size, min qty, price band, commission mode and pips/bps, pip size, enabled)
 - `orders` (id, customer_id, pair, side, book_price, qty, filled_qty, validity `DAY|GTD|GTC`, expires_at, fx_account_id, try_account_id, hold_id, status `NEW|QUEUED|OPEN|PARTIAL|FILLED|CANCELLED|EXPIRED|REJECTED`, cancel_reason, pricing snapshot (commission and tax the customer confirmed), config_version, balance_mode, idempotency_key, created_at)
 - `fills` (id, pair, maker_order_id, taker_order_id, book_price, qty, buyer_effective_price, seller_effective_price, buyer_commission, seller_commission, buyer_tax, seller_tax, created_at)
 - `settlements` (id, fill_id, leg `BANK_BUY|BANK_SELL`, idempotency_key unique, core_txn_ref, receipt_ref, status `PENDING|SETTLED|FAILED_NEEDS_REVIEW|REVERSED`, attempts, last_error)

@@ -23,6 +23,7 @@ const { app, close } = await buildApp({
   liquidity: new HttpLiquidityAdapter(env('LIQUIDITY_URL', env('CORE_BANKING_URL', 'http://localhost:4100')), process.env.LIQUIDITY_API_KEY),
   priceIntervalMs: Number(process.env.PRICE_INTERVAL_MS ?? 1000),
   bankBookIntervalMs: Number(process.env.BANK_BOOK_INTERVAL_MS ?? 1000),
+  botIntervalMs: Number(process.env.BOT_INTERVAL_MS ?? 500),
   bankPublicKeyPem: env('BANK_JWT_PUBLIC_KEY').replace(/\\n/g, '\n'),
   sessionSecret: env('SESSION_SECRET'),
   opsToken: env('OPS_TOKEN'),
