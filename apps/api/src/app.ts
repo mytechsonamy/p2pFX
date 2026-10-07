@@ -210,6 +210,9 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   }
   // A configuration change (a source switched off, a halt, a disabled pair) reaches the bank's liquidity at once.
   config.onChange(() => {
+    // Cached LP prices were built under the old configuration: an aggregate resting on an LP switched off is no longer
+    // traded on (PriceEngine checks that at use), and a new one is built from the LPs still on.
+    void prices.refreshAll().catch((err) => app.log.warn({ err }, 'price refresh after a configuration change failed'));
     if (!exchange.running) return;
     void bankBook.enforce().catch((err) => app.log.error({ err }, 'withdrawing the bank ladder after a configuration change failed'));
     void bot.enforce().catch((err) => app.log.error({ err }, 'withdrawing the bot after a configuration change failed'));

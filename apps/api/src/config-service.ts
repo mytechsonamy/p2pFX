@@ -98,6 +98,8 @@ export class ConfigService {
    * against the current version; a configuration identical to the current one is refused.
    */
   async update(input: unknown, actor: string, reason: string, opts: { dryRun?: boolean; expectedVersion?: number } = {}) {
+    // The version this change is validated and diffed against; storing it is refused if another one landed meanwhile.
+    const base = this.get().version;
     const parsed = BankConfigSchema.safeParse(input);
     if (!parsed.success) throw badRequest('INVALID_CONFIG', 'configuration is invalid', parsed.error.issues);
     const issues = [...configIssues(parsed.data), ...(await this.instrumentChanges(this.get().data, parsed.data))];
@@ -110,7 +112,7 @@ export class ConfigService {
     if (opts.dryRun) return { ...this.get(), diff, dryRun: true };
     if (!diff.length) throw new ApiError(409, 'NO_CHANGE', 'nothing changed');
     requireReason(reason);
-    const saved = await this.save(parsed.data, actor, reason, diff);
+    const saved = await this.save(parsed.data, actor, reason, diff, undefined, base);
     return { ...saved, diff };
   }
 
@@ -139,12 +141,13 @@ export class ConfigService {
   /** Restores an earlier version as a new version. */
   async revert(version: number, actor: string, reason: string) {
     requireReason(reason);
+    const base = this.get().version;
     const data = await this.byVersion(version);
     const issues = await this.instrumentChanges(this.get().data, data);
     if (issues.length) throw badRequest('INVALID_CONFIG', 'this version cannot be restored', issues);
     const diff = diffConfig(this.get().data, data);
     if (!diff.length) throw new ApiError(409, 'NO_CHANGE', `version ${version} is the same as the current configuration`);
-    const saved = await this.save(data, actor, reason, diff, version);
+    const saved = await this.save(data, actor, reason, diff, version, base);
     return { ...saved, diff };
   }
 
@@ -219,8 +222,20 @@ export class ConfigService {
     for (const fn of this.listeners) fn(c);
   }
 
-  private async save(data: BankConfig, actor: string, reason: string, diff: ConfigChange[], revertedFrom?: number): Promise<VersionedConfig> {
+  /**
+   * Stores a new version. With `base`, atomically in the database: the table is locked against other writers and the
+   * latest stored version must still be `base` (an instance that has not seen a newer version yet, or two editors at
+   * once, get VERSION_CONFLICT instead of overwriting it).
+   */
+  private async save(data: BankConfig, actor: string, reason: string, diff: ConfigChange[], revertedFrom?: number, base?: number): Promise<VersionedConfig> {
     const version = await tx(this.db, async (client) => {
+      if (base !== undefined) {
+        await client.query('lock table config in share row exclusive mode');
+        const { rows: latest } = await client.query('select coalesce(max(version), 0)::int as v from config');
+        if (latest[0].v !== base) {
+          throw new ApiError(409, 'VERSION_CONFLICT', `the configuration changed (now v${latest[0].v}); reload and apply your change again`);
+        }
+      }
       const { rows } = await client.query(
         'insert into config (data, created_by, reason, diff, reverted_from) values ($1, $2, $3, $4, $5) returning version',
         [data, actor, reason, JSON.stringify(diff), revertedFrom ?? null],

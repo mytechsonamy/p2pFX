@@ -223,7 +223,8 @@ export class BotMarketMaker {
   /** Checks often; refreshes each `botMarketMaker.refreshMs`, and withdraws at once when it must. */
   start(intervalMs: number) {
     this.timer = setInterval(() => {
-      this.tick().catch((err) => this.log.error({ err }, 'bot market maker tick failed'));
+      // Refreshes only every `refreshMs`; the withdraw checks still run on every tick.
+      this.tick(false).catch((err) => this.log.error({ err }, 'bot market maker tick failed'));
     }, intervalMs);
   }
 
@@ -231,8 +232,8 @@ export class BotMarketMaker {
     if (this.timer) clearInterval(this.timer);
   }
 
-  /** One pass over every pair (`force` ignores the refresh interval: tests). */
-  async tick(force = true) {
+  /** One pass over every pair. `force` ignores the refresh interval (tests and explicit refreshes only). */
+  async tick(force = false) {
     if (this.running) return;
     this.running = true;
     try {
@@ -252,16 +253,33 @@ export class BotMarketMaker {
     }
   }
 
-  /** Withdraws the bot at once wherever it may not quote any more; places nothing. Runs on every configuration change. */
+  /**
+   * Withdraws the bot at once wherever it may not quote any more, and every bot strategy that is not the configured
+   * one (a strategy id changed while its orders rested); places nothing. Runs on every configuration change.
+   */
   async enforce() {
     const config = this.config.get().data;
     for (const pair of config.pairs) {
+      await this.withdrawOthers(config, pair);
       const off = !config.channels.botMarketMaker || !pair.enabled || !!haltReason(config, pair.symbol, 'bank');
       if (off && this.exchange.liquidity(pair.symbol, 'BOT_MM', config.botMarketMaker.strategyId).length) await this.replace(config, pair, []);
     }
   }
 
+  /** Withdraws the live orders of every BOT_MM strategy on the pair other than the configured one. */
+  private async withdrawOthers(config: BankConfig, pair: PairConfig) {
+    for (const strategyId of this.exchange.strategies(pair.symbol, 'BOT_MM')) {
+      if (strategyId === config.botMarketMaker.strategyId) continue;
+      const account = await this.account.for(config, pair);
+      if (!account) continue;
+      await this.exchange.replaceLiquidity({
+        pair: pair.symbol, source: 'BOT_MM', strategyId, account, levels: [], reason: 'WITHDRAWN', generationId: await this.exchange.nextGenerationId(),
+      });
+    }
+  }
+
   private async syncPair(config: BankConfig, pair: PairConfig, refresh: boolean) {
+    await this.withdrawOthers(config, pair);
     const bot = config.botMarketMaker;
     const live = this.exchange.liquidity(pair.symbol, 'BOT_MM', bot.strategyId);
     const agg = this.prices.fresh(pair.symbol);

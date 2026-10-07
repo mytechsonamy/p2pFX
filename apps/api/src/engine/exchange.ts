@@ -2,6 +2,7 @@ import { formatDecimal, formatPrice, parsePrice, findPair, isMarketOpen, type Si
 import { OrderBook, matchIncoming, type BookOrder, type MatchCandidate, type MatchDecision } from '@p2p/matching';
 import { fromSnapshot, pricingParams, priceSide, toSnapshot, withoutCommission } from '@p2p/pricing';
 import { CoreBankingError, type CoreBankingAdapter } from '@p2p/core-adapter';
+import { hostname } from 'node:os';
 import type { FastifyBaseLogger } from 'fastify';
 import type pg from 'pg';
 import { tx, type Db, type Queryable } from '../db/pool.js';
@@ -113,6 +114,8 @@ export class Exchange {
   private lock?: pg.PoolClient;
   /** False until this instance holds the matching lock, and again if it loses it. */
   private active = false;
+  /** The leadership epoch this instance took with the lock; every matching write checks it (see fence). */
+  private epoch?: bigint;
   /** Fills whose legs wait to be posted (ASYNC dispatch), in commit order. */
   private readonly settleQueue: string[] = [];
   private draining?: Promise<void>;
@@ -158,6 +161,11 @@ export class Exchange {
       this.log.fatal({ err }, 'matching lock connection lost; matching stopped on this instance');
     });
     this.lock = lock;
+    const { rows: led } = await this.db.query(
+      `update matching_leader set epoch = epoch + 1, holder = $1, since = now() where id = 1 returning epoch`,
+      [`${process.pid}@${hostname()}`],
+    );
+    this.epoch = BigInt(led[0].epoch);
     this.active = true;
 
     const interrupted = await loadOrders(this.db, `o.status = 'NEW'`, []);
@@ -182,6 +190,25 @@ export class Exchange {
     return this.active;
   }
 
+  /** At the start of every queued command: work queued before leadership was lost never runs. */
+  private assertLeader() {
+    if (!this.active) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
+  }
+
+  /**
+   * Inside each matching write's transaction: the leadership epoch must still be ours. A takeover bumps it (waiting for
+   * writes holding the row), so a former leader whose lock connection dropped cannot commit anything after that,
+   * whatever its in-memory flag says. On a mismatch this instance stops matching.
+   */
+  private async fence(client: Queryable) {
+    const { rows } = await client.query('select epoch from matching_leader where id = 1 for share');
+    if (this.epoch === undefined || BigInt(rows[0].epoch) !== this.epoch) {
+      this.active = false;
+      this.log.fatal({ ours: this.epoch?.toString(), current: rows[0]?.epoch }, 'matching leadership lost to another instance; matching stopped');
+      throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching leadership moved to another instance');
+    }
+  }
+
   /** Releases the matching lock (shutdown). */
   async stop() {
     this.active = false;
@@ -197,7 +224,10 @@ export class Exchange {
       if (!this.active) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
       const p = pair ?? (await loadOrder(this.db, orderId))?.pair;
       if (!p) throw new Error(`order ${orderId} not found`);
-      return this.worker(p).run(() => this.process(this.worker(p), orderId));
+      return this.worker(p).run(() => {
+        this.assertLeader();
+        return this.process(this.worker(p), orderId);
+      });
     })();
   }
 
@@ -209,6 +239,7 @@ export class Exchange {
     if (!row) return undefined;
     const w = this.worker(row.pair);
     return w.run(async () => {
+      this.assertLeader();
       const current = await loadOrder(this.db, orderId);
       if (!current || !['OPEN', 'PARTIAL', 'QUEUED'].includes(current.status)) return current;
       w.book.remove(orderId);
@@ -282,6 +313,13 @@ export class Exchange {
     return best;
   }
 
+  /** Strategies of a source with live orders on a pair (from the book). */
+  strategies(pair: string, source: string): string[] {
+    const w = this.workers.get(pair);
+    if (!w) return [];
+    return [...new Set([...w.resting.values()].filter((r) => r.source === source && r.strategy_id).map((r) => r.strategy_id as string))];
+  }
+
   /** The live orders of one bank liquidity strategy on a pair (from the book). */
   liquidity(pair: string, source: string, strategyId: string) {
     const w = this.workers.get(pair);
@@ -316,6 +354,7 @@ export class Exchange {
     if (!this.active) return Promise.reject(new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance'));
     const w = this.worker(cmd.pair);
     return w.run(async () => {
+      this.assertLeader();
       const key = `${cmd.source}:${cmd.strategyId}`;
       const result: GenerationResult = { applied: false, generationId: cmd.generationId.toString(), placed: 0, removed: 0, skipped: 0, fills: [] };
       const last = w.generations.get(key);
@@ -332,6 +371,7 @@ export class Exchange {
       const expiresAt = new Date(now.getTime() + config.validity.maxValidityDays * 86_400_000);
       const inserted: string[] = [];
       await tx(this.db, async (client) => {
+        await this.fence(client);
         if (old.length) {
           await client.query(
             `update orders set status = 'CANCELLED', cancel_reason = $2, updated_at = now() where id = any($1) and status in ('OPEN', 'PARTIAL')`,
@@ -665,6 +705,7 @@ export class Exchange {
     let committed: { fillId: string; fill: FillRow; updated: Record<string, OrderRow> };
     try {
       committed = await tx(this.db, async (client) => {
+        await this.fence(client);
         const { rows } = await client.query(
           `insert into fills (pair, maker_order_id, taker_order_id, buy_order_id, sell_order_id, book_price, qty, notional,
              buyer_effective_price, seller_effective_price, buyer_commission, seller_commission, buyer_tax, seller_tax,
@@ -776,6 +817,11 @@ export class Exchange {
 
   private async drain() {
     for (let id = this.settleQueue.shift(); id; id = this.settleQueue.shift()) {
+      // A former leader sends nothing more to core banking: the legs stay PENDING for the new leader's recovery.
+      if (!this.active) {
+        this.settleQueue.length = 0;
+        return;
+      }
       try {
         await this.settlement.settle(id);
       } catch (err) {
@@ -863,6 +909,7 @@ export class Exchange {
 
   private async closeOrder(o: OrderRow, status: 'CANCELLED' | 'EXPIRED', reason: string): Promise<OrderRow> {
     await tx(this.db, async (client) => {
+      await this.fence(client);
       const res = await client.query(
         `update orders set status = $2, cancel_reason = $3, updated_at = now() where id = $1 and status in ('NEW', 'QUEUED', 'OPEN', 'PARTIAL')`,
         [o.id, status, reason],

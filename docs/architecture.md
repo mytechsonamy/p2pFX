@@ -1,6 +1,8 @@
 # P2P FX Exchange: Architecture and MVP Scope
 
-Status: draft v2 (2026-10-04). Scope: working prototype.
+Status: draft v2 (2026-10-04), updated for v1.1 (2026-10-07). Scope: working prototype.
+v1.1 (liquidity sources, pips, market orders, ASYNC settlement, shared inventory, leadership fencing) is described in
+[v1.1.md](v1.1.md); where the two differ, v1.1.md is current.
 v2 changes: the bank is the legal counterparty to every trade, one isolated deployment per bank, parametric bank commission and FX transaction tax (kambiyo vergisi), optional balance blocking, order validity.
 
 ## 1. What we are building
@@ -55,7 +57,8 @@ MVP pairs are FX against TRY (USD/TRY, EUR/TRY, GBP/TRY, configurable). Cross pa
 
 ## 4. Order rules
 
-- Limit orders only: buy or sell a quantity of FX at a book price. Partial fills allowed.
+- Limit orders: buy or sell a quantity of FX at a book price. Partial fills allowed. v1.1 adds market orders (IOC,
+  bound to the protection price the customer confirmed); see v1.1.md.
 - Matching: price-time priority. A fill executes at the resting (maker) order's book price, so an aggressive buyer can get a better price than they entered. Commission and tax are recalculated on the actual fill price.
 - Validity, chosen by the customer from the options the bank enables:
   - `DAY`: until the end of today's trading session.
@@ -96,7 +99,7 @@ Flow per fill (saga with idempotency):
 4. Mark `SETTLED`, update orders, notify both customers, generate receipts (dekont) through the core.
 5. If a leg fails after holds were placed (should be rare, since holds guarantee funds), retry with backoff; if it still fails, reverse any posted leg and mark `FAILED_NEEDS_REVIEW` for the operations screen.
 
-The prototype settles each fill inside the pair's matching worker before taking the next match, in both modes. That keeps hold adjustments simple (a partially filled buy order's hold is shrunk to what its remainder needs, at its limit price, right after each fill). A bank with higher volume can move settlement to its own queue in `block` mode, since funds are already held.
+Until v1.1 the prototype settled each fill inside the pair's matching worker before taking the next match (`settlement.dispatch: INLINE`, still available). Since v1.1 the default is `ASYNC`: the fill's PENDING legs are its outbox and are posted behind matching, with holds kept per leg (v1.1.md). That keeps hold adjustments simple (a partially filled buy order's hold is shrunk to what its remainder needs, at its limit price, right after each fill). A bank with higher volume can move settlement to its own queue in `block` mode, since funds are already held.
 
 ## 7. Bank integration (`CoreBankingAdapter`)
 

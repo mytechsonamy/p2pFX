@@ -138,8 +138,22 @@ export class PriceEngine {
     return a && this.live(a) ? a : undefined;
   }
 
+  /**
+   * Whether an aggregate may still be traded on: its LP quotes are within the staleness limit and neither LP behind
+   * its bid or ask has been switched off since it was built (the kill switch is checked against the configuration of
+   * the moment, not the one of the refresh).
+   */
   private live(a: Aggregate): boolean {
-    return this.clock().getTime() - a.sourceAt.getTime() <= this.config.get().data.dealing.maxStalenessMs;
+    const c = this.config.get().data;
+    if (c.killSwitch.disabledLps.includes(a.bidLp) || c.killSwitch.disabledLps.includes(a.askLp)) return false;
+    return this.clock().getTime() - a.sourceAt.getTime() <= c.dealing.maxStalenessMs;
+  }
+
+  /** Whether one LP's quote may still be traded on now: the LP is switched on and its own quote is fresh. */
+  quoteFresh(q: LpQuote): boolean {
+    const c = this.config.get().data;
+    if (c.killSwitch.disabledLps.includes(q.lp)) return false;
+    return this.clock().getTime() - new Date(q.at).getTime() <= c.dealing.maxStalenessMs;
   }
 }
 

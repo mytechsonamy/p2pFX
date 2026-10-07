@@ -310,12 +310,12 @@ describe('v1.1 acceptance', () => {
   it('T14: a stale feed stops the bank ladder and the bot', async () => {
     await start();
     await h.ctx.bankBook.tick();
-    await h.ctx.bot.tick();
+    await h.ctx.bot.tick(true);
     const sources = async () => (await h.ctx.db.query(`select distinct source from orders where status = 'OPEN' order by source`)).rows.map((r) => r.source);
     expect(await sources()).toEqual(['BANK_MM', 'BOT_MM']);
     h.clock.now = new Date(h.clock.now.getTime() + DEFAULT_CONFIG.dealing.maxStalenessMs + 1);
     await h.ctx.bankBook.tick();
-    await h.ctx.bot.tick();
+    await h.ctx.bot.tick(true);
     expect(await sources()).toEqual([]);
     expect(depth()).toMatchObject({ asks: [], bids: [] });
   });
