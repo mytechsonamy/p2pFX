@@ -122,9 +122,8 @@ export class DealingService {
     }
     // Committed: the reservation becomes position (once), and auto-hedge looks at it (in the background).
     reservation.commit();
+    // A deal core banking definitely rejects leaves the position again, inside settle (once, coordinated with reloads).
     const settled = await this.settle(deal, session.customerRef, pair);
-    // Core banking definitely rejected the deal: it never happened, and leaves the position again.
-    if (settled.status === 'REJECTED') this.positions.reverseExecution(pair.symbol, delta);
     const view = dealView(settled, pair);
     if (settled.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
     // Only a deal that exists for the customer is announced (a rejected one is just the error above).
@@ -204,7 +203,7 @@ export class DealingService {
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         this.log.warn({ dealId: deal.id, attempt, err: lastError }, 'bank deal posting failed');
-        if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') return this.update(deal.id, 'REJECTED', lastError);
+        if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') return this.reject(deal, pair, lastError);
         if (err instanceof CoreBankingError && err.code !== 'UNAVAILABLE') break;
       }
     }
@@ -217,6 +216,32 @@ export class DealingService {
     }
     await audit(this.db, 'system', 'dealing.failed', { dealId: deal.id, error: lastError });
     return this.update(deal.id, 'FAILED_NEEDS_REVIEW', lastError);
+  }
+
+  /**
+   * Core banking definitely rejected the deal: it never happened. The status change and the position change are one
+   * coordinated step (see PositionKeeper.beginReversal): the position moves back only if this call is the one that
+   * moved the deal to REJECTED, so concurrent settlements of the same deal or a reload in between cannot apply it
+   * twice.
+   */
+  private async reject(deal: Record<string, any>, pair: PairConfig, error: string) {
+    const delta = deal.side === 'BUY' ? -BigInt(deal.qty) : BigInt(deal.qty);
+    const reversal = this.positions.beginReversal(pair.symbol, delta);
+    try {
+      const { rows } = await this.db.query(
+        `update bank_deals set status = 'REJECTED', last_error = $2, updated_at = now() where id = $1 and status <> 'REJECTED' returning *`,
+        [deal.id, error],
+      );
+      if (rows[0]) {
+        reversal.apply();
+        return rows[0];
+      }
+      reversal.abandon();
+      return (await this.db.query('select * from bank_deals where id = $1', [deal.id])).rows[0];
+    } catch (err) {
+      reversal.abandon();
+      throw err;
+    }
   }
 
   private async update(id: string, status: string, error: string | null, txnRef?: string, receiptRef?: string) {
@@ -249,8 +274,7 @@ export class DealingService {
     for (const d of rows) {
       const pair = findPair(this.config.get().data, d.pair);
       if (!pair) continue;
-      const settled = await this.settle(d, d.customer_ref, pair).catch((err) => this.log.error({ err, dealId: d.id }, 'resuming deal failed'));
-      if (settled?.status === 'REJECTED') await this.positions.reload(pair.symbol);
+      await this.settle(d, d.customer_ref, pair).catch((err) => this.log.error({ err, dealId: d.id }, 'resuming deal failed'));
     }
   }
 
@@ -266,7 +290,6 @@ export class DealingService {
     await audit(this.db, actor, 'dealing.retry', { dealId });
     const { pair } = this.pair(d.pair);
     const settled = await this.settle(d, d.customer_ref, pair);
-    if (settled.status === 'REJECTED') await this.positions.reload(pair.symbol);
     return dealView(settled, pair);
   }
 

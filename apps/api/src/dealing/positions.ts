@@ -123,6 +123,11 @@ export class PositionKeeper {
    */
   private readonly reserved = new Map<string, Map<number, bigint>>();
   private nextReservation = 0;
+  /**
+   * Changes of the committed part in flight between the database and memory (a Direct deal being marked REJECTED):
+   * while one is open a reload's read may or may not include it, so it is not applied.
+   */
+  private readonly transitions = new Map<string, number>();
   /** Bumped on every in-memory change of the committed part, so a reload that raced one is not applied over it. */
   private epoch = 0;
 
@@ -160,7 +165,7 @@ export class PositionKeeper {
   async reload(pairSymbol: string) {
     const pair = findPair(this.config.get().data, pairSymbol);
     if (!pair) return;
-    const open = () => this.reserved.get(pair.symbol)?.size ?? 0;
+    const open = () => (this.reserved.get(pair.symbol)?.size ?? 0) + (this.transitions.get(pair.symbol) ?? 0);
     for (let i = 0; i < 10; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 5 * i));
       if (open()) continue;
@@ -175,11 +180,26 @@ export class PositionKeeper {
     this.log.warn({ pair: pair.symbol }, 'position reload kept racing executions; the in-memory position stays as it is');
   }
 
-  /** The exposure the inventory guard works with: committed plus reserved (base minor units, + long). */
+  /** The expected position: committed plus every open reservation, netted (base minor units, + long). */
   current(pairSymbol: string): bigint {
     let sum = this.committed.get(pairSymbol) ?? 0n;
     for (const d of this.reserved.get(pairSymbol)?.values() ?? []) sum += d;
     return sum;
+  }
+
+  /**
+   * The worst case on each side, which the cap is checked against: committed plus only the open reservations that move
+   * the position that way. A pending execution the other way may still fail, so it never makes room.
+   */
+  bounds(pairSymbol: string): { long: bigint; short: bigint } {
+    const committed = this.committedPosition(pairSymbol);
+    let buys = 0n;
+    let sells = 0n;
+    for (const d of this.reserved.get(pairSymbol)?.values() ?? []) {
+      if (d > 0n) buys += d;
+      else sells += d;
+    }
+    return { long: committed + buys, short: committed + sells };
   }
 
   /** The committed part of the position, without reservations. */
@@ -202,19 +222,21 @@ export class PositionKeeper {
   headroom(pairSymbol: string, bankSide: 'BUY' | 'SELL', resting = 0n): bigint | undefined {
     const max = this.maxPosition(pairSymbol);
     if (max === undefined) return undefined;
-    const pos = this.current(pairSymbol);
-    const room = (bankSide === 'BUY' ? max - pos : max + pos) - resting;
+    const b = this.bounds(pairSymbol);
+    const room = (bankSide === 'BUY' ? max - b.long : max + b.short) - resting;
     return room > 0n ? room : 0n;
   }
 
-  /** Whether a principal execution of `delta` keeps the exposure within the cap (one that reduces it always may). */
+  /**
+   * Whether a principal execution of `delta` keeps the worst case on its side within the cap: a buy against committed
+   * plus pending buys, a sell against committed plus pending sells. A trade that brings a position already past the cap
+   * back towards it is allowed by the same check.
+   */
   allows(pairSymbol: string, delta: bigint): boolean {
     const max = this.maxPosition(pairSymbol);
     if (max === undefined || delta === 0n) return true;
-    const pos = this.current(pairSymbol);
-    const next = pos + delta;
-    const abs = (v: bigint) => (v < 0n ? -v : v);
-    return abs(next) <= max || abs(next) < abs(pos);
+    const b = this.bounds(pairSymbol);
+    return delta > 0n ? b.long + delta <= max : b.short + delta >= -max;
   }
 
   /**
@@ -266,9 +288,29 @@ export class PositionKeeper {
     this.afterDeal(pairSymbol).catch(() => {});
   }
 
-  /** A committed execution turned out never to have happened (a Direct deal core banking rejected). */
-  reverseExecution(pairSymbol: string, delta: bigint) {
-    this.change(pairSymbol, -delta);
+  /**
+   * A committed execution that may turn out never to have happened (a Direct deal core banking rejects), as one step
+   * coordinated with reloads: open it before the database write, then `apply` it only if that write changed the
+   * record (once per execution), or `abandon` it. Reloads are not applied while it is open, and its change bumps the
+   * epoch, so a read taken before or after the write is never combined with it.
+   */
+  beginReversal(pairSymbol: string, delta: bigint): { apply(): void; abandon(): void } {
+    this.transitions.set(pairSymbol, (this.transitions.get(pairSymbol) ?? 0) + 1);
+    let open = true;
+    const close = () => {
+      if (!open) return false;
+      open = false;
+      this.transitions.set(pairSymbol, (this.transitions.get(pairSymbol) ?? 1) - 1);
+      return true;
+    };
+    return {
+      apply: () => {
+        if (close()) this.change(pairSymbol, -delta);
+      },
+      abandon: () => {
+        close();
+      },
+    };
   }
 
   private change(pairSymbol: string, delta: bigint) {

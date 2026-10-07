@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useExchange, usePair } from '../store';
 import { Breakdown, Row, Segmented, Sheet } from '../components';
 import { assetName, compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
@@ -134,10 +134,20 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
   );
 }
 
+/**
+ * The ticket's quote, fetched again when the inputs change or on `requote()`. requote drops the current quote at once
+ * (nothing can be confirmed from it any more) and fetches a new one.
+ */
 function useQuote(pair: PairInfo, side: Side, type: OrderType, qty?: string, price?: string) {
   const { api, errorText } = useExchange();
   const [state, setState] = useState<{ quote?: QuoteBreakdown; error?: string; loading: boolean }>({ loading: false });
+  const [round, setRound] = useState(0);
   const seq = useRef(0);
+  const requote = useCallback(() => {
+    seq.current++;
+    setState({ loading: true });
+    setRound((r) => r + 1);
+  }, []);
   useEffect(() => {
     const n = ++seq.current;
     if (!qty || (type === 'LIMIT' && !price)) return setState({ loading: false });
@@ -149,8 +159,8 @@ function useQuote(pair: PairInfo, side: Side, type: OrderType, qty?: string, pri
       );
     }, 250);
     return () => clearTimeout(timer);
-  }, [api, errorText, pair.symbol, side, type, qty, price]);
-  return state;
+  }, [api, errorText, pair.symbol, side, type, qty, price, round]);
+  return { ...state, requote };
 }
 
 function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; setDraft: React.Dispatch<React.SetStateAction<Draft>> }) {
@@ -171,7 +181,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
 
   const qty = toApiDecimal(draft.qty);
   const price = toApiDecimal(draft.price);
-  const { quote, error, loading } = useQuote(pair, draft.side, draft.type, qty, market ? undefined : price);
+  const { quote, error, loading, requote } = useQuote(pair, draft.side, draft.type, qty, market ? undefined : price);
 
   const fxAccount = accounts.find((a) => a.currency === pair.base);
   const tryAccount = accounts.find((a) => a.currency === pair.quote);
@@ -344,6 +354,11 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
           order={confirming.order}
           quote={confirming.quote}
           onClose={() => setConfirming(null)}
+          onRequote={() => {
+            // The confirmed protection price no longer holds: a new quote (price, fees, tax, total) and a new confirmation.
+            setConfirming(null);
+            requote();
+          }}
           onPlaced={() => {
             setConfirming(null);
             setDraft((d) => ({ ...d, qty: '' }));
@@ -354,7 +369,9 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
   );
 }
 
-function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInfo; order: PlaceOrder; quote: QuoteBreakdown; onClose: () => void; onPlaced: () => void }) {
+function ConfirmSheet({
+  pair, order, quote, onClose, onRequote, onPlaced,
+}: { pair: PairInfo; order: PlaceOrder; quote: QuoteBreakdown; onClose: () => void; onRequote: () => void; onPlaced: () => void }) {
   const { api, t, locale, config, accounts, toast, errorText, upsertOrder, refreshAccounts, track } = useExchange();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -378,10 +395,11 @@ function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInf
       toast(t('confirm.placed'), 'success');
       onPlaced();
     } catch (e) {
-      // The price moved against the customer after they confirmed: back to the ticket, which shows the new quote.
+      // The price moved against the customer after they confirmed: back to the ticket, which fetches a new quote and
+      // keeps Continue off until it is there. The next confirmation is a new sheet with a new idempotency key.
       if (e instanceof ApiError && e.code === 'PROTECTION_PRICE_CHANGED') {
         toast(errorText(e), 'error');
-        onClose();
+        onRequote();
         return;
       }
       setError(errorText(e));

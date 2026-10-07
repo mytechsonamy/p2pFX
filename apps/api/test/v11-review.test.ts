@@ -198,6 +198,121 @@ describe('2–3: one atomic inventory reservation for Direct, the ladder and the
   });
 });
 
+describe('re-review F01–F02: pending executions never make room, a rejection leaves the position once', () => {
+  it('F01: a pending bank buy waiting on its hold does not let Direct sell past the cap; its failure leaves the cap intact', async () => {
+    let enter!: () => void;
+    const entered = new Promise<void>((r) => (enter = r));
+    let fail!: () => void;
+    const gate = new Promise<void>((r) => (fail = r));
+    class GatedBank extends MockCoreBank {
+      gated?: string;
+      override async placeHold(accountId: string, amount: bigint, ref: string) {
+        if (accountId === this.gated) {
+          enter();
+          await gate;
+          throw new CoreBankingError('INSUFFICIENT_FUNDS', 'bank TRY account short');
+        }
+        return super.placeHold(accountId, amount, ref);
+      }
+    }
+    const bank = new GatedBank();
+    await start({ bank, config: base((c) => (c.inventory.maxPosition = { USD: '1500' })) });
+    h.customer('ali', { USD: '1000', TRY: '0' });
+    h.customer('ayse', { USD: '0', TRY: '200000' });
+    await liquidity('BANK_MM', [['BUY', '49.05', '1000']]);
+    const ayse = await h.login('ayse');
+    const ali = await h.login('ali');
+
+    // Ali sells into the bank's bid: +1000 USD reserved, the fill waits for the hold on the bank's TRY.
+    bank.gated = (await bankAccount()).tryAccountId;
+    const order = h.app.inject({
+      method: 'POST', url: '/v1/orders', headers: { authorization: `Bearer ${ali}`, 'idempotency-key': 'f01' },
+      payload: { pair: 'USDTRY', side: 'SELL', qty: '1000', price: '49.05', validity: 'GTC' },
+    });
+    await entered;
+    expect(h.ctx.positions.reservations('USDTRY')).toEqual([units('1000')]);
+    expect(h.ctx.positions.bounds('USDTRY')).toEqual({ long: units('1000'), short: 0n });
+
+    // Direct: the bank selling 2000 would be −2000 if the pending buy fails. Refused; 1500 fits.
+    const inject = (url: string, payload: object) => h.app.inject({ method: 'POST', url, headers: { authorization: `Bearer ${ayse}` }, payload });
+    const big = await inject('/v1/bank/quotes', { pair: 'USDTRY', side: 'BUY', qty: '2000' });
+    expect(big.json().error).toBe('INVENTORY_LIMIT');
+    const quote = (await inject('/v1/bank/quotes', { pair: 'USDTRY', side: 'BUY', qty: '1500' })).json();
+    expect((await inject('/v1/bank/deals', { quoteId: quote.id })).statusCode).toBe(201);
+    expect(h.ctx.positions.bounds('USDTRY')).toEqual({ long: units('1000') - units('1500'), short: -units('1500') });
+    // A further sale is refused even now, while the pending buy is still open.
+    expect(h.ctx.positions.allows('USDTRY', -units('1'))).toBe(false);
+
+    // The bank's hold fails: the board fill does not happen and its reservation goes.
+    fail();
+    await order;
+    await h.ctx.exchange.idle();
+    await h.ctx.positions.idle();
+    expect(h.ctx.positions.reservations('USDTRY')).toEqual([]);
+    expect(position()).toBe(-units('1500'));
+    const total = (await h.ctx.db.query('select coalesce(sum(position_delta), 0)::bigint as d from principal_executions')).rows[0].d;
+    expect(BigInt(total)).toBe(-units('1500'));
+  });
+
+  it('F01: headroom for the ladder counts pending buys on the buy side and pending sells on the sell side only', async () => {
+    await start({ config: base((c) => (c.inventory.maxPosition = { USD: '1500' })) });
+    const p = h.ctx.positions;
+    const buy = p.reserve('USDTRY', units('1000'));
+    const sell = p.reserve('USDTRY', -units('400'));
+    expect(p.headroom('USDTRY', 'BUY')).toBe(units('500'));
+    expect(p.headroom('USDTRY', 'SELL')).toBe(units('1100'));
+    expect(p.tryReserve('USDTRY', -units('1101'))).toBeUndefined();
+    // Releases in either order leave both sides where they started.
+    buy.release();
+    sell.commit();
+    expect(p.bounds('USDTRY')).toEqual({ long: -units('400'), short: -units('400') });
+    expect(p.headroom('USDTRY', 'SELL')).toBe(units('1100'));
+  });
+
+  it('F02: a reload landing between the REJECTED write and the memory update never takes the deal out twice', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    class RejectingBank extends MockCoreBank {
+      override async postFxTransaction(_r: FxTransactionRequest): Promise<never> {
+        await gate;
+        throw new CoreBankingError('INSUFFICIENT_FUNDS', 'insufficient funds');
+      }
+    }
+    await start({ bank: new RejectingBank() });
+    h.customer('ayse', { USD: '0', TRY: '100000' });
+    const ayse = await h.login('ayse');
+    const quote = (await h.req('POST', '/v1/bank/quotes', ayse, { pair: 'USDTRY', side: 'BUY', qty: '1000' })).body;
+
+    // Real database, real reload: right after the REJECTED update commits, a reload runs before execute continues.
+    const db = h.ctx.db as unknown as { query: (...a: unknown[]) => Promise<unknown> };
+    const query = db.query.bind(h.ctx.db);
+    let reloads = 0;
+    db.query = async (...a: unknown[]) => {
+      const res = await query(...a);
+      if (typeof a[0] === 'string' && a[0].includes(`set status = 'REJECTED'`)) {
+        reloads++;
+        await h.ctx.positions.reload('USDTRY');
+      }
+      return res;
+    };
+    const deal = h.app.inject({ method: 'POST', url: '/v1/bank/deals', headers: { authorization: `Bearer ${ayse}` }, payload: { quoteId: quote.id } });
+    for (let i = 0; i < 100 && h.ctx.positions.committedPosition('USDTRY') === 0n; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(position()).toBe(-units('1000'));
+    release();
+    expect((await deal).statusCode).toBe(422);
+    db.query = query;
+    expect(reloads).toBe(1);
+    expect(position()).toBe(0n);
+    await h.ctx.positions.reload('USDTRY');
+    expect(position()).toBe(0n);
+
+    // A second settlement of the same deal (resume, retry) finds it REJECTED already and changes nothing.
+    await h.ctx.dealing.resumePending();
+    await h.ctx.positions.reload('USDTRY');
+    expect(position()).toBe(0n);
+  });
+});
+
 describe('5: a firm board fill stays in the position whatever its settlement status', () => {
   it('a fill whose settlement went to review still counts after a reload', async () => {
     class RefusingBank extends MockCoreBank {
