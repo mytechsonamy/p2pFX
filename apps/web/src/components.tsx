@@ -58,7 +58,8 @@ export function Breakdown({ q, pair, compact }: { q: QuoteBreakdown; pair: PairI
   const money = (v: string) => formatMoney(v, q.currency, locale, pair.quoteDecimals);
   const price = (v: string) => `${formatPrice(v, locale)} ${currencySymbol(q.currency)}`;
   const buy = q.side === 'BUY';
-  const bips = Math.round(Number(q.commissionPerUnit) / Number(pair.bipSize));
+  const bps = pair.commission?.mode === 'BPS' ? (buy ? pair.commission.buy : pair.commission.sell) : undefined;
+  const pips = Math.round(Number(q.commissionPerUnit) / Number(pair.pipSize));
   const qty = `${formatDecimal(q.qty, locale, pair.baseDecimals)} ${currencySymbol(pair.base)}`;
   return (
     <div className="breakdown">
@@ -66,7 +67,11 @@ export function Breakdown({ q, pair, compact }: { q: QuoteBreakdown; pair: PairI
       <Row
         label={t('quote.commission')}
         value={`${buy ? '+' : '−'} ${formatPrice(q.commissionPerUnit, locale)}`}
-        hint={t('quote.commissionPerUnit', { amount: price(q.commissionPerUnit), base: currencySymbol(pair.base), bips })}
+        hint={
+          bps !== undefined
+            ? t('quote.commissionBps', { amount: price(q.commissionPerUnit), base: currencySymbol(pair.base), pct: formatDecimal(String(bps / 100), locale, 2) })
+            : t('quote.commissionPips', { amount: price(q.commissionPerUnit), base: currencySymbol(pair.base), pips })
+        }
       />
       <Row label={t('quote.effectivePrice')} value={price(q.effectivePrice)} strong />
       <div className="divider" />

@@ -8,10 +8,11 @@ import { BankRow } from '../bank';
 /** The live market board: the day's numbers, full depth, a depth chart and the trade tape. */
 export function BoardScreen() {
   const pair = usePair();
+  const { config } = useExchange();
   return (
     <div className="board">
       <Summary pair={pair} />
-      <BankRow pair={pair} />
+      {config.presentation !== 'UNIFIED' && <BankRow pair={pair} />}
       <DepthLadder pair={pair} />
       <DepthChart pair={pair} />
       <Tape pair={pair} />

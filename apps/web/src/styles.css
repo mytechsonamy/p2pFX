@@ -289,3 +289,16 @@ h2, h3 { margin: 0; }
 .countdown.urgent { color: var(--c-sell); font-weight: 600; }
 
 .rates-note { grid-column: 1 / -1; margin: 6px 0 0; font-size: 12px; color: var(--c-muted); }
+
+/* v1.1: bank liquidity marker (source disclosure) and the Direct quick path (UNIFIED presentation) */
+.bank-pill {
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
+.bank-quick {
+  display: block;
+  margin: 8px 0;
+  text-align: center;
+}
