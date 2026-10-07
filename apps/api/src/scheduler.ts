@@ -68,6 +68,8 @@ export class Scheduler {
     await this.exchange.retryHoldTasks();
     // Hedge clips the LPs have not confirmed are looked up on every tick until they are.
     await this.positions.resolveOpenClips().catch((err) => this.log.error({ err }, 'resolving open hedge clips failed'));
+    // The in-memory position is reloaded (a fill whose settlement failed comes out of it again).
+    await this.positions.load().catch((err) => this.log.error({ err }, 'reloading positions failed'));
     return { expired: due.length, released };
   }
 }

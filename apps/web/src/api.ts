@@ -1,4 +1,4 @@
-import type { Account, AppConfig, BankQuote, BankRates, Book, Fill, Order, PairStats, QuoteBreakdown, Rate, Receipt, Side, Trade, Validity } from './types';
+import type { Account, AppConfig, BankQuote, BankRates, Book, Fill, Order, PairStats, QuoteBreakdown, Rate, Receipt, Side, Trade, Validity, OrderType } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -15,9 +15,14 @@ export interface PlaceOrder {
   pair: string;
   side: Side;
   qty: string;
-  price: string;
-  validity: Validity;
+  type?: OrderType;
+  /** Limit orders only. */
+  price?: string;
+  /** Limit orders only. */
+  validity?: Validity;
   expiresAt?: string;
+  /** Market orders: the protection price the customer confirmed (binding). */
+  protectionPrice?: string;
 }
 
 /**
@@ -54,7 +59,7 @@ export class Api {
   trades = (pair: string, limit = 50) => this.request<Trade[]>('GET', `/v1/pairs/${pair}/trades?limit=${limit}`);
   stats = (pair: string) => this.request<PairStats>('GET', `/v1/pairs/${pair}/stats`);
   rate = (pair: string) => this.request<Rate>('GET', `/v1/pairs/${pair}/rate`);
-  quote = (q: { pair: string; side: Side; qty: string; price: string }) => this.request<QuoteBreakdown>('POST', '/v1/orders/quote', q);
+  quote = (q: { pair: string; side: Side; qty: string; price?: string; type?: OrderType }) => this.request<QuoteBreakdown>('POST', '/v1/orders/quote', q);
   orders = () => this.request<Order[]>('GET', '/v1/orders?limit=200');
   cancel = (id: string) => this.request<Order>('DELETE', `/v1/orders/${id}`);
   fills = () => this.request<Fill[]>('GET', '/v1/fills?limit=200');

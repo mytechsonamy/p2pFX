@@ -15,6 +15,20 @@ interface Trade {
   rate: bigint;
 }
 
+/** Capacity taken for one principal execution; it ends exactly once, by commit (into the position) or release. */
+export interface Reservation {
+  id: number;
+  delta: bigint;
+  commit(): void;
+  release(): void;
+  /**
+   * The execution may or may not have happened (a hedge clip whose LP outcome is unknown): it moves into the
+   * committed position (for netting, as the database counts it) and stays uncertain, so the cap's worst case also
+   * covers it not having happened, until a reload shows it resolved.
+   */
+  commitUncertain(): void;
+}
+
 export interface Position {
   pair: string;
   currency: string;
@@ -103,27 +117,239 @@ export class PositionKeeper {
     private readonly log: FastifyBaseLogger,
   ) {}
 
+  /**
+   * Committed position per pair, in base minor units: the database's principal executions and hedges, plus the
+   * executions committed since it was last read. Reloads replace only this part.
+   */
+  private readonly committed = new Map<string, bigint>();
+  /**
+   * Capacity taken by executions that have not committed yet (a board fill waiting on its holds and transaction, a
+   * Direct deal waiting on its claim), per pair and reservation id. Reloads never touch it: a reservation ends only
+   * by its own commit or release, each at most once.
+   */
+  private readonly reserved = new Map<string, Map<number, bigint>>();
+  private nextReservation = 0;
+  /**
+   * Changes of the committed part in flight between the database and memory (a Direct deal being marked REJECTED):
+   * while one is open a reload's read may or may not include it, so it is not applied.
+   */
+  private readonly transitions = new Map<string, number>();
+  /**
+   * Executions inside the committed position whose outcome is unknown (hedge clips sent, not confirmed): if one did
+   * not happen the position is committed − delta. Reloaded from the database with the committed part.
+   */
+  private readonly uncertain = new Map<string, bigint[]>();
+  /** Bumped on every in-memory change of the committed part, so a reload that raced one is not applied over it. */
+  private epoch = 0;
+
   async position(pair: PairConfig): Promise<Position> {
-    // Customer BUY → the bank sells. Only settled deals change the position. P2P fills where the bank's own
-    // account (its ladder in the book) was a side count too, unless their settlement failed or was reversed;
-    // other P2P fills are back-to-back and do not. Hedge clips count from the moment they are sent (PENDING,
-    // UNKNOWN), so a clip whose outcome is not known yet is never hedged a second time.
+    // The bank's principal executions (board fills with its ladder or bot and Direct deals) count from the moment
+    // they commit, not when settlement finishes. A board fill is firm whatever happens to its settlement legs
+    // (review, reversal): the obligation to the customer stands until it is economically cancelled, and no such flow
+    // exists. Only a Direct deal core banking definitely rejected never happened. Hedge clips count from the moment
+    // they are sent (PENDING, UNKNOWN), so a clip whose outcome is not known yet is never hedged a second time.
     const { rows } = await this.db.query(
       `select at, side, qty, rate from (
-         select created_at as at, seq, case side when 'BUY' then 'SELL' else 'BUY' end as side, qty, rate, 0 as src
-           from bank_deals where pair = $1 and status = 'SETTLED'
+         select e.created_at as at, e.seq, e.bank_side as side, e.qty, e.price as rate, 0 as src
+           from principal_executions e
+          where e.pair = $1
+            and not (e.channel = 'DIRECT' and exists (select 1 from bank_deals d where d.id = e.ref_id and d.status = 'REJECTED'))
          union all
          select created_at, seq, side, qty, rate, 1 from hedges where pair = $1 and status <> 'REJECTED'
-         union all
-         select f.created_at, f.seq, o.side, f.qty, f.book_price, 2 from fills f
-           join orders o on o.id in (f.buy_order_id, f.sell_order_id)
-           join customers c on c.id = o.customer_id
-          where f.pair = $1 and c.customer_ref = $2
-            and not exists (select 1 from settlements s where s.fill_id = f.id and s.status in ('FAILED_NEEDS_REVIEW', 'REVERSED', 'REVERSAL_PENDING'))
        ) t order by at, src, seq`,
-      [pair.symbol, this.config.get().data.bankBook.customerRef],
+      [pair.symbol],
     );
     return positionOf(pair, rows.map((r) => ({ side: r.side, qty: BigInt(r.qty), rate: parsePrice(r.rate) })));
+  }
+
+  /** Loads every pair's position into memory (startup). */
+  async load() {
+    for (const pair of this.config.get().data.pairs) await this.reload(pair.symbol);
+  }
+
+  /**
+   * Reloads one pair's committed position from the database. Reservations are kept as they are. The read is applied
+   * only if it was quiet: no execution committed in memory meanwhile, and no reservation of the pair was open during
+   * it (an open reservation may commit in the database before the read and in memory after it, which would count it
+   * twice). Otherwise it reads again.
+   */
+  async reload(pairSymbol: string) {
+    const pair = findPair(this.config.get().data, pairSymbol);
+    if (!pair) return;
+    const open = () => (this.reserved.get(pair.symbol)?.size ?? 0) + (this.transitions.get(pair.symbol) ?? 0);
+    for (let i = 0; i < 10; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 5 * i));
+      if (open()) continue;
+      const epoch = this.epoch;
+      const taken = this.nextReservation;
+      const p = await this.position(pair);
+      const unsure = await this.openClipDeltas(pair.symbol);
+      if (epoch === this.epoch && taken === this.nextReservation && !open()) {
+        this.committed.set(pair.symbol, p.qty);
+        this.uncertain.set(pair.symbol, unsure);
+        return;
+      }
+    }
+    this.log.warn({ pair: pair.symbol }, 'position reload kept racing executions; the in-memory position stays as it is');
+  }
+
+  /** The expected position: committed plus every open reservation, netted (base minor units, + long). */
+  current(pairSymbol: string): bigint {
+    let sum = this.committed.get(pairSymbol) ?? 0n;
+    for (const d of this.reserved.get(pairSymbol)?.values() ?? []) sum += d;
+    return sum;
+  }
+
+  /**
+   * The worst case on each side, which the cap is checked against: committed plus only the open reservations that move
+   * the position that way. A pending execution the other way may still fail, so it never makes room.
+   */
+  bounds(pairSymbol: string): { long: bigint; short: bigint } {
+    const committed = this.committedPosition(pairSymbol);
+    let buys = 0n;
+    let sells = 0n;
+    for (const d of this.reserved.get(pairSymbol)?.values() ?? []) {
+      if (d > 0n) buys += d;
+      else sells += d;
+    }
+    // An uncertain execution that did not happen takes its delta back out of the committed position.
+    for (const d of this.uncertain.get(pairSymbol) ?? []) {
+      if (d < 0n) buys -= d;
+      else sells -= d;
+    }
+    return { long: committed + buys, short: committed + sells };
+  }
+
+  /** The committed part of the position, without reservations. */
+  committedPosition(pairSymbol: string): bigint {
+    return this.committed.get(pairSymbol) ?? 0n;
+  }
+
+  /** The hard inventory cap for the pair's base currency (base minor units), if one is set. */
+  maxPosition(pairSymbol: string): bigint | undefined {
+    const c = this.config.get().data;
+    const pair = findPair(c, pairSymbol);
+    const max = pair && c.inventory.maxPosition[pair.base];
+    return pair && max ? parseDecimal(max, pair.baseDecimals) : undefined;
+  }
+
+  /**
+   * How much more the bank may buy (BUY) or sell of the pair's base, with `resting` already committed on that side by
+   * its other liquidity. Undefined: no cap.
+   */
+  headroom(pairSymbol: string, bankSide: 'BUY' | 'SELL', resting = 0n): bigint | undefined {
+    const max = this.maxPosition(pairSymbol);
+    if (max === undefined) return undefined;
+    const b = this.bounds(pairSymbol);
+    const room = (bankSide === 'BUY' ? max - b.long : max + b.short) - resting;
+    return room > 0n ? room : 0n;
+  }
+
+  /**
+   * Whether a principal execution of `delta` keeps the worst case on its side within the cap: a buy against committed
+   * plus pending buys, a sell against committed plus pending sells. A trade that brings a position already past the cap
+   * back towards it is allowed by the same check.
+   */
+  allows(pairSymbol: string, delta: bigint): boolean {
+    const max = this.maxPosition(pairSymbol);
+    if (max === undefined || delta === 0n) return true;
+    const b = this.bounds(pairSymbol);
+    return delta > 0n ? b.long + delta <= max : b.short + delta >= -max;
+  }
+
+  /**
+   * Takes capacity for a principal execution before anything is awaited (Direct claim, board fill holds and
+   * transaction), so two executions at once can never both use the last headroom. The check and the take happen
+   * in one synchronous step. Undefined when the cap does not allow it.
+   */
+  tryReserve(pairSymbol: string, delta: bigint, opts: { hedge?: boolean } = {}): Reservation | undefined {
+    if (!this.allows(pairSymbol, delta)) return undefined;
+    const id = ++this.nextReservation;
+    let byId = this.reserved.get(pairSymbol);
+    if (!byId) this.reserved.set(pairSymbol, (byId = new Map()));
+    byId.set(id, delta);
+    let done = false;
+    const end = () => {
+      if (done) return false;
+      done = true;
+      byId!.delete(id);
+      return true;
+    };
+    return {
+      id,
+      delta,
+      commit: () => {
+        // Into the committed position in the same step it leaves the reservations: the exposure never dips.
+        if (!end()) return;
+        if (opts.hedge) this.change(pairSymbol, delta);
+        else this.afterExecution(pairSymbol, delta);
+      },
+      release: () => {
+        end();
+      },
+      commitUncertain: () => {
+        if (!end()) return;
+        this.uncertain.set(pairSymbol, [...(this.uncertain.get(pairSymbol) ?? []), delta]);
+        this.change(pairSymbol, delta);
+      },
+    };
+  }
+
+  /** Signed deltas of the pair's hedge clips sent and not confirmed (PENDING, UNKNOWN). */
+  private async openClipDeltas(pairSymbol: string): Promise<bigint[]> {
+    const { rows } = await this.db.query(
+      `select case side when 'BUY' then qty else -qty end::bigint as d from hedges where pair = $1 and status in ('PENDING', 'UNKNOWN')`,
+      [pairSymbol],
+    );
+    return rows.map((r) => BigInt(r.d));
+  }
+
+  /** As tryReserve, for Direct: a deal the cap does not allow is refused with INVENTORY_LIMIT. */
+  reserve(pairSymbol: string, delta: bigint): Reservation {
+    const r = this.tryReserve(pairSymbol, delta);
+    if (!r) throw new ApiError(422, 'INVENTORY_LIMIT', 'the bank cannot take more of this currency on this side right now');
+    return r;
+  }
+
+  /** Active reservations of a pair (operations, tests). */
+  reservations(pairSymbol: string): bigint[] {
+    return [...(this.reserved.get(pairSymbol)?.values() ?? [])];
+  }
+
+  /** A principal execution committed: the committed position moves now, and auto-hedge looks at it (in the background). */
+  afterExecution(pairSymbol: string, delta: bigint) {
+    this.change(pairSymbol, delta);
+    this.afterDeal(pairSymbol).catch(() => {});
+  }
+
+  /**
+   * A committed execution that may turn out never to have happened (a Direct deal core banking rejects), as one step
+   * coordinated with reloads: open it before the database write, then `apply` it only if that write changed the
+   * record (once per execution), or `abandon` it. Reloads are not applied while it is open, and its change bumps the
+   * epoch, so a read taken before or after the write is never combined with it.
+   */
+  beginReversal(pairSymbol: string, delta: bigint): { apply(): void; abandon(): void } {
+    this.transitions.set(pairSymbol, (this.transitions.get(pairSymbol) ?? 0) + 1);
+    let open = true;
+    const close = () => {
+      if (!open) return false;
+      open = false;
+      this.transitions.set(pairSymbol, (this.transitions.get(pairSymbol) ?? 1) - 1);
+      return true;
+    };
+    return {
+      apply: () => {
+        if (close()) this.change(pairSymbol, -delta);
+      },
+      abandon: () => {
+        close();
+      },
+    };
+  }
+
+  private change(pairSymbol: string, delta: bigint) {
+    this.epoch++;
+    this.committed.set(pairSymbol, this.committedPosition(pairSymbol) + delta);
   }
 
   /** Positions with unrealized P&L at the LP mid, and the limit. */
@@ -150,6 +376,7 @@ export class PositionKeeper {
         avgRate: p.qty === 0n ? null : formatPrice(p.avgRate),
         mid: mid === undefined ? null : formatPrice(mid),
         limit: c.dealing.positionLimits[pair.base] ?? null,
+        maxPosition: c.inventory.maxPosition[pair.base] ?? null,
         realizedPnl: q(p.realized),
         unrealizedPnl: q(unrealized),
         deals: rows[0].deals,
@@ -164,6 +391,11 @@ export class PositionKeeper {
 
   /** One hedge decision at a time per pair, so two deals finishing together cannot both hedge the same position. */
   private readonly hedgeChains = new Map<string, Promise<unknown>>();
+
+  /** Waits for hedge decisions in flight (tests, shutdown). */
+  async idle() {
+    await Promise.all([...this.hedgeChains.values()]);
+  }
 
   private serial<T>(pair: string, fn: () => Promise<T>): Promise<T> {
     const next = (this.hedgeChains.get(pair) ?? Promise.resolve()).then(fn, fn);
@@ -186,6 +418,8 @@ export class PositionKeeper {
         await this.execute(pair, p.qty < 0n ? 'BUY' : 'SELL', qty, 'AUTO', 'system');
       } catch (err) {
         this.log.error({ err, pair: pair.symbol }, 'auto-hedge failed');
+      } finally {
+        await this.reload(pair.symbol).catch(() => {});
       }
     });
   }
@@ -198,67 +432,115 @@ export class PositionKeeper {
   hedge(pair: PairConfig, side: 'BUY' | 'SELL', qty: bigint, reason: 'AUTO' | 'MANUAL', actor: string) {
     return this.serial(pair.symbol, async () => {
       await this.resolveOpenClips(pair.symbol);
-      return this.execute(pair, side, qty, reason, actor);
+      try {
+        return await this.execute(pair, side, qty, reason, actor);
+      } finally {
+        await this.reload(pair.symbol).catch(() => {});
+      }
     });
   }
 
   private async execute(pair: PairConfig, side: 'BUY' | 'SELL', qty: bigint, reason: 'AUTO' | 'MANUAL', actor: string) {
     if (qty <= 0n) throw badRequest('INVALID_QTY', 'quantity must be positive');
     const { hedging } = this.config.get().data.dealing;
-    const agg = await this.prices.current(pair.symbol);
-    const lps = lpsByPrice(agg, side);
+    const first = await this.prices.current(pair.symbol);
     const maxClip = hedging.maxClipQty[pair.base];
-    const plan = planHedge(qty, maxClip ? parseDecimal(maxClip, pair.baseDecimals) : undefined, lps, hedging.split);
+    const plan = planHedge(qty, maxClip ? parseDecimal(maxClip, pair.baseDecimals) : undefined, lpsByPrice(first, side), hedging.split);
     const batchId = randomUUID();
     const clips = [];
     let unhedged = 0n;
     let unknown = 0n;
+    let limited = false;
     for (const clip of plan) {
-      if (unknown > 0n) {
+      if (unknown > 0n || limited) {
         unhedged += clip.qty;
         continue;
       }
+      // Each clip prices against LP quotes that are fresh now (the first one may be a while ago by the last clip).
+      const agg = await this.prices.current(pair.symbol);
+      const lps = lpsByPrice(agg, side);
       const done = await this.executeClip(pair, side, clip, [clip.lp, ...lps.filter((l) => l !== clip.lp)], agg, batchId, reason, actor);
       if (done === 'UNKNOWN') unknown += clip.qty;
-      else if (done) clips.push(done);
+      else if (done === 'LIMIT') {
+        limited = true;
+        unhedged += clip.qty;
+      } else if (done) clips.push(done);
       else unhedged += clip.qty;
     }
     const fmt = (v: bigint) => formatDecimal(v, pair.baseDecimals);
     await audit(this.db, actor, 'dealing.hedge', { batchId, pair: pair.symbol, side, qty: fmt(qty), clips: clips.length, unhedged: fmt(unhedged), unknown: fmt(unknown), reason });
     this.log.info({ pair: pair.symbol, side, qty: fmt(qty), clips: clips.length, unknown: fmt(unknown), reason }, 'hedged with LPs');
+    if (clips.length === 0 && unknown === 0n && limited) {
+      throw new ApiError(422, 'INVENTORY_LIMIT', 'this hedge would take the bank past its inventory cap');
+    }
     if (clips.length === 0 && unknown === 0n) throw new ApiError(503, 'LP_UNAVAILABLE', 'no liquidity provider accepted the hedge');
     return { batchId, side, qty: fmt(qty - unhedged - unknown), unhedged: fmt(unhedged), unknown: fmt(unknown), clips };
   }
 
   /**
-   * One clip: the intent is stored (PENDING, with the reference the LP gets) before anything is sent, so a
-   * crash or a database error after the LP traded can never lose the trade. A definite rejection moves on to
-   * the next LP; an unknown outcome stops there.
+   * One clip. Its capacity is reserved before anything is written or sent, against the same reservations as Direct and
+   * the board (so a fill cannot use headroom the clip is about to take, and a reload cannot apply a read that may or
+   * may not contain the clip). Then the intent is stored (PENDING, with the reference the LP gets) before anything is
+   * sent, so a crash or a database error after the LP traded can never lose the trade. Endings: filled → the
+   * reservation commits; definitely rejected → released, and the next LP by price is tried; unknown → it stays in the
+   * position as uncertain (both outcomes count for the cap) and nothing more is sent. An LP operations switched off, or
+   * whose own quote is no longer fresh, is skipped at the moment of sending.
    */
   private async executeClip(
     pair: PairConfig, side: 'BUY' | 'SELL', clip: Clip, order: string[], agg: Aggregate, batchId: string, reason: string, actor: string,
-  ): Promise<ReturnType<typeof hedgeView> | 'UNKNOWN' | undefined> {
+  ): Promise<ReturnType<typeof hedgeView> | 'UNKNOWN' | 'LIMIT' | undefined> {
+    const delta = side === 'BUY' ? clip.qty : -clip.qty;
     for (const lp of order) {
+      const config = this.config.get().data;
+      if (config.killSwitch.disabledLps.includes(lp)) continue;
       const quote = agg.quotes.find((q) => q.lp === lp);
-      const expected = quote ? (side === 'BUY' ? quote.ask : quote.bid) : formatPrice(side === 'BUY' ? agg.ask : agg.bid);
+      if (!quote || !this.prices.quoteFresh(quote)) continue;
+      const expected = side === 'BUY' ? quote.ask : quote.bid;
+      // A hedge does not start another auto-hedge decision when it commits (it is one).
+      const reservation = this.tryReserve(pair.symbol, delta, { hedge: true });
+      if (!reservation) return 'LIMIT';
       const ref = randomUUID();
-      const { rows: intent } = await this.db.query(
-        `insert into hedges (pair, side, qty, rate, lp, lp_ref, batch_id, reason, actor, status)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING') returning id`,
-        [pair.symbol, side, clip.qty, expected, lp, ref, batchId, reason, actor],
-      );
-      const id = intent[0].id as string;
+      let id: string;
+      try {
+        const { rows: intent } = await this.db.query(
+          `insert into hedges (pair, side, qty, rate, expected_rate, lp, lp_ref, batch_id, reason, actor, status)
+           values ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, 'PENDING') returning id`,
+          [pair.symbol, side, clip.qty, expected, lp, ref, batchId, reason, actor],
+        );
+        id = intent[0].id as string;
+      } catch (err) {
+        reservation.release();
+        throw err;
+      }
       let exec;
       try {
         exec = await this.lp.execute({ lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref });
       } catch (err) {
         if (err instanceof LiquidityError) {
           this.log.warn({ err, lp, pair: pair.symbol }, 'LP rejected hedge clip');
-          await this.db.query(`update hedges set status = 'REJECTED' where id = $1`, [id]);
+          try {
+            await this.db.query(`update hedges set status = 'REJECTED' where id = $1`, [id]);
+            reservation.release();
+          } catch (e) {
+            // Not recorded as rejected: the row stays PENDING (in the position) until a lookup or operations resolve it.
+            reservation.commitUncertain();
+            throw e;
+          }
           continue;
         }
         this.log.error({ err, lp, pair: pair.symbol, ref }, 'hedge clip outcome unknown: not re-sent to another LP');
         await this.db.query(`update hedges set status = 'UNKNOWN' where id = $1`, [id]).catch(() => {});
+        reservation.commitUncertain();
+        return 'UNKNOWN';
+      }
+      // The LP contract is all of the clip or a definite rejection. An execution that does not match the request (another
+      // quantity, pair, side or reference) is not taken as done: it stays open for the lookup and operations.
+      const matches =
+        exec.lp === lp && exec.pair === pair.symbol && exec.side === side && exec.ref === ref && parseDecimal(String(exec.qty), pair.baseDecimals) === clip.qty;
+      if (!matches) {
+        this.log.error({ lp, ref, requested: formatDecimal(clip.qty, pair.baseDecimals), exec }, 'LP execution does not match the clip: left for reconciliation');
+        await this.db.query(`update hedges set status = 'UNKNOWN', lp_trade_ref = $2 where id = $1`, [id, exec.tradeRef]).catch(() => {});
+        reservation.commitUncertain();
         return 'UNKNOWN';
       }
       try {
@@ -266,10 +548,12 @@ export class PositionKeeper {
           `update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1 returning *`,
           [id, exec.rate, exec.tradeRef],
         );
+        reservation.commit();
         return hedgeView(rows[0], pair);
       } catch (err) {
         // The LP traded; the clip stays PENDING (counted in the position) and is confirmed by the next lookup.
         this.log.error({ err, lp, ref, tradeRef: exec.tradeRef }, 'hedge executed but not recorded as done');
+        reservation.commitUncertain();
         return 'UNKNOWN';
       }
     }
@@ -322,6 +606,7 @@ export class PositionKeeper {
     );
     if (!updated.length) throw new ApiError(409, 'NOT_OPEN', 'hedge was resolved meanwhile');
     await audit(this.db, actor, 'dealing.hedge.resolve', { hedgeId: r.id, requested: outcome, status, note });
+    await this.reload(r.pair).catch(() => {});
     return hedgeView(updated[0], findPair(this.config.get().data, r.pair));
   }
 
@@ -341,6 +626,8 @@ export class PositionKeeper {
   }
 }
 
+const HEDGE_STATES: Record<string, string> = { PENDING: 'SENT', DONE: 'FILLED', UNKNOWN: 'UNKNOWN_OUTCOME', REJECTED: 'REJECTED' };
+
 function hedgeView(r: Record<string, any>, pair: PairConfig | undefined) {
   return {
     id: r.id,
@@ -351,6 +638,8 @@ function hedgeView(r: Record<string, any>, pair: PairConfig | undefined) {
     lp: r.lp,
     lpTradeRef: r.lp_trade_ref,
     status: r.status,
+    /** v1.1 hedge states: SENT (waiting for the LP), FILLED, UNKNOWN_OUTCOME (to be looked up), REJECTED. */
+    state: HEDGE_STATES[r.status as string] ?? r.status,
     batchId: r.batch_id,
     reason: r.reason,
     at: new Date(r.created_at).toISOString(),

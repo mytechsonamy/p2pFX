@@ -107,3 +107,4 @@ dialog::backdrop { background: rgb(15 23 42 / 0.5); }
   main { padding: 16px; }
   .savebar { left: 0; padding: 12px 16px; }
 }
+button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }

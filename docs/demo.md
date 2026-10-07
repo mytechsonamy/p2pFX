@@ -6,11 +6,11 @@ Bankaya 10 dakikalık sunum için. Hazırlık tek komut:
 docker compose up --build
 ```
 
-`seed exited with code 0` satırını görünce hazır. Tarayıcıda **http://localhost:5174** açılır: aynı bankanın
-uygulamasında iki müşteri, solda Ayşe, sağda Mehmet. Tahta her parite için 14 işlemlik geçmiş ve iki taraflı
-emir defteriyle dolu gelir; ardından emir botları (`bots` servisi) sürekli emir girip iptal ederek ve kendi
-aralarında işlem yaparak tahtayı canlı tutar. Botlar müşteri emrini hiçbir zaman kendileri almaz (müşteri
-botun emrini alabilir). Stack yeniden başlatılınca demo baştan başlar.
+`api` servisi sağlıklı olunca hazır. Tarayıcıda **http://localhost:5174** açılır: aynı bankanın
+uygulamasında iki müşteri, solda Ayşe, sağda Mehmet. Tahta boş görünmez: bankanın merdiveni (Bank MM) ve
+bankanın botu (Bot MM) LP fiyatı etrafında gerçek banka emirleri tutar ve fiyat oynadıkça yeniler. Botlar
+kendi aralarında ve banka merdiveniyle işlem yapmaz (aynı principal); müşteri onların emrini alabilir, bu
+işlemler P2P sayılmaz (C2B). Stack yeniden başlatılınca demo baştan başlar.
 
 ## 1. Uygulama içinde uygulama (1 dk)
 
@@ -49,7 +49,7 @@ vergisini tahsil etti; fiyat riski almadı.
 ## 4. Bankanın kendi kuru ve FX masası (2 dk)
 
 1. Tahtanın ve emir defterinin üstünde **Banka** satırı: bankanın LP'lerden aldığı en iyi fiyat + müşterinin
-   segment marjı. Ayşe bireysel (10 bip), Mehmet premium (4 bip) segmentte: aynı anda iki telefonda farklı
+   segment marjı. Ayşe bireysel (1000 pip = 0,10 TL), Mehmet premium (400 pip) segmentte: aynı anda iki telefonda farklı
    kur görünür, LP fiyatı oynadıkça canlı değişir.
 2. Mehmet: **Bankadan al** → 1.000 USD → **Fiyat al**. 10 saniyelik kesin fiyat, vergi ve toplam; geri sayım
    bitince yeniden fiyat ister. Onayla: tek bir döviz işlemi, anında dekont, **İşlemlerim**'de "Banka" etiketi.

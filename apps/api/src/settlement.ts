@@ -57,6 +57,18 @@ export class SettlementService {
     private readonly override?: SettlementOptions,
   ) {}
 
+  /** Called after every run that held the fill (matching hands it hold maintenance and customer notifications). */
+  onSettled?: (fillId: string, outcome: SettlementOutcome) => Promise<void> | void;
+
+  private async settled(fillId: string, outcome: SettlementOutcome) {
+    try {
+      await this.onSettled?.(fillId, outcome);
+    } catch (err) {
+      this.log.error({ err, fillId }, 'after-settlement hook failed');
+    }
+    return outcome;
+  }
+
   private get opts(): SettlementOptions {
     return this.override ?? this.config.get().data.settlement;
   }
@@ -86,7 +98,8 @@ export class SettlementService {
   }
 
   async settle(fillId: string): Promise<SettlementOutcome> {
-    return (await this.locked(fillId, () => this.run(fillId))) ?? 'IN_PROGRESS';
+    const outcome = await this.locked(fillId, () => this.run(fillId));
+    return outcome === undefined ? 'IN_PROGRESS' : this.settled(fillId, outcome);
   }
 
   /** One pass of the fill's state machine. Call only while holding the fill's lock. */
@@ -226,7 +239,7 @@ export class SettlementService {
       return this.run(fillId);
     });
     if (!result) throw conflict('SETTLEMENT_IN_PROGRESS', 'this fill is being settled right now, try again shortly');
-    return result;
+    return this.settled(fillId, result);
   }
 
   /**

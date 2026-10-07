@@ -7,8 +7,10 @@ import { ApiError, badRequest, notFound } from '../errors.js';
 import { loadOrder, loadOrders, orderView } from '../orders.js';
 import { fillViewFor, tradeView } from '../fills.js';
 import { dealView } from '../dealing/dealing.js';
+import { commissionPerUnitOf } from '@p2p/pricing';
+import { haltReason } from '../order-entry.js';
 
-const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
+const parse = <T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, value: unknown): T => {
   const r = schema.safeParse(value);
   if (!r.success) throw badRequest('INVALID_REQUEST', 'request is invalid', r.error.issues);
   return r.data;
@@ -43,12 +45,15 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
           tickSize: p.tickSize,
           minQty: p.minQty,
           priceBandPct: p.priceBandPct,
-          bipSize: p.bipSize,
+          pipSize: p.pipSize,
           /** Kambiyo vergisi for this pair (precious metals have their own rates). */
           tax: taxRates(c, p),
+          /** PIPS: a fixed commission per unit; BPS: a share of the price (shown as bps, applied to the price). */
+          commission: { mode: p.commission.mode, buy: p.commission.buy, sell: p.commission.sell },
+          /** PIPS: per unit commission; BPS: per unit commission at the reference price (indicative). */
           commissionPerUnit: {
-            buy: formatPrice(BigInt(p.commission.buyBips) * parsePrice(p.bipSize)),
-            sell: formatPrice(BigInt(p.commission.sellBips) * parsePrice(p.bipSize)),
+            buy: formatPrice(p.commission.mode === 'PIPS' ? BigInt(p.commission.buy) * parsePrice(p.pipSize) : 0n),
+            sell: formatPrice(p.commission.mode === 'PIPS' ? BigInt(p.commission.sell) * parsePrice(p.pipSize) : 0n),
           },
         })),
       tax: { buyRate: c.tax.buyRate, sellRate: c.tax.sellRate, base: c.tax.base },
@@ -56,7 +61,14 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
       tradingHours: c.tradingHours,
       marketOpen: isMarketOpen(ctx.clock(), c.tradingHours),
       limits: c.limits.segments[session.segment] ?? c.limits.default,
-      dealing: { enabled: c.dealing.enabled, quoteTtlSeconds: c.dealing.quoteTtlSeconds, maxDealQty: c.dealing.maxDealQty },
+      dealing: { enabled: c.channels.bankDirect, quoteTtlSeconds: c.dealing.quoteTtlSeconds, maxDealQty: c.dealing.maxDealQty },
+      /** SEPARATE: Direct rates and the board in two areas. UNIFIED: one executable board, Direct as a quick path. */
+      presentation: c.marketPresentation,
+      /** Whether the board marks levels that hold bank liquidity. */
+      sourceDisclosure: c.sourceDisclosure,
+      marketOrders: c.marketOrders,
+      halted: haltReason(c, '', 'customer') ?? null,
+      haltedPairs: c.killSwitch.haltedPairs,
     };
   });
 
@@ -89,13 +101,12 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
       throw new ApiError(503, 'REFERENCE_RATE_UNAVAILABLE', 'reference rate unavailable');
     });
     const ref = parsePrice(r.rate);
-    const bip = parsePrice(pair.bipSize);
     return {
       pair: pair.symbol,
       rate: formatPrice(ref),
       asOf: r.asOf,
-      buyPrice: formatPrice(ref + BigInt(pair.commission.buyBips) * bip),
-      sellPrice: formatPrice(ref - BigInt(pair.commission.sellBips) * bip),
+      buyPrice: formatPrice(ref + commissionPerUnitOf(pair, 'BUY', ref)),
+      sellPrice: formatPrice(ref - commissionPerUnitOf(pair, 'SELL', ref)),
       bandLow: formatPrice(ref - (ref * parsePrice(pair.priceBandPct)) / 100n / 10n ** 8n),
       bandHigh: formatPrice(ref + (ref * parsePrice(pair.priceBandPct)) / 100n / 10n ** 8n),
     };

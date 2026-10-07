@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useExchange, usePair } from '../store';
 import { Breakdown, Row, Segmented, Sheet } from '../components';
 import { assetName, compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
 import { endOfDay, localDate } from '../time';
-import { newIdempotencyKey, type PlaceOrder } from '../api';
-import { BankRow, BetterAtBank } from '../bank';
-import type { BookLevel, PairInfo, QuoteBreakdown, Side, Validity } from '../types';
+import { ApiError, newIdempotencyKey, type PlaceOrder } from '../api';
+import { BankQuick, BankRow, BetterAtBank } from '../bank';
+import type { BookLevel, OrderType, PairInfo, QuoteBreakdown, Side, Validity } from '../types';
 
 interface Draft {
   side: Side;
+  type: OrderType;
   qty: string;
   price: string;
   /** Whether the customer typed the price; if not, it follows the market. */
@@ -22,6 +23,7 @@ export function TradeScreen() {
   const pair = usePair();
   const [draft, setDraft] = useState<Draft>(() => ({
     side: 'BUY',
+    type: 'LIMIT',
     qty: '',
     price: '',
     priceTouched: false,
@@ -34,17 +36,18 @@ export function TradeScreen() {
   // A price picked on the board (runs after the reset above when the pair changed too).
   useEffect(() => {
     if (!pick || pick.pair !== symbol) return;
-    setDraft((d) => ({ ...d, side: pick.side, price: pick.price, priceTouched: true }));
+    setDraft((d) => ({ ...d, side: pick.side, type: 'LIMIT', price: pick.price, priceTouched: true }));
     clearPick();
   }, [pick, symbol, clearPick]);
 
   return (
     <div className="trade">
       <RateStrip pair={pair} />
-      <BankRow pair={pair} />
+      {/* SEPARATE: the bank's Direct rates in their own area. UNIFIED: one board; Direct is a quick path on the ticket. */}
+      {config.presentation !== 'UNIFIED' && <BankRow pair={pair} />}
       <OrderBook
         pair={pair}
-        onPick={(level, side) => setDraft((d) => ({ ...d, side, price: level.price, priceTouched: true }))}
+        onPick={(level, side) => setDraft((d) => ({ ...d, side, type: 'LIMIT', price: level.price, priceTouched: true }))}
       />
       <OrderTicket pair={pair} draft={draft} setDraft={setDraft} />
     </div>
@@ -80,8 +83,9 @@ function RateStrip({ pair }: { pair: PairInfo }) {
 const DEPTH = 6;
 
 function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, side: Side) => void }) {
-  const { books, rates, t, locale } = useExchange();
+  const { books, rates, t, locale, config } = useExchange();
   const book = books[pair.symbol];
+  const disclose = !!config.sourceDisclosure;
   const asks = (book?.asks ?? []).slice(0, DEPTH);
   const bids = (book?.bids ?? []).slice(0, DEPTH);
   const max = Math.max(1, ...[...asks, ...bids].map((l) => Number(l.qty)));
@@ -95,7 +99,10 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
       onClick={() => onPick(l, kind === 'ask' ? 'BUY' : 'SELL')}
     >
       <span className="bar" style={{ width: `${(Number(l.qty) / max) * 100}%` }} />
-      <span className="price">{formatPrice(l.price, locale)}</span>
+      <span className="price">
+        {formatPrice(l.price, locale)}
+        {disclose && l.bankQty && Number(l.bankQty) > 0 && <span className="pill bank-pill">{t('book.bank')}</span>}
+      </span>
       <span className="qty">{formatDecimal(l.qty, locale, pair.baseDecimals)}</span>
       <span className="count">{l.count}</span>
     </button>
@@ -105,7 +112,7 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
     <section className="card book">
       <div className="card-head">
         <h3>{t('book.title')}</h3>
-        <small>{t('book.hint')}</small>
+        <small>{t('book.hint')}{disclose ? ` ${t('book.bankHint')}` : ''}</small>
       </div>
       <div className="book-cols">
         <span>{t('book.price')} ({currencySymbol(pair.quote)})</span>
@@ -127,23 +134,33 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
   );
 }
 
-function useQuote(pair: PairInfo, side: Side, qty?: string, price?: string) {
+/**
+ * The ticket's quote, fetched again when the inputs change or on `requote()`. requote drops the current quote at once
+ * (nothing can be confirmed from it any more) and fetches a new one.
+ */
+function useQuote(pair: PairInfo, side: Side, type: OrderType, qty?: string, price?: string) {
   const { api, errorText } = useExchange();
   const [state, setState] = useState<{ quote?: QuoteBreakdown; error?: string; loading: boolean }>({ loading: false });
+  const [round, setRound] = useState(0);
   const seq = useRef(0);
+  const requote = useCallback(() => {
+    seq.current++;
+    setState({ loading: true });
+    setRound((r) => r + 1);
+  }, []);
   useEffect(() => {
     const n = ++seq.current;
-    if (!qty || !price) return setState({ loading: false });
+    if (!qty || (type === 'LIMIT' && !price)) return setState({ loading: false });
     setState((s) => ({ ...s, loading: true }));
     const timer = setTimeout(() => {
-      api.quote({ pair: pair.symbol, side, qty, price }).then(
+      api.quote(type === 'MARKET' ? { pair: pair.symbol, side, qty, type } : { pair: pair.symbol, side, qty, price, type }).then(
         (quote) => n === seq.current && setState({ quote, loading: false }),
         (e) => n === seq.current && setState({ error: errorText(e), loading: false }),
       );
     }, 250);
     return () => clearTimeout(timer);
-  }, [api, errorText, pair.symbol, side, qty, price]);
-  return state;
+  }, [api, errorText, pair.symbol, side, type, qty, price, round]);
+  return { ...state, requote };
 }
 
 function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; setDraft: React.Dispatch<React.SetStateAction<Draft>> }) {
@@ -153,6 +170,8 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
   const book = books[pair.symbol];
   const rate = rates[pair.symbol];
   const buy = draft.side === 'BUY';
+  const market = draft.type === 'MARKET';
+  const halted = config.halted || config.haltedPairs?.includes(pair.symbol);
 
   // Until the customer types a price, it follows the best opposite order, or the bank rate on an empty book.
   const marketPrice = (buy ? book?.asks[0]?.price : book?.bids[0]?.price) ?? rate?.rate;
@@ -162,7 +181,7 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
 
   const qty = toApiDecimal(draft.qty);
   const price = toApiDecimal(draft.price);
-  const { quote, error, loading } = useQuote(pair, draft.side, qty, price);
+  const { quote, error, loading, requote } = useQuote(pair, draft.side, draft.type, qty, market ? undefined : price);
 
   const fxAccount = accounts.find((a) => a.currency === pair.base);
   const tryAccount = accounts.find((a) => a.currency === pair.quote);
@@ -171,23 +190,26 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
 
   const problems: string[] = [];
   if (qty && compareDecimal(qty, pair.minQty) < 0) problems.push(t('ticket.minQty', { min: formatDecimal(pair.minQty, locale, 0, pair.baseDecimals), base: currencySymbol(pair.base) }));
-  if (price && rate && (compareDecimal(price, rate.bandLow) < 0 || compareDecimal(price, rate.bandHigh) > 0)) problems.push(t('error.PRICE_OUT_OF_BAND'));
+  if (!market && price && rate && (compareDecimal(price, rate.bandLow) < 0 || compareDecimal(price, rate.bandHigh) > 0)) problems.push(t('error.PRICE_OUT_OF_BAND'));
   if (quote && payAccount && compareDecimal(buy ? quote.total : quote.qty, payAccount.available) > 0) problems.push(t('ticket.insufficient'));
   if (error) problems.push(error);
 
-  const canContinue = !!quote && !loading && !problems.length && !missingAccount && config.marketOpen;
+  const canContinue = !!quote && !loading && !problems.length && !missingAccount && config.marketOpen && !halted;
 
   const onContinue = () => {
-    if (!quote || !qty || !price) return;
+    if (!quote || !qty || (!market && !price)) return;
     setConfirming({
-      order: {
-        pair: pair.symbol,
-        side: draft.side,
-        qty,
-        price,
-        validity: draft.validity,
-        expiresAt: draft.validity === 'GTD' ? endOfDay(draft.gtdDate, tz) : undefined,
-      },
+      order: market
+        ? { pair: pair.symbol, side: draft.side, qty, type: 'MARKET', protectionPrice: quote.protectionPrice }
+        : {
+            pair: pair.symbol,
+            side: draft.side,
+            qty,
+            type: 'LIMIT',
+            price,
+            validity: draft.validity,
+            expiresAt: draft.validity === 'GTD' ? endOfDay(draft.gtdDate, tz) : undefined,
+          },
       quote,
     });
   };
@@ -213,6 +235,17 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
         ]}
       />
 
+      {config.marketOrders?.enabled && (
+        <Segmented<OrderType>
+          value={draft.type}
+          onChange={(type) => setDraft((d) => ({ ...d, type }))}
+          options={[
+            { value: 'LIMIT', label: t('ticket.limit') },
+            { value: 'MARKET', label: t('ticket.market') },
+          ]}
+        />
+      )}
+
       <label className="field">
         <span>{t('ticket.qty', { base: currencySymbol(pair.base) })}</span>
         <div className="input-wrap">
@@ -234,6 +267,21 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
         )}
       </label>
 
+      {market && (
+        <div className="notice">
+          {t('ticket.marketHint', { price: quote?.protectionPrice ? formatPrice(quote.protectionPrice, locale) : '—' })}
+          {quote?.estimate && (
+            <div className="hint">
+              {t('ticket.estimate', {
+                price: quote.estimate.averagePrice ? formatPrice(quote.estimate.averagePrice, locale) : '—',
+                qty: `${formatDecimal(quote.estimate.fillableQty, locale, pair.baseDecimals)} ${currencySymbol(pair.base)}`,
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!market && (
       <label className="field">
         <span>{t('ticket.price', { quote: currencySymbol(pair.quote) })}</span>
         <div className="input-wrap">
@@ -251,7 +299,9 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
           </small>
         )}
       </label>
+      )}
 
+      {!market && (
       <label className="field">
         <span>{t('ticket.validity')}</span>
         <select value={draft.validity} onChange={(e) => setDraft((d) => ({ ...d, validity: e.target.value as Validity }))}>
@@ -263,7 +313,8 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
           ))}
         </select>
       </label>
-      {draft.validity === 'GTD' && (
+      )}
+      {!market && draft.validity === 'GTD' && (
         <label className="field">
           <span>{t('ticket.until')}</span>
           <input
@@ -276,8 +327,10 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
         </label>
       )}
 
-      {quote && qty && price && <Breakdown q={quote} pair={pair} compact />}
-      {quote && qty && price && <BetterAtBank side={draft.side} effectivePrice={quote.effectivePrice} qty={qty} />}
+      {quote && qty && (market || price) && <Breakdown q={quote} pair={pair} compact />}
+      {quote && qty && (market || price) && <BetterAtBank side={draft.side} effectivePrice={quote.effectivePrice} qty={qty} />}
+      {config.presentation === 'UNIFIED' && <BankQuick pair={pair} side={draft.side} qty={qty} />}
+      {halted && <div className="notice">{t('ticket.halted')}</div>}
 
       {missingAccount && (
         <div className="notice">
@@ -301,6 +354,11 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
           order={confirming.order}
           quote={confirming.quote}
           onClose={() => setConfirming(null)}
+          onRequote={() => {
+            // The confirmed protection price no longer holds: a new quote (price, fees, tax, total) and a new confirmation.
+            setConfirming(null);
+            requote();
+          }}
           onPlaced={() => {
             setConfirming(null);
             setDraft((d) => ({ ...d, qty: '' }));
@@ -311,7 +369,9 @@ function OrderTicket({ pair, draft, setDraft }: { pair: PairInfo; draft: Draft; 
   );
 }
 
-function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInfo; order: PlaceOrder; quote: QuoteBreakdown; onClose: () => void; onPlaced: () => void }) {
+function ConfirmSheet({
+  pair, order, quote, onClose, onRequote, onPlaced,
+}: { pair: PairInfo; order: PlaceOrder; quote: QuoteBreakdown; onClose: () => void; onRequote: () => void; onPlaced: () => void }) {
   const { api, t, locale, config, accounts, toast, errorText, upsertOrder, refreshAccounts, track } = useExchange();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -331,17 +391,26 @@ function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInf
       const placed = await api.place(order, idempotencyKey);
       upsertOrder(placed);
       refreshAccounts();
-      track('order_placed', { pair: order.pair, side: order.side, validity: order.validity });
+      track('order_placed', { pair: order.pair, side: order.side, type: order.type ?? 'LIMIT', validity: order.validity ?? 'IOC' });
       toast(t('confirm.placed'), 'success');
       onPlaced();
     } catch (e) {
+      // The price moved against the customer after they confirmed: back to the ticket, which fetches a new quote and
+      // keeps Continue off until it is there. The next confirmation is a new sheet with a new idempotency key.
+      if (e instanceof ApiError && e.code === 'PROTECTION_PRICE_CHANGED') {
+        toast(errorText(e), 'error');
+        onRequote();
+        return;
+      }
       setError(errorText(e));
       setBusy(false);
     }
   };
 
-  const validityText =
-    order.validity === 'GTD' && order.expiresAt
+  const market = order.type === 'MARKET';
+  const validityText = market
+    ? t('validity.IOC')
+    : order.validity === 'GTD' && order.expiresAt
       ? `${t('validity.GTD')}: ${formatDateTime(order.expiresAt, locale, config.tradingHours.timezone)}`
       : order.validity === 'GTC'
         ? `${t('validity.GTC')} (${t('validity.GTC.hint', { days: config.validity.maxValidityDays })})`
@@ -358,7 +427,7 @@ function ConfirmSheet({ pair, order, quote, onClose, onPlaced }: { pair: PairInf
       <ul className="fineprint">
         <li>{t('confirm.counterparty', { bank: config.bank.name })}</li>
         <li>{config.balanceMode === 'block' ? t('confirm.block') : t('confirm.noBlock')}</li>
-        <li>{t('confirm.partial')}</li>
+        <li>{market ? t('confirm.market') : t('confirm.partial')}</li>
       </ul>
       {error && <div className="error-text">{error}</div>}
       <div className="actions">

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import {
   currentOrNextSessionClose,
   findPair,
+  formatDecimal,
+  formatPrice,
   isMarketOpen,
   parseDecimal,
   parsePrice,
@@ -9,6 +11,7 @@ import {
   type PairConfig,
   type PlaceOrderRequest,
   type QuoteRequest,
+  type Side,
 } from '@p2p/shared';
 import { priceSide, pricingParams, toBreakdown, toSnapshot } from '@p2p/pricing';
 import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
@@ -20,8 +23,37 @@ import type { Exchange } from './engine/exchange.js';
 import { ApiError, badRequest, conflict, unprocessable } from './errors.js';
 import { loadOrder, orderView, requirementFor, type OrderRow } from './orders.js';
 import { audit } from './audit.js';
+import { appendEvent } from './event-store.js';
+import type { PriceEngine } from './dealing/price-engine.js';
 
 const DAY_MS = 86_400_000;
+/** A market order lives for one pass of matching; this is only its bookkeeping expiry. */
+const MARKET_ORDER_TTL_MS = 60_000;
+
+/** The kill switch: why new entries of this kind are refused right now, if they are. */
+export function haltReason(config: BankConfig, pair: string, who: 'customer' | 'bank'): string | undefined {
+  const k = config.killSwitch;
+  if (k.allTrading) return 'trading is halted';
+  if (k.haltedPairs.includes(pair)) return `${pair} is halted`;
+  if (who === 'customer' && k.newCustomerOrders) return 'new orders are not accepted right now';
+  return undefined;
+}
+
+/**
+ * A market order's protection price: the LP price on the side it takes, moved by the bank's maximum slippage and
+ * rounded to the tick against the customer's favour (so the order never trades beyond it). Undefined without a
+ * live LP price: a stale price is never used as protection.
+ */
+export function protectionPrice(pair: PairConfig, side: Side, lp: { bid: bigint; ask: bigint }, maxSlippageBps: number): bigint {
+  const tick = parsePrice(pair.tickSize);
+  const bps = BigInt(maxSlippageBps);
+  if (side === 'BUY') {
+    const p = (lp.ask * (10_000n + bps) + 9_999n) / 10_000n;
+    return ((p + tick - 1n) / tick) * tick;
+  }
+  const p = (lp.bid * (10_000n - bps)) / 10_000n;
+  return (p / tick) * tick;
+}
 
 /**
  * Order entry: validation (pair, tick, minimum, price band, validity, trading hours,
@@ -33,22 +65,40 @@ export class OrderEntry {
     private readonly core: CoreBankingAdapter,
     private readonly config: ConfigService,
     private readonly exchange: Exchange,
+    private readonly prices: PriceEngine,
     private readonly clock: () => Date,
   ) {}
 
-  /** Full breakdown for the confirmation screen. Same maths as the fill. */
+  /**
+   * Full breakdown for the confirmation screen. Same maths as the fill. A market order is priced at its protection
+   * price (the worst case the customer can get), with an estimate of the average price the book gives now.
+   */
   async quote(body: QuoteRequest) {
     const config = this.config.get().data;
     const { pair, qty, price } = await this.validatePriceAndQty(config, body);
     const params = pricingParams(config, pair, body.side);
-    return toBreakdown(pair, priceSide(qty, price, params), params);
+    const breakdown = toBreakdown(pair, priceSide(qty, price, params), params);
+    if (body.type !== 'MARKET') return breakdown;
+    return { ...breakdown, type: 'MARKET' as const, protectionPrice: formatPrice(price), estimate: this.estimate(pair, body.side, qty, price) };
   }
 
-  /**
-   * `house`: the bank's own order (its market-making ladder). It pays no commission or tax to itself and is not
-   * subject to customer segment limits.
-   */
-  async place(session: Session, body: PlaceOrderRequest, idempotencyKey: string | undefined, opts: { house?: boolean } = {}) {
+  /** What the visible book would give a market order now, within its protection price. */
+  private estimate(pair: PairConfig, side: Side, qty: bigint, limit: bigint) {
+    const book = this.exchange.levels(pair.symbol, side === 'BUY' ? 'SELL' : 'BUY');
+    let left = qty;
+    let value = 0n;
+    for (const l of book) {
+      if (left === 0n || (side === 'BUY' ? l.price > limit : l.price < limit)) break;
+      const take = l.qty < left ? l.qty : left;
+      value += take * l.price;
+      left -= take;
+    }
+    const filled = qty - left;
+    return { averagePrice: filled > 0n ? formatPrice(value / filled) : '0', fillableQty: formatDecimal(filled, pair.baseDecimals) };
+  }
+
+  /** A customer's order. The bank's own liquidity (ladder, bot) enters through `Exchange.replaceLiquidity`. */
+  async place(session: Session, body: PlaceOrderRequest, idempotencyKey: string | undefined) {
     // Nothing is recorded or held on an instance that cannot match the order.
     if (!this.exchange.running) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
     if (!idempotencyKey || idempotencyKey.length > 200) throw badRequest('IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key header is required');
@@ -63,18 +113,24 @@ export class OrderEntry {
 
     const { data: config, version } = this.config.get();
     const now = this.clock();
-    const { pair, qty, price } = await this.validatePriceAndQty(config, body);
-    const params = opts.house ? { ...pricingParams(config, pair, body.side), commissionPerUnit: 0n, taxRate: 0n } : pricingParams(config, pair, body.side);
+    const halted = haltReason(config, body.pair, 'customer');
+    if (halted) throw unprocessable('TRADING_HALTED', halted);
+    const market = body.type === 'MARKET';
+    const { pair, qty, price: current } = await this.validatePriceAndQty(config, body);
+    const price = market ? this.bindProtection(pair, body, current) : current;
+    const params = pricingParams(config, pair, body.side);
     const pricing = priceSide(qty, price, params);
 
-    if (!config.validity.options.includes(body.validity)) {
+    const validity = market ? 'IOC' : body.validity!;
+    if (!market && !config.validity.options.includes(body.validity!)) {
       throw badRequest('VALIDITY_NOT_ALLOWED', `validity ${body.validity} is not offered`);
     }
-    const expiresAt = this.expiry(config, body, now);
+    const expiresAt = market ? new Date(now.getTime() + MARKET_ORDER_TTL_MS) : this.expiry(config, body, now);
     const open = isMarketOpen(now, config.tradingHours);
-    if (!open && config.tradingHours.outsideHours === 'reject') throw unprocessable('MARKET_CLOSED', 'the market is closed');
+    // A market order is for now: it never waits for the session to open.
+    if (!open && (market || config.tradingHours.outsideHours === 'reject')) throw unprocessable('MARKET_CLOSED', 'the market is closed');
 
-    if (!opts.house) this.checkOrderLimit(config, session, pricing.notional, pair);
+    this.checkOrderLimit(config, session, pricing.notional, pair);
 
     const accounts = await this.core.getAccounts(session.customerRef);
     const fxAccount = pickAccount(accounts, pair.base, body.fxAccountId);
@@ -82,16 +138,16 @@ export class OrderEntry {
 
     // The daily limit is checked and the order recorded in one transaction, under the customer's limit lock.
     const insert = await tx(this.db, async (client) => {
-      if (!opts.house) await reserveDailyLimit(client, config, session, pricing.notional, pair, now);
+      await reserveDailyLimit(client, config, session, pricing.notional, pair, now);
       return client.query(
-        `insert into orders (customer_id, pair, side, book_price, qty, validity, expires_at, fx_account_id, try_account_id,
-           status, pricing, config_version, balance_mode, notional, idempotency_key, request_hash)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NEW',$10,$11,$12,$13,$14,$15)
+        `insert into orders (customer_id, principal_id, source, order_type, pair, side, book_price, qty, validity, expires_at, fx_account_id,
+           try_account_id, status, pricing, config_version, balance_mode, notional, idempotency_key, request_hash)
+         values ($1, (select principal_id from customers where id = $1), 'CUSTOMER', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'NEW', $11, $12, $13, $14, $15, $16)
          on conflict (customer_id, idempotency_key) do nothing
          returning id`,
         [
-          session.customerId, pair.symbol, body.side, body.price, qty, body.validity, expiresAt, fxAccount.id, tryAccount.id,
-          toSnapshot(params), version, config.balanceMode, pricing.notional, idempotencyKey, requestHash,
+          session.customerId, market ? 'MARKET' : 'LIMIT', pair.symbol, body.side, formatPrice(price, 8), qty, validity, expiresAt, fxAccount.id,
+          tryAccount.id, toSnapshot(params), version, config.balanceMode, pricing.notional, idempotencyKey, requestHash,
         ],
       );
     });
@@ -131,13 +187,22 @@ export class OrderEntry {
     }
 
     const status = open ? 'OPEN' : 'QUEUED';
-    const moved = await this.db.query(`update orders set status = $2, hold_id = $3, updated_at = now() where id = $1 and status = 'NEW'`, [orderId, status, holdId]);
+    const moved = await tx(this.db, async (client) => {
+      const res = await client.query(`update orders set status = $2, hold_id = $3, updated_at = now() where id = $1 and status = 'NEW'`, [orderId, status, holdId]);
+      if (res.rowCount === 1) {
+        await appendEvent(client, {
+          type: 'OrderAccepted', aggregateType: 'order', aggregateId: orderId, pair: pair.symbol, correlationId: idempotencyKey, configVersion: version,
+          payload: { source: 'CUSTOMER', type: market ? 'MARKET' : 'LIMIT', side: body.side, price: formatPrice(price), qty: qty.toString(), validity, status },
+        });
+      }
+      return res;
+    });
     if (moved.rowCount !== 1) {
       // Rejected meanwhile (e.g. a restart treated the entry as interrupted): give the hold back.
       if (holdId) await this.exchange.releaseHold(holdId);
       throw new ApiError(503, 'ENTRY_INTERRUPTED', 'order entry was interrupted, please try again');
     }
-    await audit(this.db, session.customerRef, 'order.placed', { orderId, pair: pair.symbol, side: body.side, qty: body.qty, price: body.price, validity: body.validity, status });
+    await audit(this.db, session.customerRef, 'order.placed', { orderId, pair: pair.symbol, type: market ? 'MARKET' : 'LIMIT', side: body.side, qty: body.qty, price: formatPrice(price), validity, status });
 
     if (status === 'OPEN') await this.exchange.submit(orderId, pair.symbol);
     return { order: orderView((await loadOrder(this.db, orderId))!, config), replayed: false };
@@ -156,11 +221,36 @@ export class OrderEntry {
     if (!pair || !pair.enabled) throw badRequest('UNKNOWN_PAIR', `pair ${body.pair} is not available`);
     const qty = parseOr(body.qty, pair.baseDecimals, 'INVALID_QTY', `quantity must have at most ${pair.baseDecimals} decimals`);
     if (qty < parseDecimal(pair.minQty, pair.baseDecimals)) throw badRequest('QTY_TOO_SMALL', `minimum quantity is ${pair.minQty}`);
-    const price = parseOr(body.price, 8, 'INVALID_PRICE', 'price has too many decimals');
+    const price = body.type === 'MARKET' ? this.marketProtection(config, pair, body.side) : parseOr(body.price!, 8, 'INVALID_PRICE', 'price has too many decimals');
     const tick = parsePrice(pair.tickSize);
     if (price <= 0n || price % tick !== 0n) throw badRequest('INVALID_PRICE', `price must be a positive multiple of ${pair.tickSize}`);
     await this.checkPriceBand(pair, price);
     return { pair, qty, price };
+  }
+
+  /**
+   * A market order trades within the protection price the customer confirmed. If the protection the bank would give
+   * now is worse for them (higher to buy, lower to sell), the order is refused so they can confirm the new one; if it
+   * is better, the better one is used.
+   */
+  private bindProtection(pair: PairConfig, body: PlaceOrderRequest, current: bigint): bigint {
+    const confirmed = parseOr(body.protectionPrice ?? '', 8, 'PROTECTION_PRICE_REQUIRED', 'the confirmed protection price is required for a market order');
+    const worse = body.side === 'BUY' ? current > confirmed : current < confirmed;
+    if (worse) {
+      throw new ApiError(409, 'PROTECTION_PRICE_CHANGED', 'the price moved against you since you confirmed; review the new protection price', {
+        confirmed: formatPrice(confirmed),
+        protectionPrice: formatPrice(current),
+      });
+    }
+    return current;
+  }
+
+  /** The protection price a market order would get now; refused without a live LP price. */
+  private marketProtection(config: BankConfig, pair: PairConfig, side: Side): bigint {
+    if (!config.marketOrders.enabled) throw unprocessable('MARKET_ORDERS_DISABLED', 'market orders are not offered');
+    const lp = this.prices.fresh(pair.symbol);
+    if (!lp) throw new ApiError(503, 'PRICE_PROTECTION_UNAVAILABLE', 'no live price to protect a market order; place a limit order');
+    return protectionPrice(pair, side, lp, config.marketOrders.maxSlippageBps);
   }
 
   private async checkPriceBand(pair: PairConfig, price: bigint) {

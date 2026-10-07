@@ -9,8 +9,8 @@ afterEach(async () => {
   h = undefined as unknown as Harness;
 });
 
-// Frozen LPs around 49.15: best 49.1441 / 49.1559; default segment margin 10 bips → bank rate 49.2559 / 49.0441.
-// Ladder default: 0.02 % from the bank rate, 0.02 % steps, commission (5 bips = 0.05) taken out of the book price.
+// Frozen LPs around 49.15: best 49.1441 / 49.1559; default segment margin 1000 pips → bank rate 49.2559 / 49.0441.
+// Ladder default: 0.02 % from the bank rate, 0.02 % steps, commission (500 pips = 0.05) taken out of the book price.
 const usd = DEFAULT_CONFIG.pairs[0];
 const only = (pair: string) => ({
   ...DEFAULT_CONFIG,
@@ -75,13 +75,13 @@ describe('bank orders in the book', () => {
     await start();
     await h.ctx.bankBook.tick();
     // Wider default margin: bank rate 49.2559 → 49.3559, the ladder follows.
-    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, margins: { ...c.dealing.margins, default: { buyBips: 20, sellBips: 10 } } } }));
+    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, margins: { ...c.dealing.margins, default: { buyPips: 2000, sellPips: 1000 } } } }));
     await h.ctx.bankBook.tick();
     const asks = (await book()).asks;
     expect(asks[0]).toEqual({ price: '49.3158', qty: '5000.00', count: 1 });
     expect(asks).toHaveLength(3);
 
-    await h.setConfig((c) => ({ ...c, bankBook: { ...c.bankBook, enabled: false } }));
+    await h.setConfig((c) => ({ ...c, channels: { ...c.channels, bankMarketMaker: false } }));
     await h.ctx.bankBook.tick();
     const b = await book();
     expect([...b.asks, ...b.bids]).toEqual([]);

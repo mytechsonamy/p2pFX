@@ -14,7 +14,10 @@ export interface Aggregate {
   bidLp: string;
   askLp: string;
   quotes: LpQuote[];
+  /** When the aggregate was built (display, streaming). Not a measure of freshness. */
   at: Date;
+  /** The LP timestamp of the older of the two quotes behind bid and ask: freshness is measured from this. */
+  sourceAt: Date;
 }
 
 export interface SegmentRates {
@@ -22,8 +25,8 @@ export interface SegmentRates {
   buy: bigint;
   /** The customer sells to the bank at this rate. */
   sell: bigint;
-  buyBips: number;
-  sellBips: number;
+  buyPips: number;
+  sellPips: number;
 }
 
 /** How often a price tick is written to the history. */
@@ -66,7 +69,7 @@ export class PriceEngine {
 
   async refreshAll() {
     const c = this.config.get().data;
-    if (!c.dealing.enabled) return;
+    // LP prices feed Direct, the ladder, the bot, market order protection and price evidence: always refreshed.
     for (const p of c.pairs.filter((p) => p.enabled)) {
       try {
         await this.refresh(p.symbol);
@@ -79,7 +82,8 @@ export class PriceEngine {
   /** Pulls fresh LP quotes for a pair and publishes the aggregate. */
   async refresh(pair: string): Promise<Aggregate> {
     const c = this.config.get().data;
-    const quotes = await this.lp.quotes(pair);
+    // An LP operations switched off (kill switch) is ignored entirely.
+    const quotes = (await this.lp.quotes(pair)).filter((q) => !c.killSwitch.disabledLps.includes(q.lp));
     const now = this.clock();
     // Only sane, recent quotes: positive prices, bid below ask, not stamped in the future, within the staleness limit.
     const fresh = quotes.filter((q) => {
@@ -97,7 +101,8 @@ export class PriceEngine {
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => fresh.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
     const askQ = best((a, b) => parsePrice(a.ask) <= parsePrice(b.ask));
-    const agg: Aggregate = { pair, bid: parsePrice(bidQ.bid), ask: parsePrice(askQ.ask), bidLp: bidQ.lp, askLp: askQ.lp, quotes: fresh, at: now };
+    const sourceAt = new Date(Math.min(new Date(bidQ.at).getTime(), new Date(askQ.at).getTime()));
+    const agg: Aggregate = { pair, bid: parsePrice(bidQ.bid), ask: parsePrice(askQ.ask), bidLp: bidQ.lp, askLp: askQ.lp, quotes: fresh, at: now, sourceAt };
     this.latest.set(pair, agg);
     await this.events.publish({ type: 'lp', pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), at: now.toISOString() });
     if (now.getTime() - (this.lastTick.get(pair) ?? 0) >= TICK_EVERY_MS) {
@@ -107,11 +112,14 @@ export class PriceEngine {
     return agg;
   }
 
-  /** The latest aggregate if still fresh, otherwise a new one. */
+  /**
+   * The latest aggregate if it was built in the last second and its LP quotes are still within the staleness limit,
+   * otherwise a new one.
+   */
   async current(pair: string): Promise<Aggregate> {
     const a = this.latest.get(pair);
     const maxAge = Math.min(1000, this.config.get().data.dealing.maxStalenessMs);
-    if (a && this.clock().getTime() - a.at.getTime() <= maxAge) return a;
+    if (a && this.clock().getTime() - a.at.getTime() <= maxAge && this.live(a)) return a;
     return this.refresh(pair);
   }
 
@@ -120,20 +128,41 @@ export class PriceEngine {
     return this.latest.get(pair);
   }
 
-  /** The latest aggregate only while it is within the staleness limit; anything that trades must use this or current(). */
+  /**
+   * The latest aggregate only while the LP quotes behind it are within the staleness limit, measured from the LPs' own
+   * timestamps (refreshing the cache does not make an old quote younger). Anything that trades must use this or
+   * current().
+   */
   fresh(pair: string): Aggregate | undefined {
     const a = this.latest.get(pair);
-    if (!a) return undefined;
-    return this.clock().getTime() - a.at.getTime() <= this.config.get().data.dealing.maxStalenessMs ? a : undefined;
+    return a && this.live(a) ? a : undefined;
+  }
+
+  /**
+   * Whether an aggregate may still be traded on: its LP quotes are within the staleness limit and neither LP behind
+   * its bid or ask has been switched off since it was built (the kill switch is checked against the configuration of
+   * the moment, not the one of the refresh).
+   */
+  private live(a: Aggregate): boolean {
+    const c = this.config.get().data;
+    if (c.killSwitch.disabledLps.includes(a.bidLp) || c.killSwitch.disabledLps.includes(a.askLp)) return false;
+    return this.clock().getTime() - a.sourceAt.getTime() <= c.dealing.maxStalenessMs;
+  }
+
+  /** Whether one LP's quote may still be traded on now: the LP is switched on and its own quote is fresh. */
+  quoteFresh(q: LpQuote): boolean {
+    const c = this.config.get().data;
+    if (c.killSwitch.disabledLps.includes(q.lp)) return false;
+    return this.clock().getTime() - new Date(q.at).getTime() <= c.dealing.maxStalenessMs;
   }
 }
 
 interface PairPricing {
-  bip: bigint;
+  pip: bigint;
   tick: bigint;
   /** Margin in price units per segment, and for segments without their own margin. */
-  segments: Map<string, { buy: bigint; sell: bigint; buyBips: number; sellBips: number }>;
-  fallback: { buy: bigint; sell: bigint; buyBips: number; sellBips: number };
+  segments: Map<string, { buy: bigint; sell: bigint; buyPips: number; sellPips: number }>;
+  fallback: { buy: bigint; sell: bigint; buyPips: number; sellPips: number };
 }
 
 /**
@@ -148,10 +177,10 @@ function pricingTable(config: BankConfig): Map<string, PairPricing> {
   if (table) return table;
   table = new Map();
   for (const pair of config.pairs) {
-    const bip = parsePrice(pair.bipSize);
-    const margin = (m: { buyBips: number; sellBips: number }) => ({ buy: BigInt(m.buyBips) * bip, sell: BigInt(m.sellBips) * bip, ...m });
+    const pip = parsePrice(pair.pipSize);
+    const margin = (m: { buyPips: number; sellPips: number }) => ({ buy: BigInt(m.buyPips) * pip, sell: BigInt(m.sellPips) * pip, ...m });
     table.set(pair.symbol, {
-      bip,
+      pip,
       tick: parsePrice(pair.tickSize),
       segments: new Map(Object.entries(config.dealing.margins.segments).map(([s, m]) => [s, margin(m)])),
       fallback: margin(config.dealing.margins.default),
@@ -172,7 +201,7 @@ export function segmentRates(config: BankConfig, pair: PairConfig, agg: { bid: b
   const tick = p.tick;
   const up = (v: bigint) => ((v + tick - 1n) / tick) * tick;
   const down = (v: bigint) => (v / tick) * tick;
-  return { buy: up(agg.ask + m.buy), sell: down(agg.bid - m.sell), buyBips: m.buyBips, sellBips: m.sellBips };
+  return { buy: up(agg.ask + m.buy), sell: down(agg.bid - m.sell), buyPips: m.buyPips, sellPips: m.sellPips };
 }
 
 export function ratesView(config: BankConfig, pairSymbol: string, agg: { bid: bigint; ask: bigint; at: Date | string }, segment: string) {

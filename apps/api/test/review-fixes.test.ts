@@ -325,8 +325,8 @@ describe('P1 recovery and controls (F06–F14, F17)', () => {
     expect(decimals.body.details[0].message).toMatch(/baseDecimals cannot change/);
 
     const v = h.ctx.config.get().version;
-    expect((await put((c) => (c.pairs[0].commission.buyBips = 6), { expectedVersion: v })).status).toBe(200);
-    expect((await put((c) => (c.pairs[0].commission.buyBips = 7), { expectedVersion: v })).body.error).toBe('VERSION_CONFLICT');
+    expect((await put((c) => (c.pairs[0].commission.buy = 600), { expectedVersion: v })).status).toBe(200);
+    expect((await put((c) => (c.pairs[0].commission.buy = 700), { expectedVersion: v })).body.error).toBe('VERSION_CONFLICT');
   });
 
   it('F17: reports readiness with the numbers operations alert on', async () => {
