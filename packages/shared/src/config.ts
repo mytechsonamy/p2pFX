@@ -245,13 +245,16 @@ export const BankConfigShape = z.object({
   /** `block`: hold funds at order entry. `no_block`: check at entry, hold at match, cancel if short. */
   balanceMode: z.enum(['block', 'no_block']),
   pairs: z.array(PairConfigSchema).min(1),
-  /** Kambiyo vergisi (FX transaction tax), per side, as a fraction (e.g. "0.002" = binde 2). */
+  /**
+   * Kambiyo vergisi (FX transaction tax), per side, as a fraction (e.g. "0.002" = binde 2). It is levied when the bank
+   * sells foreign currency, so by default only buyers pay it; the seller rate stays configurable.
+   */
   tax: z.object({
     buyRate: decimalString,
     sellRate: decimalString,
     base: z.enum(['effective', 'book']),
     /** Rates for precious metal pairs (gold, silver, platinum), which may diverge from the FX rates. */
-    metals: z.object({ buyRate: decimalString, sellRate: decimalString }).default({ buyRate: '0.002', sellRate: '0.002' }),
+    metals: z.object({ buyRate: decimalString, sellRate: decimalString }).default({ buyRate: '0.002', sellRate: '0' }),
   }),
   rounding: z.enum(['HALF_UP', 'HALF_EVEN', 'DOWN', 'UP']),
   validity: z.object({
@@ -313,7 +316,7 @@ const BASE_CONFIG: BankConfig = {
   },
   balanceMode: 'block',
   pairs: [],
-  tax: { buyRate: '0.002', sellRate: '0.002', base: 'effective', metals: { buyRate: '0.002', sellRate: '0.002' } },
+  tax: { buyRate: '0.002', sellRate: '0', base: 'effective', metals: { buyRate: '0.002', sellRate: '0' } },
   rounding: 'HALF_UP',
   validity: { options: ['DAY', 'GTD', 'GTC'], maxValidityDays: 30 },
   // Open around the clock so the prototype can be demoed any time; banks set real hours.

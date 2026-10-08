@@ -159,7 +159,7 @@ export function BankDealSheet() {
         <div className="breakdown">
           <Row label={t('bank.rate')} value={`${formatPrice(quote.rate, locale)} ${currencySymbol(pair.quote)}`} strong />
           <Row label={t('bank.notional', { qty: `${formatDecimal(quote.qty, locale, pair.baseDecimals)} ${currencySymbol(pair.base)}`, rate: formatPrice(quote.rate, locale) })} value={money(quote.notional)} />
-          <Row label={t('quote.tax', { rate: formatRate(quote.taxRate, locale) })} value={`${buy ? '+' : '−'} ${money(quote.tax)}`} />
+          {Number(quote.tax) > 0 && <Row label={t('quote.tax', { rate: formatRate(quote.taxRate, locale) })} value={`${buy ? '+' : '−'} ${money(quote.tax)}`} />}
           <div className="divider" />
           <Row label={buy ? t('quote.totalBuy') : t('quote.totalSell')} value={money(quote.total)} strong />
           <div className={`countdown ${left <= 3 ? 'urgent' : ''}`}>{left > 0 ? t('bank.validFor', { seconds: left }) : t('bank.expired')}</div>

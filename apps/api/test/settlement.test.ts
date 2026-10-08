@@ -41,7 +41,7 @@ describe('settlement saga', () => {
 
     const retry = await h.req('POST', `/ops/settlements/${failed.body[0].id}/retry`, OPS);
     expect(retry.body.outcome).toBe('SETTLED');
-    expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49001.80') });
+    expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49100.00') });
     expect(await h.balance('bob', 'USD')).toMatchObject({ balance: units('1000') });
     expect((await h.req('GET', '/ops/revenue', OPS)).body[0].commission.total).toBe('100.00');
   });
@@ -70,7 +70,7 @@ describe('settlement saga', () => {
     // Only the leg proven reversed gets a new key; the failed one, confirmed absent in core, keeps its own.
     expect(after.rows.map((r) => r.idempotency_key.endsWith(':r1'))).toEqual([true, false]);
     expect(await h.balance('alice', 'USD')).toMatchObject({ balance: 0n });
-    expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49001.80') });
+    expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49100.00') });
     expect(await h.balance('bob', 'TRY')).toMatchObject({ balance: units('100000') - units('49298.40') });
   });
 });
@@ -113,7 +113,7 @@ describe('stream', () => {
     await h.place(bob, { side: 'BUY', qty: '1000', price: '49.15' });
     await waitFor(() => messages.some((m) => m.channel === 'fills'));
     const fill = messages.find((m) => m.channel === 'fills')!.data;
-    expect(fill).toMatchObject({ side: 'SELL', total: '49001.80' });
+    expect(fill).toMatchObject({ side: 'SELL', total: '49100.00' });
     await waitFor(() => messages.some((m) => m.channel === 'trades:USDTRY'));
     expect(messages.find((m) => m.channel === 'trades:USDTRY')!.data).toMatchObject({ price: '49.15', qty: '1000.00', takerSide: 'BUY' });
     // Bob's events are not sent to Alice.

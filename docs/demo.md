@@ -36,7 +36,7 @@ oynattıkça değişir.
 1. Al-Sat ekranının üstündeki kart referans kuru ve tahtadaki en iyi alış/satışı gösterir (emir defteriyle
    aynı fiyatlar, komisyonsuz). Kurlar 4 hanelidir.
 2. Ayşe: **Al-Sat** → Sat, 1.000 USD, fiyat 49,15, geçerlilik Gün sonu. Onay ekranında işlem kuru 49,1000
-   (49,1500 − 0,0500 komisyon), binde 2 kambiyo vergisi, hesabına yatacak 49.001,80 TL. Onayla: 1.000 USD bloke.
+   (49,1500 − 0,0500 komisyon); satışta kambiyo vergisi yok, hesabına yatacak 49.100,00 TL. Onayla: 1.000 USD bloke.
 3. Mehmet'in emir defterinde 49,15'te Ayşe'nin teklifi anında belirir. Fiyata dokun: alış emri dolu gelir.
    Onay ekranı: **49,1500 + 0,0500 = 49,2000**, 50 TL komisyon, 98,40 TL vergi, hesabından çekilecek 49.298,40 TL.
 4. Onayla. İki telefon da güncellenir, yeni işlem tahtaya düşer.

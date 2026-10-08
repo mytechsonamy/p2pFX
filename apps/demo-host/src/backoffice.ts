@@ -151,14 +151,14 @@ const SECTIONS: Section[] = [
   {
     id: 'tax',
     title: 'Kambiyo vergisi',
-    intro: 'Hem alıcıdan hem satıcıdan alınan kambiyo vergisi (BSMV). Oran değişikliği yeni emirlere uygulanır; müşterinin onayladığı emirler onayladığı oranla işler.',
+    intro: 'Kambiyo vergisi (BSMV) bankanın döviz satışında, yani alıcıdan alınır; satıcı oranı varsayılan olarak sıfırdır. Oran değişikliği yeni emirlere uygulanır; müşterinin onayladığı emirler onayladığı oranla işler.',
     assumptions: ['tax'],
     groups: () => [
       {
         title: 'Döviz',
         fields: [
           { kind: 'pct', path: ['tax', 'buyRate'], label: 'Alıcıdan', help: 'Binde 2 için 0,2 girin' },
-          { kind: 'pct', path: ['tax', 'sellRate'], label: 'Satıcıdan' },
+          { kind: 'pct', path: ['tax', 'sellRate'], label: 'Satıcıdan', help: 'Satışta vergi yoksa 0' },
           { kind: 'select', path: ['tax', 'base'], label: 'Matrah', options: [['effective', 'Komisyon dahil tutar'], ['book', 'Kitap fiyatı tutarı']] },
         ],
       },
@@ -167,7 +167,7 @@ const SECTIONS: Section[] = [
         note: 'Döviz oranlarından ayrı tutulur; matrah yukarıdakiyle aynıdır.',
         fields: [
           { kind: 'pct', path: ['tax', 'metals', 'buyRate'], label: 'Alıcıdan', help: 'Binde 2 için 0,2 girin' },
-          { kind: 'pct', path: ['tax', 'metals', 'sellRate'], label: 'Satıcıdan' },
+          { kind: 'pct', path: ['tax', 'metals', 'sellRate'], label: 'Satıcıdan', help: 'Satışta vergi yoksa 0' },
         ],
       },
     ],

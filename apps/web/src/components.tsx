@@ -82,7 +82,7 @@ export function Breakdown({ q, pair, compact }: { q: QuoteBreakdown; pair: PairI
         </>
       )}
       <Row label={t('quote.gross')} value={money(q.gross)} />
-      <Row label={t('quote.tax', { rate: formatRate(q.taxRate, locale) })} value={`${buy ? '+' : '−'} ${money(q.tax)}`} />
+      {Number(q.tax) > 0 && <Row label={t('quote.tax', { rate: formatRate(q.taxRate, locale) })} value={`${buy ? '+' : '−'} ${money(q.tax)}`} />}
       <div className="divider" />
       <Row label={buy ? t('quote.receive') : t('quote.deliver')} value={qty} />
       <Row label={buy ? t('quote.totalBuy') : t('quote.totalSell')} value={money(q.total)} strong />

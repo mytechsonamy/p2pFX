@@ -49,7 +49,7 @@ await pause();
 step(2, `Ayşe ${QTY} USD'yi ${PRICE}'ten satışa koyuyor`);
 const sellQuote = await api('POST', '/v1/orders/quote', ayse, { pair: PAIR, side: 'SELL', qty: QTY, price: PRICE });
 line('Ayşe için işlem kuru', `${sellQuote.effectivePrice} (${PRICE} − ${sellQuote.commissionPerUnit} komisyon)`);
-line('Eline geçecek (vergi sonrası)', `${tl(sellQuote.total)} TL`);
+line(Number(sellQuote.tax) > 0 ? 'Eline geçecek (vergi sonrası)' : 'Eline geçecek (satışta kambiyo vergisi yok)', `${tl(sellQuote.total)} TL`);
 const sell = await placeOrder(ayse, { pair: PAIR, side: 'SELL', qty: QTY, price: PRICE, validity: 'DAY' });
 line('Emir', `${sell.status}, gün sonuna kadar geçerli, ${QTY} USD bloke edildi`);
 await pause();
