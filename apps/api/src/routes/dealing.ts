@@ -145,7 +145,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
   });
 
   /**
-   * Adds a pair the LPs quote, closed for trading, with the instrument's defaults (bips, tick, min order, the
+   * Adds a pair the LPs quote, closed for trading, with the instrument's defaults (pips, tick, min order, the
    * bank's ladder, limits). The operator reviews them and opens the pair under "Pariteler ve komisyon".
    */
   app.post('/ops/pairs', async (req) => {

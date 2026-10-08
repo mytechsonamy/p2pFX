@@ -416,7 +416,7 @@ export interface ConfigIssue {
 const positive = (v: string) => /[1-9]/.test(v);
 
 /**
- * Cross-field rules the schema cannot express: values that must be positive (a zero tick size or bip size
+ * Cross-field rules the schema cannot express: values that must be positive (a zero tick size or pip size
  * would break pricing), pair symbols that must match their currencies, and no duplicate pairs.
  */
 export function configIssues(c: BankConfig): ConfigIssue[] {
