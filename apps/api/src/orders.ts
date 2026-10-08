@@ -36,6 +36,8 @@ export interface OrderRow {
   request_hash: string;
   created_at: Date;
   updated_at: Date;
+  /** Last time the customer changed the order's price or quantity. */
+  amended_at: Date | null;
 }
 
 export const LIVE_STATUSES: OrderStatus[] = ['OPEN', 'PARTIAL'];
@@ -91,6 +93,7 @@ export function orderView(o: OrderRow, config: BankConfig) {
     quote,
     createdAt: o.created_at.toISOString(),
     updatedAt: o.updated_at.toISOString(),
+    amendedAt: o.amended_at?.toISOString(),
   };
 }
 export type OrderView = ReturnType<typeof orderView>;

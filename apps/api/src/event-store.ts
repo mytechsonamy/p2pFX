@@ -9,6 +9,7 @@ export type LiquiditySource = 'CUSTOMER' | 'BANK_MM' | 'BOT_MM';
 export type EventType =
   | 'OrderAccepted'
   | 'OrderCancelled'
+  | 'OrderAmended'
   | 'LiquidityGenerationReplaced'
   | 'FillCommitted'
   | 'PrincipalExecutionCommitted'

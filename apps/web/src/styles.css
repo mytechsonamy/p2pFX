@@ -302,3 +302,17 @@ h2, h3 { margin: 0; }
   margin: 8px 0;
   text-align: center;
 }
+
+/* Amending an order: the market around it, the customer's own level in the book, what the change means. */
+.amend-market { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 12px; padding: 10px 12px; margin: 4px 0 10px; border-radius: 10px; background: var(--c-surface); }
+.amend-market div { display: flex; flex-direction: column; }
+.amend-market small { color: var(--c-muted); font-size: 11px; }
+.amend-market .buy-text small, .amend-market .sell-text small { color: inherit; opacity: 0.8; }
+.amend-market strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+.sheet .card.book { box-shadow: none; border: 1px solid var(--c-border); margin-bottom: 10px; }
+.level.mine { outline: 2px solid var(--c-primary); outline-offset: -2px; }
+.mine-pill { margin-left: 6px; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--c-primary); color: var(--c-on-primary); }
+.amend-effects { margin: 4px 0 10px; padding-left: 18px; font-size: 13px; color: var(--c-muted); }
+.amend-effects li { margin: 2px 0; }
+.amend-effects .better { color: var(--c-buy); }
+.amend-effects .worse { color: var(--c-sell); }

@@ -76,6 +76,14 @@ export const PlaceOrderSchema = QuoteFields.extend({
   .refine((r) => r.type === 'MARKET' || !!r.validity, { message: 'validity is required for a limit order', path: ['validity'] });
 export type PlaceOrderRequest = z.infer<typeof PlaceOrderSchema>;
 
+/**
+ * A change to a live or queued limit order: the new limit price and the new total quantity (filled + remaining).
+ * Keeping the price and lowering the quantity keeps the order's place in the queue; any other change sends it to the
+ * back of its price level and matches it again at once. Values are absolute, so repeating a request changes nothing.
+ */
+export const AmendOrderSchema = z.object({ price: decimal, qty: decimal });
+export type AmendOrderRequest = z.infer<typeof AmendOrderSchema>;
+
 /** Full price breakdown shown on the order ticket and on receipts. All amounts are decimal strings. */
 export interface QuoteBreakdown {
   pair: string;
