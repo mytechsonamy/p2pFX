@@ -82,19 +82,24 @@ function RateStrip({ pair }: { pair: PairInfo }) {
 
 const DEPTH = 6;
 
-function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, side: Side) => void }) {
+/**
+ * The P2P book. `mine` marks the level of the customer's own order (amend sheet); `depth` limits the levels per side.
+ */
+export function OrderBook({
+  pair, onPick, mine, depth = DEPTH,
+}: { pair: PairInfo; onPick: (l: BookLevel, side: Side) => void; mine?: { side: Side; price: string }; depth?: number }) {
   const { books, rates, t, locale, config } = useExchange();
   const book = books[pair.symbol];
   const disclose = !!config.sourceDisclosure;
-  const asks = (book?.asks ?? []).slice(0, DEPTH);
-  const bids = (book?.bids ?? []).slice(0, DEPTH);
+  const asks = (book?.asks ?? []).slice(0, depth);
+  const bids = (book?.bids ?? []).slice(0, depth);
   const max = Math.max(1, ...[...asks, ...bids].map((l) => Number(l.qty)));
   const rate = rates[pair.symbol];
 
   const level = (l: BookLevel, kind: 'ask' | 'bid') => (
     <button
       key={`${kind}${l.price}`}
-      className={`level ${kind}`}
+      className={`level ${kind}${mine && mine.side === (kind === 'ask' ? 'SELL' : 'BUY') && compareDecimal(mine.price, l.price) === 0 ? ' mine' : ''}`}
       // Tapping an offer prefills a buy at that price, tapping a bid prefills a sell.
       onClick={() => onPick(l, kind === 'ask' ? 'BUY' : 'SELL')}
     >
@@ -102,6 +107,7 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
       <span className="price">
         {formatPrice(l.price, locale)}
         {disclose && l.bankQty && Number(l.bankQty) > 0 && <span className="pill bank-pill">{t('book.bank')}</span>}
+        {mine && mine.side === (kind === 'ask' ? 'SELL' : 'BUY') && compareDecimal(mine.price, l.price) === 0 && <span className="pill mine-pill">{t('book.mine')}</span>}
       </span>
       <span className="qty">{formatDecimal(l.qty, locale, pair.baseDecimals)}</span>
       <span className="count">{l.count}</span>
@@ -138,7 +144,7 @@ function OrderBook({ pair, onPick }: { pair: PairInfo; onPick: (l: BookLevel, si
  * The ticket's quote, fetched again when the inputs change or on `requote()`. requote drops the current quote at once
  * (nothing can be confirmed from it any more) and fetches a new one.
  */
-function useQuote(pair: PairInfo, side: Side, type: OrderType, qty?: string, price?: string) {
+export function useQuote(pair: PairInfo, side: Side, type: OrderType, qty?: string, price?: string) {
   const { api, errorText } = useExchange();
   const [state, setState] = useState<{ quote?: QuoteBreakdown; error?: string; loading: boolean }>({ loading: false });
   const [round, setRound] = useState(0);

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { PlaceOrderSchema, QuoteRequestSchema, findPair, formatDecimal, formatPrice, isMarketOpen, parsePrice, taxRates } from '@p2p/shared';
+import { AmendOrderSchema, PlaceOrderSchema, QuoteRequestSchema, findPair, formatDecimal, formatPrice, isMarketOpen, parsePrice, taxRates } from '@p2p/shared';
 import { toWire } from '@p2p/core-adapter';
 import type { AppContext } from '../app.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
@@ -199,6 +199,14 @@ export function customerRoutes(app: FastifyInstance, ctx: AppContext) {
     }
     const updated = await exchange.cancel(o.id, 'USER');
     return orderView(updated!, config.get().data);
+  });
+
+  /** Changes a live or queued limit order's price and/or total quantity (see AmendOrderSchema). */
+  app.patch<{ Params: { id: string } }>('/v1/orders/:id', async (req) => {
+    const session = await auth.customer(req);
+    ctx.rateLimit(session.customerId, session.segment);
+    const o = await ownOrder(req.params.id, session.customerId);
+    return entry.amend(session, o, parse(AmendOrderSchema, req.body));
   });
 
   app.get<{ Querystring: { limit?: string } }>('/v1/fills', async (req) => {

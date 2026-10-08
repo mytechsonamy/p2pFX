@@ -9,6 +9,7 @@ import {
   parsePrice,
   type BankConfig,
   type PairConfig,
+  type AmendOrderRequest,
   type PlaceOrderRequest,
   type QuoteRequest,
   type Side,
@@ -16,7 +17,7 @@ import {
 import { priceSide, pricingParams, toBreakdown, toSnapshot } from '@p2p/pricing';
 import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
 import { tx, type Db } from './db/pool.js';
-import { reserveDailyLimit } from './limits.js';
+import { dayStartOf, reserveDailyLimit } from './limits.js';
 import type { Session } from './auth.js';
 import type { ConfigService } from './config-service.js';
 import type { Exchange } from './engine/exchange.js';
@@ -206,6 +207,56 @@ export class OrderEntry {
 
     if (status === 'OPEN') await this.exchange.submit(orderId, pair.symbol);
     return { order: orderView((await loadOrder(this.db, orderId))!, config), replayed: false };
+  }
+
+  /**
+   * A customer's change to their live or queued limit order. Validated like a new order (halt, hours, tick, price
+   * band, order limit, balance in no_block mode) and priced with the configuration in force now, which the customer
+   * saw on the amend screen. The daily limit counts the order at its new value (an order from an earlier day only
+   * for what the change adds). The exchange applies it in the pair's sequencer.
+   */
+  async amend(session: Session, order: OrderRow, body: AmendOrderRequest) {
+    if (!this.exchange.running) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
+    if (order.source !== 'CUSTOMER' || order.order_type !== 'LIMIT') throw conflict('ORDER_NOT_AMENDABLE', 'only limit orders can be changed');
+    if (!['OPEN', 'PARTIAL', 'QUEUED'].includes(order.status)) throw conflict('ORDER_NOT_AMENDABLE', `order is ${order.status}`);
+
+    const { data: config, version } = this.config.get();
+    const now = this.clock();
+    const halted = haltReason(config, order.pair, 'customer');
+    if (halted) throw unprocessable('TRADING_HALTED', halted);
+    if (!isMarketOpen(now, config.tradingHours) && config.tradingHours.outsideHours === 'reject') throw unprocessable('MARKET_CLOSED', 'the market is closed');
+
+    const { pair, price } = await this.validatePriceAndQty(config, { pair: order.pair, side: order.side, type: 'LIMIT', qty: body.qty, price: body.price });
+    const qty = parseOr(body.qty, pair.baseDecimals, 'INVALID_QTY', `quantity must have at most ${pair.baseDecimals} decimals`);
+    if (qty <= order.filled_qty) throw unprocessable('INVALID_QTY', `quantity must be more than the ${formatDecimal(order.filled_qty, pair.baseDecimals)} already filled`);
+    if (qty > order.qty && qty - order.filled_qty < parseDecimal(pair.minQty, pair.baseDecimals)) {
+      throw badRequest('QTY_TOO_SMALL', `minimum quantity is ${pair.minQty}`);
+    }
+    const params = pricingParams(config, pair, order.side);
+    const pricing = priceSide(qty, price, params);
+    this.checkOrderLimit(config, session, pricing.notional, pair);
+
+    if (order.balance_mode === 'no_block') {
+      const accounts = await this.core.getAccounts(session.customerRef);
+      const account = accounts.find((a) => a.id === (order.side === 'SELL' ? order.fx_account_id : order.try_account_id));
+      const needed = requirementFor({ side: order.side, book_price: formatPrice(price, 8), pricing: toSnapshot(params) }, qty - order.filled_qty);
+      if (!account || account.available < needed) throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance for the amended order');
+    }
+
+    const updated = await this.exchange.amend(order.id, {
+      price,
+      qty,
+      pricing: toSnapshot(params),
+      configVersion: version,
+      notional: pricing.notional,
+      reserve: async (client, current) => {
+        // An order entered today counts at its new value; one from an earlier day only for what the change adds.
+        const today = current.created_at >= dayStartOf(config, now);
+        const counted = today ? pricing.notional : pricing.notional > current.notional ? pricing.notional - current.notional : 0n;
+        await reserveDailyLimit(client, config, session, counted, pair, now, current.id);
+      },
+    });
+    return orderView(updated, this.config.get().data);
   }
 
   private async replay(prior: { id: string; request_hash: string }, requestHash: string) {

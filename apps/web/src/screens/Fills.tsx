@@ -36,7 +36,7 @@ function FillCard({ fill: f }: { fill: Fill }) {
         {f.liquidity !== 'BANK' && <Row label={t('quote.bookPrice')} value={formatPrice(f.bookPrice, locale)} />}
         <Row label={t('quote.effectivePrice')} value={formatPrice(f.effectivePrice, locale)} strong />
         {f.liquidity !== 'BANK' && <Row label={t('quote.commissionTotal')} value={money(f.commission)} />}
-        <Row label={t('fills.tax')} value={money(f.tax)} />
+        {Number(f.tax) > 0 && <Row label={t('fills.tax')} value={money(f.tax)} />}
         <Row label={buy ? t('quote.totalBuy') : t('quote.totalSell')} value={money(f.total)} strong />
       </div>
       <div className="order-actions">

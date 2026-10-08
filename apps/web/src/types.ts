@@ -155,6 +155,8 @@ export interface Order {
   quote: QuoteBreakdown;
   createdAt: string;
   updatedAt: string;
+  /** Set once the customer changed the order's price or quantity. */
+  amendedAt?: string;
 }
 
 export interface Fill {

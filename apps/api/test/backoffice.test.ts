@@ -88,7 +88,7 @@ describe('back office', () => {
     const preview = await h.req('PUT', '/ops/config', editor, { config: withTax('0.001'), reason: '', dryRun: true });
     expect(preview.body.diff).toEqual([
       { path: 'tax.buyRate', from: '0.002', to: '0.001' },
-      { path: 'tax.sellRate', from: '0.002', to: '0.001' },
+      { path: 'tax.sellRate', from: '0', to: '0.001' },
     ]);
     expect(h.ctx.config.get().version).toBe(before);
 
