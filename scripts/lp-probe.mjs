@@ -37,7 +37,7 @@ const HOSTS = [
   ['OANDA practice REST', 'api-fxpractice.oanda.com'],
   ['OANDA practice stream', 'stream-fxpractice.oanda.com'],
   ['Saxo SIM gateway', 'gateway.saxobank.com'],
-  ['Saxo SIM streaming', 'streaming.saxobank.com'],
+  ['Saxo SIM streaming', 'sim-streaming.saxobank.com'],
   ['LMAX London demo (web)', 'web-order.london-demo.lmax.com'],
   ['LMAX London demo (FIX md)', 'fix-marketdata.london-demo.lmax.com'],
   ['Integral (web)', 'www.integral.com'],

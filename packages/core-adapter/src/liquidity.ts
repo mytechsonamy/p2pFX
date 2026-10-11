@@ -36,8 +36,11 @@ export interface LiquidityAdapter {
    * LiquidityOutcomeUnknownError when the trade may have happened (timeout, lost response).
    */
   execute(req: LpExecutionRequest): Promise<LpExecution>;
-  /** The execution with this reference at the LP, or undefined if the LP has none. */
-  findExecution(lp: string, ref: string): Promise<LpExecution | undefined>;
+  /**
+   * The execution with this reference at the LP, or undefined if the LP has none. `request` is the trade as
+   * it was sent (synthetic crosses need it to rebuild a two-leg trade).
+   */
+  findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>): Promise<LpExecution | undefined>;
 }
 
 export class LiquidityError extends Error {

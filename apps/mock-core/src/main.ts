@@ -6,7 +6,7 @@ const port = Number(process.env.PORT ?? 4100);
 const bank = new MockCoreBank();
 if (process.env.SEED_DEMO !== '0') seedDemo(bank);
 
-const app = buildMockCore(bank, { logger: true });
+const app = buildMockCore(bank, { logger: true, lpMode: process.env.MOCK_LP_MODE === 'interbank' ? 'interbank' : 'direct' });
 app.listen({ port, host: '0.0.0.0' }).catch((err) => {
   app.log.error(err);
   process.exit(1);

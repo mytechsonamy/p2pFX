@@ -282,12 +282,12 @@ export class PositionKeeper {
    */
   async resolveOpenClips(pairSymbol?: string) {
     const { rows } = await this.db.query(
-      `select id, lp, lp_ref, created_at from hedges where status in ('PENDING', 'UNKNOWN') and lp_ref is not null and ($1::text is null or pair = $1) order by seq`,
+      `select id, pair, side, qty, lp, lp_ref, created_at from hedges where status in ('PENDING', 'UNKNOWN') and lp_ref is not null and ($1::text is null or pair = $1) order by seq`,
       [pairSymbol ?? null],
     );
     for (const r of rows) {
       try {
-        const exec = await this.lp.findExecution(r.lp, r.lp_ref);
+        const exec = await this.lp.findExecution(r.lp, r.lp_ref, this.sent(r));
         if (exec) {
           await this.db.query(`update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1 and status in ('PENDING', 'UNKNOWN')`, [r.id, exec.rate, exec.tradeRef]);
         } else if (Date.now() - new Date(r.created_at).getTime() > UNKNOWN_ESCALATE_MS) {
@@ -310,7 +310,7 @@ export class PositionKeeper {
     if (!['PENDING', 'UNKNOWN'].includes(r.status)) throw new ApiError(409, 'NOT_OPEN', `hedge is ${r.status}`);
     let exec;
     try {
-      exec = await this.lp.findExecution(r.lp, r.lp_ref);
+      exec = await this.lp.findExecution(r.lp, r.lp_ref, this.sent(r));
     } catch (err) {
       throw new ApiError(503, 'LP_LOOKUP_FAILED', `the LP lookup failed, nothing was changed: ${(err as Error).message}`);
     }
@@ -323,6 +323,12 @@ export class PositionKeeper {
     if (!updated.length) throw new ApiError(409, 'NOT_OPEN', 'hedge was resolved meanwhile');
     await audit(this.db, actor, 'dealing.hedge.resolve', { hedgeId: r.id, requested: outcome, status, note });
     return hedgeView(updated[0], findPair(this.config.get().data, r.pair));
+  }
+
+  /** The trade a hedge row was sent to its LP as. */
+  private sent(r: Record<string, any>) {
+    const decimals = findPair(this.config.get().data, r.pair)?.baseDecimals ?? 2;
+    return { pair: r.pair as string, side: r.side as 'BUY' | 'SELL', qty: formatDecimal(BigInt(r.qty), decimals) };
   }
 
   /** Base quantity of clips sent but not confirmed by their LP yet (signed: + the bank is buying), per pair. */

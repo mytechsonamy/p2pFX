@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { SignJWT, exportSPKI, generateKeyPair } from 'jose';
-import { MockCoreBank, MockLiquidity } from '@p2p/core-adapter';
+import { MockCoreBank, MockLiquidity, SyntheticLiquidity, crossFromReference, syntheticRoute } from '@p2p/core-adapter';
 import { DEFAULT_CONFIG, parseDecimal, type BankConfig } from '@p2p/shared';
 import { buildApp } from '../src/app.js';
 
@@ -21,7 +21,7 @@ export interface Harness {
   ctx: Awaited<ReturnType<typeof buildApp>>['ctx'];
   close: () => Promise<void>;
   bank: MockCoreBank;
-  /** Frozen LPs quoting around the bank's reference rate. */
+  /** Frozen LPs quoting around the bank's reference rate (with `interbank`, USDTRY and the dollar crosses only). */
   liquidity: MockLiquidity;
   clock: { now: Date };
   login: (customerRef: string, segment?: string) => Promise<string>;
@@ -37,7 +37,9 @@ export interface Harness {
 
 export const OPS = 'ops-secret';
 
-export async function startHarness(opts: { bank?: MockCoreBank; config?: BankConfig; reset?: boolean; matching?: boolean } = {}): Promise<Harness> {
+export async function startHarness(
+  opts: { bank?: MockCoreBank; config?: BankConfig; reset?: boolean; matching?: boolean; interbank?: boolean } = {},
+): Promise<Harness> {
   if (opts.reset !== false) await resetDb();
   const { publicKey, privateKey } = await keys;
   const bank = opts.bank ?? new MockCoreBank();
@@ -46,11 +48,22 @@ export async function startHarness(opts: { bank?: MockCoreBank; config?: BankCon
     bank.setReferenceRate('EURTRY', '53.40');
   }
   const clock = { now: new Date('2026-10-05T09:00:00Z') };
-  const liquidity = new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs(), volatility: 0, clock: () => clock.now.getTime() });
+  const crosses = () => bank.referencePairs().flatMap((p) => syntheticRoute(p)?.cross ?? []);
+  const liquidity = new MockLiquidity({
+    anchor: (pair) =>
+      !opts.interbank || pair === 'USDTRY'
+        ? bank.referenceRate(pair)
+        : crosses().includes(pair)
+          ? crossFromReference(pair, (p) => bank.referenceRate(p))
+          : undefined,
+    instruments: () => (opts.interbank ? ['USDTRY', ...crosses()] : bank.referencePairs()),
+    volatility: 0,
+    clock: () => clock.now.getTime(),
+  });
   const { app, ctx, close } = await buildApp({
     databaseUrl: DATABASE_URL,
     core: bank,
-    liquidity,
+    liquidity: opts.interbank ? new SyntheticLiquidity(liquidity) : liquidity,
     bankPublicKeyPem: await exportSPKI(publicKey),
     sessionSecret: 'test-session-secret-0123456789abcdef',
     opsToken: OPS,

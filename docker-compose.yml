@@ -48,6 +48,8 @@ services:
     environment:
       PORT: "4100"
       SEED_DEMO: "1"
+      # interbank: the simulated LPs quote only USDTRY and the dollar crosses; the other pairs are synthetic.
+      MOCK_LP_MODE: ${MOCK_LP_MODE:-direct}
     ports: ["127.0.0.1:4100:4100"]
 
   api:
