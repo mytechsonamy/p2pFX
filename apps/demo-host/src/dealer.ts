@@ -13,7 +13,7 @@ interface PairView {
   pair: string;
   lps: LpQuote[];
   best: { bid: string; ask: string; bidLp: string; askLp: string } | null;
-  segments: Record<string, { buy: string; sell: string; buyBips: number; sellBips: number }>;
+  segments: Record<string, { buy: string; sell: string; buyPips: number; sellPips: number }>;
 }
 interface Position {
   pair: string;
@@ -56,13 +56,13 @@ interface Desk {
     autoHedge: boolean;
     positionLimits: Record<string, string>;
     hedging: { targetPct: number; maxClipQty: Record<string, string>; split: 'BEST_LP' | 'ACROSS_LPS' };
-    margins: { default: { buyBips: number; sellBips: number }; segments: Record<string, { buyBips: number; sellBips: number }> };
+    margins: { default: { buyPips: number; sellPips: number }; segments: Record<string, { buyPips: number; sellPips: number }> };
   };
   pairs: PairView[];
   positions: Position[];
   deals: Deal[];
   hedges: Hedge[];
-  bankBook?: { enabled: boolean; orders: { pair: string; side: 'BUY' | 'SELL'; price: string; qty: string }[] };
+  bankBook?: { enabled: boolean; botEnabled?: boolean; orders: { pair: string; side: 'BUY' | 'SELL'; source?: 'BANK_MM' | 'BOT_MM'; price: string; qty: string }[] };
 }
 
 const root = document.getElementById('dealer')!;
@@ -84,7 +84,7 @@ function pairCard(p: PairView) {
     )
     .join('');
   const segs = Object.entries(p.segments)
-    .map(([s, r]) => `<tr><td>${segName(s)}</td><td class="num">${rate(r.sell)}</td><td class="num">${rate(r.buy)}</td><td class="num muted">${r.sellBips}/${r.buyBips} bip</td></tr>`)
+    .map(([s, r]) => `<tr><td>${segName(s)}</td><td class="num">${rate(r.sell)}</td><td class="num">${rate(r.buy)}</td><td class="num muted">${r.sellPips}/${r.buyPips} pip</td></tr>`)
     .join('');
   return `<section class="desk-card">
     <h2>${p.pair.slice(0, 3)}/${p.pair.slice(3)}</h2>
@@ -156,18 +156,17 @@ function bankBookCard(d: Desk) {
     d.bankBook!.orders
       .filter((o) => o.pair === pair && o.side === side)
       .sort((a, b) => (side === 'SELL' ? Number(a.price) - Number(b.price) : Number(b.price) - Number(a.price)))
-      .map((o) => `<tr><td class="num ${side === 'SELL' ? 'neg' : 'pos'}">${rate(o.price)}</td><td class="num">${money(o.qty)}</td></tr>`)
+      .map((o) => `<tr><td class="num ${side === 'SELL' ? 'neg' : 'pos'}">${rate(o.price)}</td><td class="num">${money(o.qty)}</td><td class="muted">${o.source === 'BOT_MM' ? 'bot' : 'merdiven'}</td></tr>`)
       .join('');
   const cards = pairs
     .map(
       (p) => `<div><h3>${p.slice(0, 3)}/${p.slice(3)}</h3><div class="desk-grid two-small">
-        <table><thead><tr><th class="num">Satış</th><th class="num">Miktar</th></tr></thead><tbody>${col(p, 'SELL')}</tbody></table>
-        <table><thead><tr><th class="num">Alış</th><th class="num">Miktar</th></tr></thead><tbody>${col(p, 'BUY')}</tbody></table></div></div>`,
+        <table><thead><tr><th class="num">Satış</th><th class="num">Miktar</th><th></th></tr></thead><tbody>${col(p, 'SELL')}</tbody></table>
+        <table><thead><tr><th class="num">Alış</th><th class="num">Miktar</th><th></th></tr></thead><tbody>${col(p, 'BUY')}</tbody></table></div></div>`,
     )
     .join('');
-  return `<section class="desk-card wide"><h2>Tahtadaki banka emirleri <small>${
-    d.bankBook.enabled ? 'Kademeler backoffice\'ten yönetilir, LP fiyatı oynadıkça yeniden fiyatlanır' : 'Kapalı'
-  }</small></h2><div class="desk-grid">${cards || '<p class="muted">Tahtada banka emri yok</p>'}</div></section>`;
+  const state = `Merdiven ${d.bankBook.enabled ? 'açık' : 'kapalı'}, bot ${d.bankBook.botEnabled ? 'açık' : 'kapalı'} · backoffice'ten yönetilir, LP fiyatı oynadıkça yeniden fiyatlanır`;
+  return `<section class="desk-card wide"><h2>Tahtadaki banka emirleri <small>${state}</small></h2><div class="desk-grid">${cards || '<p class="muted">Tahtada banka emri yok</p>'}</div></section>`;
 }
 
 function policyText(d: Desk['dealing']) {

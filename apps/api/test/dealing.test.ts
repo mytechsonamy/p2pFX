@@ -9,7 +9,7 @@ afterEach(async () => {
   h = undefined as unknown as Harness;
 });
 
-// Frozen LPs around 49.15: the best is LP-A at 49.1441 / 49.1559. Default margin 10 bips, premium 4.
+// Frozen LPs around 49.15: the best is LP-A at 49.1441 / 49.1559. Default margin 1000 pips, premium 400.
 const usd = DEFAULT_CONFIG.pairs[0];
 
 async function deal(token: string, side: 'BUY' | 'SELL', qty: string) {

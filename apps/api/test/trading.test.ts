@@ -284,7 +284,7 @@ describe('order rules', () => {
     h.customer('bob', { USD: '0', TRY: '100000' });
     const [alice, bob] = await Promise.all(['alice', 'bob'].map((r) => h.login(r)));
     await h.place(alice, { side: 'SELL', qty: '1000', price: '49.15' });
-    await h.setConfig((c) => ({ ...c, pairs: c.pairs.map((p) => ({ ...p, commission: { buyBips: 10, sellBips: 10 } })) }));
+    await h.setConfig((c) => ({ ...c, pairs: c.pairs.map((p) => ({ ...p, commission: { mode: 'PIPS' as const, buy: 1000, sell: 1000 } })) }));
     await h.place(bob, { side: 'BUY', qty: '1000', price: '49.15' });
     const [aliceFill] = (await h.req('GET', '/v1/fills', alice)).body;
     const [bobFill] = (await h.req('GET', '/v1/fills', bob)).body;

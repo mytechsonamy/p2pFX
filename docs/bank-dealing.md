@@ -30,10 +30,10 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
 
 - **LP feeds.** Each LP streams bid/ask per pair. The engine drops quotes older than `maxStalenessMs` and
   takes the best bid (highest) and best ask (lowest) across LPs: the aggregated LP price.
-- **Segment margin.** `dealing.margins` sets, per segment, bips added on top: the customer buys from the bank
-  at `LP ask + buyBips × bipSize` and sells to the bank at `LP bid − sellBips × bipSize`. Unknown segments use
-  `default`. Example: LP 49.140 / 49.160, default margin 10 bips → bank sells at 49.26, buys at 49.04;
-  premium 4 bips → 49.20 / 49.10.
+- **Segment margin.** `dealing.margins` sets, per segment, pips added on top: the customer buys from the bank
+  at `LP ask + buyPips × pipSize` and sells to the bank at `LP bid − sellPips × pipSize`. Unknown segments use
+  `default`. Example (USD/TRY, pip 0.0001): LP 49.140 / 49.160, default margin 1000 pips → bank sells at 49.26,
+  buys at 49.04; premium 400 pips → 49.20 / 49.10.
 - **Reference rate.** The P2P price band and the reference rate shown on the board stay the core banking
   reference rate, as before. In the prototype the simulated LPs quote around that same rate.
 - **No P2P commission** on bank deals: the margin is the bank's earning. Kambiyo vergisi applies as usual.
@@ -44,13 +44,21 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
    total, and an expiry (`quoteTtlSeconds`, default 10 s). The ticket shows a countdown.
 2. `POST /v1/bank/deals { quoteId }` executes it if not expired and the customer's funds cover it: one FX
    transaction in core banking (the bank buys from or sells to the customer), a dekont, and the position
-   update. A failed posting leaves the deal `FAILED_NEEDS_REVIEW`, like P2P settlements.
+   update. A failed posting leaves the deal `FAILED_NEEDS_REVIEW`, like P2P settlements. The deal is a principal
+   execution of the bank (`BANK_DIRECT`): its position moves when the deal commits, and a deal that would take the
+   position past `inventory.maxPosition` is refused (`INVENTORY_LIMIT`). `channels.bankDirect` switches the
+   channel; the kill switch halts it.
 3. The deal appears in the customer's trades with the bank as counterparty.
 
 ## Positions and hedging
 
-- Every bank deal changes the bank's position in the base currency (customer buys → bank short). P2P fills do
-  not: the bank is back-to-back there.
+- The bank's position comes from its principal executions (`principal_executions`): Direct deals, and board
+  fills where the bank's ladder (BANK_MM) or bot (BOT_MM) was one side. It moves when the execution commits, not
+  when settlement finishes (a board fill whose settlement fails is taken out again). Fills between two customers
+  (C2C) do not move it: the bank is back-to-back there.
+- `inventory.maxPosition` is a hard cap per currency shared by Direct, the ladder and the bot: ladder and bot
+  levels are cut to what the bank may still buy or sell, a fill that would breach it is refused at the moment of
+  the fill, and Direct refuses that side. `dealing.positionLimits` stays the auto-hedge trigger.
 - The position keeper tracks quantity, average cost, realized P&L (on reductions) and unrealized P&L at the
   aggregated mid. Margin earned per deal is reported separately (deal rate vs LP price at the time).
 - `dealing.positionLimits` sets a limit per currency. With `autoHedge` on, a deal that takes the position past
@@ -82,21 +90,28 @@ and side:
   commission is taken out of the level price: a customer who takes a bank level pays (or receives) the level
   price plus commission, which is never better than the bank's own rate. Example, USD/TRY: bank rate
   49.2559, first ask level 0.02 % out = 49.2658 all-in, shown in the book at 49.2158.
-- The ladder is repriced when the anchor moves `repriceBips` or more, when the configuration changes, and
-  when customers take a level (the level is refilled). The bank's own orders pay no commission or tax and
-  skip customer limits (`OrderEntry.place(..., { house: true })`).
+- The ladder is repriced when the anchor moves `repricePips` or more, when the configuration changes, and
+  when customers take a level (the level is refilled). Each repricing is one generation
+  (`Exchange.replaceLiquidity`): the old orders go and the new ones come in one step of the pair's sequencer, so
+  a customer order sees the old ladder or the new one, never half of each. A new level that crosses a resting
+  customer order trades at the resting price. The bank's orders pay no commission or tax, are held at fill time
+  (`no_block`) and are GTC.
+- The bank's bot (BOT_MM, `botMarketMaker`) adds levels around the LP mid in the same way, as the same principal:
+  it never trades with the ladder or with itself (self trade prevention by principal) and never crosses the book.
+  A stale LP feed, the channel switched off (`channels.bankMarketMaker`, `channels.botMarketMaker`) or a halt
+  withdraw both at once.
 - Fills against the bank's orders change the bank position (with P&L) like bank-row deals and go through the
-  same auto-hedge rule. Fills between customers stay back-to-back.
+  same auto-hedge rule, started in the background as the fill commits (the customer's fill is firm whatever the
+  hedge does). Fills between customers stay back-to-back.
 - Editing: backoffice → "Banka emirleri (tahta)". The dealer screen lists the bank's resting orders.
 
 ## Configuration
 
 ```jsonc
 "dealing": {
-  "enabled": true,
   "quoteTtlSeconds": 10,
   "maxStalenessMs": 3000,
-  "margins": { "default": { "buyBips": 10, "sellBips": 10 }, "segments": { "premium": { "buyBips": 4, "sellBips": 4 } } },
+  "margins": { "default": { "buyPips": 1000, "sellPips": 1000 }, "segments": { "premium": { "buyPips": 400, "sellPips": 400 } } },
   "maxDealQty": { "USD": "250000", "EUR": "250000", "GBP": "100000" },
   "positionLimits": { "USD": "100000", "EUR": "100000", "GBP": "50000" },
   "autoHedge": true,

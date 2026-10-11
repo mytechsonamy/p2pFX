@@ -2,7 +2,8 @@
 import type { OrderStatus, QuoteBreakdown, Side } from '@p2p/shared';
 
 export type { OrderStatus, QuoteBreakdown, Side };
-export type Validity = 'DAY' | 'GTD' | 'GTC';
+export type Validity = 'DAY' | 'GTD' | 'GTC' | 'IOC';
+export type OrderType = 'LIMIT' | 'MARKET';
 
 export interface Branding {
   productName: string;
@@ -23,8 +24,10 @@ export interface PairInfo {
   tickSize: string;
   minQty: string;
   priceBandPct: string;
-  /** Value of one bip in quote currency, e.g. "0.01". */
-  bipSize: string;
+  /** Value of one pip in quote currency, e.g. "0.0001". */
+  pipSize: string;
+  /** PIPS: a fixed commission per unit; BPS: a share of the price. */
+  commission?: { mode: 'PIPS' | 'BPS'; buy: number; sell: number };
   /** Kambiyo vergisi for this pair (precious metals have their own rates). */
   tax?: { buyRate: string; sellRate: string };
   commissionPerUnit: { buy: string; sell: string };
@@ -42,6 +45,14 @@ export interface AppConfig {
   marketOpen: boolean;
   limits: { maxOrderNotional: string; maxDailyNotional: string };
   dealing?: { enabled: boolean; quoteTtlSeconds: number; maxDealQty: Record<string, string> };
+  /** SEPARATE: the bank's Direct rates and the board in two areas. UNIFIED: one board, Direct as a quick path. */
+  presentation?: 'SEPARATE' | 'UNIFIED';
+  /** Whether the board marks levels holding bank liquidity. */
+  sourceDisclosure?: boolean;
+  marketOrders?: { enabled: boolean; maxSlippageBps: number };
+  /** Set while trading is halted for everyone; `haltedPairs` lists halted pairs. */
+  halted?: string | null;
+  haltedPairs?: string[];
 }
 
 /** The bank's own rates for the customer's segment (LP price plus margin), live. */
@@ -83,6 +94,8 @@ export interface BookLevel {
   price: string;
   qty: string;
   count: number;
+  /** With source disclosure: the part of `qty` that is the bank's (ladder and bot). */
+  bankQty?: string;
 }
 
 export interface Book {
@@ -126,6 +139,7 @@ export interface Rate {
 export interface Order {
   id: string;
   pair: string;
+  type?: OrderType;
   side: Side;
   price: string;
   qty: string;

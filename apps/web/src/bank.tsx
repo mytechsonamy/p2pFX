@@ -31,6 +31,18 @@ export function BankRow({ pair }: { pair: PairInfo }) {
   );
 }
 
+/** UNIFIED presentation: the bank's Direct rates as a quick path on the ticket instead of their own area. */
+export function BankQuick({ pair, side, qty }: { pair: PairInfo; side: Side; qty?: string }) {
+  const { bankRates, config, t, locale, openBankDeal } = useExchange();
+  const r = bankRates[pair.symbol];
+  if (!config.dealing?.enabled || !r) return null;
+  return (
+    <button type="button" className="link bank-quick" onClick={() => openBankDeal({ side, qty })}>
+      {t('bank.quick', { buy: formatPrice(r.buy, locale), sell: formatPrice(r.sell, locale) })}
+    </button>
+  );
+}
+
 /**
  * Shown on the order ticket when dealing with the bank right now beats the customer's all-in P2P price:
  * buying, the bank's rate is lower; selling, it is higher.

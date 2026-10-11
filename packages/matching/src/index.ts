@@ -3,18 +3,26 @@ import type { Side } from '@p2p/shared';
 /** An order as the matching engine sees it. Prices are PRICE_SCALE units, quantities minor units. */
 export interface BookOrder {
   id: string;
-  ownerId: string;
+  /**
+   * The economic owner (principal) of the order: two orders of the same principal never trade with each other
+   * (self trade prevention). A customer is their own principal; the bank's ladder and its bot share the bank's.
+   */
+  principalId: string;
   side: Side;
   price: bigint;
   remaining: bigint;
   /** Arrival sequence; lower is earlier (time priority). */
   seq: bigint;
+  /** Where the liquidity comes from. Kept for depth reporting only: it never affects priority. */
+  source?: string;
 }
 
 export interface Level {
   price: bigint;
   qty: bigint;
   count: number;
+  /** Quantity per source, when asked for. */
+  bySource?: Record<string, bigint>;
 }
 
 /**
@@ -82,13 +90,16 @@ export class OrderBook {
     return this.levels[side][0]?.orders[0];
   }
 
-  /** Aggregated price levels, best first. */
-  depth(side: Side, maxLevels = 20): Level[] {
-    return this.levels[side].slice(0, maxLevels).map((l) => ({
-      price: l.price,
-      qty: l.orders.reduce((s, o) => s + o.remaining, 0n),
-      count: l.orders.length,
-    }));
+  /** Aggregated price levels, best first; `bySource` adds each level's quantity per source. */
+  depth(side: Side, maxLevels = 20, bySource = false): Level[] {
+    return this.levels[side].slice(0, maxLevels).map((l) => {
+      const level: Level = { price: l.price, qty: l.orders.reduce((s, o) => s + o.remaining, 0n), count: l.orders.length };
+      if (bySource) {
+        level.bySource = {};
+        for (const o of l.orders) level.bySource[o.source ?? 'CUSTOMER'] = (level.bySource[o.source ?? 'CUSTOMER'] ?? 0n) + o.remaining;
+      }
+      return level;
+    });
   }
 
   orders(): BookOrder[] {
@@ -131,7 +142,7 @@ export type MatchDecision =
 export interface MatchResult {
   fills: { makerId: string; qty: bigint; price: bigint }[];
   cancelledMakers: { id: string; reason: string }[];
-  /** Set when the incoming order was cancelled (self-match or the caller's decision). */
+  /** Set when the incoming order was cancelled (self-match, a market order's unfilled remainder, or the caller's decision). */
   takerCancelled?: string;
   /** Unfilled quantity of the incoming order. */
   remaining: bigint;
@@ -140,17 +151,20 @@ export interface MatchResult {
 }
 
 /**
- * Matches an incoming order against the book with price-time priority.
+ * Matches an incoming order against the book with price-time priority: the best price first and, at one price,
+ * the order the sequencer accepted first. Where an order comes from (customer, bank, bot) plays no part.
  *
- * Fills execute at the resting order's price. A customer's order never trades with
- * their own resting order: the incoming order is cancelled instead (cancel-newest).
- * The caller decides, per candidate, whether the trade can happen (balance holds in
- * `no_block` mode) and performs it. Whatever remains rests in the book.
+ * Fills execute at the resting order's price. Two orders of the same principal never trade (self trade
+ * prevention): by default the incoming order's remainder is cancelled (`CANCEL_TAKER`); with `CANCEL_MAKER` the
+ * resting order is cancelled and matching goes on. The caller decides, per candidate, whether the trade can happen
+ * (balance holds in `no_block` mode) and performs it. Whatever remains rests in the book, unless `rest` is false
+ * (market orders: the remainder is cancelled).
  */
 export async function matchIncoming(
   book: OrderBook,
   taker: BookOrder,
   onMatch: (c: MatchCandidate) => Promise<MatchDecision> | MatchDecision,
+  opts: { selfTrade?: 'CANCEL_TAKER' | 'CANCEL_MAKER'; rest?: boolean } = {},
 ): Promise<MatchResult> {
   const result: MatchResult = { fills: [], cancelledMakers: [], remaining: taker.remaining, rested: false };
   const otherSide = opposite(taker.side);
@@ -159,7 +173,12 @@ export async function matchIncoming(
     const maker = book.best(otherSide);
     if (!maker || !crosses(taker, maker)) break;
 
-    if (maker.ownerId === taker.ownerId) {
+    if (maker.principalId === taker.principalId) {
+      if (opts.selfTrade === 'CANCEL_MAKER') {
+        book.remove(maker.id);
+        result.cancelledMakers.push({ id: maker.id, reason: 'SELF_MATCH' });
+        continue;
+      }
       result.takerCancelled = 'SELF_MATCH';
       break;
     }
@@ -186,8 +205,12 @@ export async function matchIncoming(
 
   result.remaining = taker.remaining;
   if (!result.takerCancelled && taker.remaining > 0n) {
-    book.add(taker);
-    result.rested = true;
+    if (opts.rest === false) {
+      result.takerCancelled = 'NO_LIQUIDITY';
+    } else {
+      book.add(taker);
+      result.rested = true;
+    }
   }
   return result;
 }

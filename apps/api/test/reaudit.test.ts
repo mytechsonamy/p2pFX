@@ -315,6 +315,8 @@ describe('R06: a queued hold adjustment never outlives the order', () => {
 describe('R07: every fill checks the taker’s validity and the session', () => {
   it('expires the taker between two fills instead of filling it further', async () => {
     h = await startHarness();
+    // INLINE dispatch: the pair waits for core banking between fills, which is what lets the validity run out here.
+    await h.setConfig((c) => ({ ...c, settlement: { ...c.settlement, dispatch: 'INLINE' } }));
     h.customer('buyer', { USD: '0', TRY: '100000' });
     h.customer('seller', { USD: '1000', TRY: '0' });
     const buyer = await h.login('buyer');

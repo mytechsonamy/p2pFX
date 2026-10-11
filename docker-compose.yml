@@ -3,9 +3,8 @@
 #   keys       generates the demo bank's RS256 key pair, session secret and ops token into a shared volume
 #   postgres   the platform database (in memory: restarting the stack resets the demo)
 #   mock-core  mock core banking: customer accounts, holds, FX postings, dekont, reference rates
-#   api        the P2P platform API, matching and settlement
-#   seed       one-off: fills the board with a trade history and resting orders, then exits
-#   bots       demo order bots: keep posting, cancelling and trading among themselves so the board stays alive
+#   api        the P2P platform API: matching, settlement, the bank's ladder (BANK_MM) and its bot (BOT_MM), which
+#              keep the board from looking empty with real bank orders (bots never trade with each other)
 #   web        the embeddable customer UI (http://localhost:5173)
 #   demo-host  the fake bank app with two phones side by side (http://localhost:5174)
 #
@@ -67,22 +66,6 @@ services:
       postgres: { condition: service_healthy }
       mock-core: { condition: service_started }
 
-  seed:
-    <<: *node
-    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/seed-market.ts"]
-    environment: &clients
-      API_URL: http://api:4000
-      CORE_BANKING_URL: http://mock-core:4100
-    depends_on:
-      api: { condition: service_healthy }
-
-  bots:
-    <<: *node
-    command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/market-bots.ts"]
-    environment: *clients
-    depends_on:
-      seed: { condition: service_completed_successfully }
-
   web:
     <<: *node
     working_dir: /app/apps/web
@@ -116,7 +99,9 @@ services:
     <<: *node
     profiles: ["tools"]
     command: ["node", "--env-file=/keys/.env", "--import", "tsx", "scripts/demo-walkthrough.ts"]
-    environment: *clients
+    environment:
+      API_URL: http://api:4000
+      CORE_BANKING_URL: http://mock-core:4100
     depends_on:
       api: { condition: service_healthy }
 
