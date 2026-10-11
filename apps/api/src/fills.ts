@@ -1,6 +1,7 @@
 import { formatDecimal, formatPrice, parsePrice, findPair, type BankConfig, type Side } from '@p2p/shared';
 
 export interface FillRow {
+  notified_status?: string | null;
   id: string;
   seq: bigint;
   pair: string;

@@ -4,7 +4,7 @@ import { OrderBook, matchIncoming, type BookOrder, type MatchDecision } from '..
 let seq = 0n;
 const o = (id: string, side: 'BUY' | 'SELL', price: number, qty: number, owner = id): BookOrder => ({
   id,
-  ownerId: owner,
+  principalId: owner,
   side,
   price: BigInt(price),
   remaining: BigInt(qty),
@@ -93,5 +93,60 @@ describe('matchIncoming', () => {
     expect(r.takerCancelled).toBe('INSUFFICIENT_BALANCE');
     expect(b.has('s1')).toBe(true);
     expect(b.has('t')).toBe(false);
+  });
+
+  it('cancels the resting order instead when self trade prevention is CANCEL_MAKER, and goes on', async () => {
+    const b = new OrderBook();
+    b.add(o('s1', 'SELL', 100, 5, 'bank'));
+    b.add(o('s2', 'SELL', 100, 5, 'ayse'));
+    const r = await matchIncoming(b, o('t', 'BUY', 100, 5, 'bank'), fill, { selfTrade: 'CANCEL_MAKER' });
+    expect(r.cancelledMakers).toEqual([{ id: 's1', reason: 'SELF_MATCH' }]);
+    expect(r.fills).toEqual([{ makerId: 's2', qty: 5n, price: 100n }]);
+    expect(r.takerCancelled).toBeUndefined();
+  });
+
+  it('never rests a market order: the unfilled remainder is cancelled', async () => {
+    const b = new OrderBook();
+    b.add(o('s1', 'SELL', 100, 3));
+    const r = await matchIncoming(b, o('t', 'BUY', 101, 8), fill, { rest: false });
+    expect(r.fills).toEqual([{ makerId: 's1', qty: 3n, price: 100n }]);
+    expect(r.remaining).toBe(5n);
+    expect(r.rested).toBe(false);
+    expect(r.takerCancelled).toBe('NO_LIQUIDITY');
+    expect(b.size).toBe(0);
+  });
+});
+
+describe('PRICE → TIME across liquidity sources (v1.1 D001)', () => {
+  const src = (id: string, price: number, source: string, at: number, principal = id): BookOrder => ({
+    id,
+    principalId: principal,
+    side: 'SELL',
+    price: BigInt(price),
+    remaining: 10n,
+    seq: BigInt(at),
+    source,
+  });
+
+  it('T01 / T02: the best price works first whatever its source; at one price the earlier sequence wins', async () => {
+    // The worked example of the product definition: a buyer takes 49.2900 (bank), then 49.3000 bot (seq 90)
+    // before 49.3000 customer (seq 100), then 49.3500.
+    const b = new OrderBook();
+    b.add(src('cust-100', 493000, 'CUSTOMER', 100));
+    b.add(src('bank-120', 492900, 'BANK_MM', 120, 'bank'));
+    b.add(src('cust-80', 493500, 'CUSTOMER', 80));
+    b.add(src('bot-90', 493000, 'BOT_MM', 90, 'bank'));
+    const r = await matchIncoming(b, { id: 't', principalId: 'zeynep', side: 'BUY', price: 493500n, remaining: 40n, seq: 200n }, fill);
+    expect(r.fills.map((f) => f.makerId)).toEqual(['bank-120', 'bot-90', 'cust-100', 'cust-80']);
+    expect(r.fills.map((f) => f.price)).toEqual([492900n, 493000n, 493000n, 493500n]);
+  });
+
+  it('reports quantity per source only when asked, without changing priority', () => {
+    const b = new OrderBook();
+    b.add(src('c', 100, 'CUSTOMER', 1));
+    b.add(src('m', 100, 'BANK_MM', 2, 'bank'));
+    expect(b.depth('SELL')).toEqual([{ price: 100n, qty: 20n, count: 2 }]);
+    expect(b.depth('SELL', 20, true)[0].bySource).toEqual({ CUSTOMER: 10n, BANK_MM: 10n });
+    expect(b.best('SELL')?.id).toBe('c');
   });
 });

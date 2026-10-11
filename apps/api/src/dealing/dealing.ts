@@ -1,5 +1,5 @@
-import { findPair, formatDecimal, formatPrice, isMarketOpen, parseDecimal, parsePrice, taxRates, type PairConfig } from '@p2p/shared';
-import { priceSide, pricingParams } from '@p2p/pricing';
+import { findPair, formatDecimal, formatPrice, isMarketOpen, parseDecimal, parsePrice, taxRates, type BankConfig, type PairConfig } from '@p2p/shared';
+import { priceSide, pricingParams, withoutCommission } from '@p2p/pricing';
 import { CoreBankingError, type CoreAccount, type CoreBankingAdapter } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
@@ -13,6 +13,8 @@ import { ApiError, badRequest, conflict, notFound, unprocessable } from '../erro
 import { audit } from '../audit.js';
 import { segmentRates, type PriceEngine } from './price-engine.js';
 import type { PositionKeeper } from './positions.js';
+import { appendEvent } from '../event-store.js';
+import { haltReason } from '../order-entry.js';
 
 export const BankQuoteRequestSchema = z.object({
   pair: z.string(),
@@ -43,14 +45,14 @@ export class DealingService {
 
   /** The customer's segment rates, for the bank row on the board. */
   async rates(session: Session, pairSymbol: string) {
-    const { pair, config } = this.pair(pairSymbol);
+    const { pair, config } = this.pair(pairSymbol, 'view');
     const agg = await this.prices.current(pair.symbol);
     const r = segmentRates(config, pair, agg, session.segment);
     return { pair: pair.symbol, buy: formatPrice(r.buy), sell: formatPrice(r.sell), at: agg.at.toISOString() };
   }
 
   async quote(session: Session, body: z.infer<typeof BankQuoteRequestSchema>) {
-    const { pair, config, version } = this.pair(body.pair);
+    const { pair, config, version } = this.pair(body.pair, 'trade');
     const now = this.clock();
     if (!isMarketOpen(now, config.tradingHours)) throw unprocessable('MARKET_CLOSED', 'the market is closed');
     let qty: bigint;
@@ -67,17 +69,21 @@ export class DealingService {
     const r = segmentRates(config, pair, agg, session.segment);
     const rate = body.side === 'BUY' ? r.buy : r.sell;
     const lpRate = body.side === 'BUY' ? agg.ask : agg.bid;
-    const s = priceSide(qty, rate, { ...pricingParams(config, pair, body.side), commissionPerUnit: 0n });
+    const s = priceSide(qty, rate, withoutCommission(pricingParams(config, pair, body.side)));
     const limits = config.limits.segments[session.segment] ?? config.limits.default;
     if (s.notional > parseDecimal(limits.maxOrderNotional, pair.quoteDecimals)) {
       throw unprocessable('ORDER_LIMIT_EXCEEDED', `deal value exceeds the limit of ${limits.maxOrderNotional} ${pair.quote}`);
     }
+    // The customer buys: the bank sells (its position goes down), and the other way round.
+    if (!this.positions.allows(pair.symbol, body.side === 'BUY' ? -qty : qty)) {
+      throw unprocessable('INVENTORY_LIMIT', 'the bank cannot quote this side right now, try the board');
+    }
     const expiresAt = new Date(now.getTime() + config.dealing.quoteTtlSeconds * 1000);
     const { rows } = await this.db.query(
-      `insert into bank_quotes (customer_id, pair, side, qty, rate, lp_rate, segment, margin_bips, notional, tax, total, status, expires_at, config_version)
+      `insert into bank_quotes (customer_id, pair, side, qty, rate, lp_rate, segment, margin_pips, notional, tax, total, status, expires_at, config_version)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'OPEN', $12, $13) returning *`,
       [session.customerId, pair.symbol, body.side, qty, formatPrice(rate), formatPrice(lpRate), session.segment,
-        body.side === 'BUY' ? r.buyBips : r.sellBips, s.notional, s.tax, s.total, expiresAt, version],
+        body.side === 'BUY' ? r.buyPips : r.sellPips, s.notional, s.tax, s.total, expiresAt, version],
     );
     return quoteView(rows[0], pair, taxRates(config, pair)[body.side === 'BUY' ? 'buyRate' : 'sellRate']);
   }
@@ -90,17 +96,51 @@ export class DealingService {
     if (quote.status === 'EXECUTED') return this.executed(quote.id);
     if (new Date(quote.expires_at) <= now) throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
     // Everything that can fail without side effects happens before the quote is used up.
-    const { pair, config } = this.pair(quote.pair);
+    const { pair, config } = this.pair(quote.pair, 'trade');
     const accounts = await this.core.getAccounts(session.customerRef);
     const fx = pick(accounts, pair.base);
     const tl = pick(accounts, pair.quote);
     const margin = marginOf(pair, BigInt(quote.qty), parsePrice(quote.rate), parsePrice(quote.lp_rate));
+    const delta = quote.side === 'BUY' ? -BigInt(quote.qty) : BigInt(quote.qty);
+    // The deal is a principal execution: it reserves its place in the bank's inventory before anything is awaited,
+    // through the same reservations the board's fills with the ladder and bot use.
+    const reservation = this.positions.reserve(pair.symbol, delta);
 
-    // Claiming the quote, the daily limit and the deal record commit together: a used quote always has its deal.
-    // Policy: a quote is valid until it is claimed. Validity is checked again at the claim, with the clock read
-    // after the quote's row lock is taken (so neither a slow account lookup nor a wait on a concurrent execute
-    // stretches it), not with the time the request arrived.
-    const deal = await tx(this.db, async (client) => {
+    let deal;
+    try {
+      deal = await this.claim(quoteId, session, pair, config, margin, fx.id, tl.id, delta);
+    } catch (err) {
+      reservation.release();
+      throw err;
+    }
+    if (!deal) {
+      reservation.release();
+      // Either a concurrent execute of the same quote won (it has the deal), or the quote ran out before the claim.
+      const { rows } = await this.db.query('select status from bank_quotes where id = $1', [quoteId]);
+      if (rows[0]?.status !== 'EXECUTED') throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
+      return this.executed(quoteId);
+    }
+    // Committed: the reservation becomes position (once), and auto-hedge looks at it (in the background).
+    reservation.commit();
+    // A deal core banking definitely rejects leaves the position again, inside settle (once, coordinated with reloads).
+    const settled = await this.settle(deal, session.customerRef, pair);
+    const view = dealView(settled, pair);
+    if (settled.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
+    // Only a deal that exists for the customer is announced (a rejected one is just the error above).
+    await this.events.publish({ type: 'fill', customerId: session.customerId, fill: view }).catch((err) => this.log.warn({ err }, 'deal publish failed'));
+    return view;
+  }
+
+  /**
+   * Claiming the quote, the daily limit, the deal record and the bank's principal execution commit together: a used
+   * quote always has its deal. Policy: a quote is valid until it is claimed. Validity is checked again at the claim,
+   * with the clock read after the quote's row lock is taken (so neither a slow account lookup nor a wait on a
+   * concurrent execute stretches it), not with the time the request arrived.
+   */
+  private claim(
+    quoteId: string, session: Session, pair: PairConfig, config: BankConfig, margin: bigint, fxAccountId: string, tryAccountId: string, delta: bigint,
+  ): Promise<Record<string, any> | undefined> {
+    return tx(this.db, async (client) => {
       await client.query('select 1 from bank_quotes where id = $1 for update', [quoteId]);
       const claimedAt = this.clock();
       const { rows } = await client.query(
@@ -113,26 +153,24 @@ export class DealingService {
       const { rows: deals } = await client.query(
         `insert into bank_deals (quote_id, customer_id, pair, side, qty, rate, lp_rate, notional, tax, total, margin, fx_account_id, try_account_id, status)
          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'PENDING') returning *`,
-        [q.id, session.customerId, q.pair, q.side, q.qty, q.rate, q.lp_rate, q.notional, q.tax, q.total, margin, fx.id, tl.id],
+        [q.id, session.customerId, q.pair, q.side, q.qty, q.rate, q.lp_rate, q.notional, q.tax, q.total, margin, fxAccountId, tryAccountId],
       );
       await audit(client, `customer:${session.customerId}`, 'dealing.deal', {
         dealId: deals[0].id, quoteId: q.id, pair: q.pair, side: q.side, rate: q.rate, claimedAt: claimedAt.toISOString(), expiresAt: new Date(q.expires_at).toISOString(),
       });
-      return deals[0];
+      const d = deals[0];
+      const version = this.config.get().version;
+      await client.query(
+        `insert into principal_executions (channel, ref_id, pair, source, bank_side, qty, price, position_delta, reference, config_version)
+         values ('DIRECT', $1, $2, 'BANK_DIRECT', $3, $4, $5, $6, $7, $8)`,
+        [d.id, d.pair, d.side === 'BUY' ? 'SELL' : 'BUY', d.qty, d.rate, delta, JSON.stringify({ lpRate: d.lp_rate, quoteId }), version],
+      );
+      await appendEvent(client, {
+        type: 'PrincipalExecutionCommitted', aggregateType: 'execution', aggregateId: d.id, correlationId: quoteId, configVersion: version,
+        payload: { channel: 'DIRECT', source: 'BANK_DIRECT', pair: d.pair, bankSide: d.side === 'BUY' ? 'SELL' : 'BUY', qty: String(d.qty), price: String(d.rate), positionDelta: delta.toString() },
+      });
+      return d;
     });
-    if (!deal) {
-      // Either a concurrent execute of the same quote won (it has the deal), or the quote ran out before the claim.
-      const { rows } = await this.db.query('select status from bank_quotes where id = $1', [quoteId]);
-      if (rows[0]?.status !== 'EXECUTED') throw new ApiError(410, 'QUOTE_EXPIRED', 'the quote has expired, ask for a new one');
-      return this.executed(quoteId);
-    }
-    const settled = await this.settle(deal, session.customerRef, pair);
-    if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
-    const view = dealView(settled, pair);
-    if (settled.status === 'REJECTED') throw unprocessable('INSUFFICIENT_BALANCE', 'insufficient balance', { deal: view });
-    // Only a deal that exists for the customer is announced (a rejected one is just the error above).
-    await this.events.publish({ type: 'fill', customerId: session.customerId, fill: view }).catch((err) => this.log.warn({ err }, 'deal publish failed'));
-    return view;
   }
 
   /** Posts the deal to core banking: the bank sells to a buyer (BANK_SELL) or buys from a seller (BANK_BUY). */
@@ -165,7 +203,7 @@ export class DealingService {
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         this.log.warn({ dealId: deal.id, attempt, err: lastError }, 'bank deal posting failed');
-        if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') return this.update(deal.id, 'REJECTED', lastError);
+        if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') return this.reject(deal, pair, lastError);
         if (err instanceof CoreBankingError && err.code !== 'UNAVAILABLE') break;
       }
     }
@@ -178,6 +216,32 @@ export class DealingService {
     }
     await audit(this.db, 'system', 'dealing.failed', { dealId: deal.id, error: lastError });
     return this.update(deal.id, 'FAILED_NEEDS_REVIEW', lastError);
+  }
+
+  /**
+   * Core banking definitely rejected the deal: it never happened. The status change and the position change are one
+   * coordinated step (see PositionKeeper.beginReversal): the position moves back only if this call is the one that
+   * moved the deal to REJECTED, so concurrent settlements of the same deal or a reload in between cannot apply it
+   * twice.
+   */
+  private async reject(deal: Record<string, any>, pair: PairConfig, error: string) {
+    const delta = deal.side === 'BUY' ? -BigInt(deal.qty) : BigInt(deal.qty);
+    const reversal = this.positions.beginReversal(pair.symbol, delta);
+    try {
+      const { rows } = await this.db.query(
+        `update bank_deals set status = 'REJECTED', last_error = $2, updated_at = now() where id = $1 and status <> 'REJECTED' returning *`,
+        [deal.id, error],
+      );
+      if (rows[0]) {
+        reversal.apply();
+        return rows[0];
+      }
+      reversal.abandon();
+      return (await this.db.query('select * from bank_deals where id = $1', [deal.id])).rows[0];
+    } catch (err) {
+      reversal.abandon();
+      throw err;
+    }
   }
 
   private async update(id: string, status: string, error: string | null, txnRef?: string, receiptRef?: string) {
@@ -210,8 +274,7 @@ export class DealingService {
     for (const d of rows) {
       const pair = findPair(this.config.get().data, d.pair);
       if (!pair) continue;
-      const settled = await this.settle(d, d.customer_ref, pair).catch((err) => this.log.error({ err, dealId: d.id }, 'resuming deal failed'));
-      if (settled?.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
+      await this.settle(d, d.customer_ref, pair).catch((err) => this.log.error({ err, dealId: d.id }, 'resuming deal failed'));
     }
   }
 
@@ -227,7 +290,6 @@ export class DealingService {
     await audit(this.db, actor, 'dealing.retry', { dealId });
     const { pair } = this.pair(d.pair);
     const settled = await this.settle(d, d.customer_ref, pair);
-    if (settled.status === 'SETTLED') await this.positions.afterDeal(pair.symbol);
     return dealView(settled, pair);
   }
 
@@ -243,9 +305,12 @@ export class DealingService {
     });
   }
 
-  private pair(symbol: string) {
+  /** The pair, for showing rates (`view`), for a new quote or deal (`trade`: switches and halts apply) or for operations. */
+  private pair(symbol: string, use: 'view' | 'trade' | 'ops' = 'ops') {
     const { data: config, version } = this.config.get();
-    if (!config.dealing.enabled) throw new ApiError(404, 'DEALING_DISABLED', 'the bank does not quote in this deployment');
+    if (use !== 'ops' && !config.channels.bankDirect) throw new ApiError(404, 'DEALING_DISABLED', 'the bank does not quote right now');
+    const halted = use === 'trade' && haltReason(config, symbol, 'bank');
+    if (halted) throw new ApiError(503, 'TRADING_HALTED', halted);
     const pair = findPair(config, symbol);
     if (!pair || !pair.enabled) throw badRequest('UNKNOWN_PAIR', `pair ${symbol} is not available`);
     return { pair, config, version };
@@ -255,7 +320,7 @@ export class DealingService {
 /** The bank's margin: |deal rate − LP rate| × qty, quote minor units. */
 function marginOf(pair: PairConfig, qty: bigint, rate: bigint, lpRate: bigint) {
   const diff = rate > lpRate ? rate - lpRate : lpRate - rate;
-  return priceSide(qty, diff, { side: 'BUY', baseDecimals: pair.baseDecimals, quoteDecimals: pair.quoteDecimals, commissionPerUnit: 0n, taxRate: 0n, taxBase: 'book', rounding: 'HALF_UP' }).notional;
+  return priceSide(qty, diff, { side: 'BUY', baseDecimals: pair.baseDecimals, quoteDecimals: pair.quoteDecimals, feeMode: 'PIPS', commissionPerUnit: 0n, commissionRate: 0n, taxRate: 0n, taxBase: 'book', rounding: 'HALF_UP' }).notional;
 }
 
 function pick(accounts: CoreAccount[], currency: string) {

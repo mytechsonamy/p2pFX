@@ -66,7 +66,7 @@ const when = (iso: string) => new Date(iso).toLocaleString('tr-TR', { dateStyle:
 const trNum = (v: string | number) => String(v).replace('.', ',');
 const fromTr = (v: string) => v.trim().replace(/\s/g, '').replace(',', '.');
 const DEC = /^\d+(\.\d+)?$/;
-const SEGMENT_NAMES: Record<string, string> = { default: 'Bireysel (varsayılan)', premium: 'Premium', 'market-maker': 'Piyasa yapıcı (demo bot)' };
+const SEGMENT_NAMES: Record<string, string> = { default: 'Bireysel (varsayılan)', premium: 'Premium', 'market-maker': 'Piyasa yapıcı' };
 const segName = (s: string) => SEGMENT_NAMES[s] ?? s;
 const DAYS = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'];
 
@@ -132,9 +132,16 @@ const SECTIONS: Section[] = [
         note: commissionNote(p),
         fields: [
           { kind: 'bool', path: ['pairs', i, 'enabled'], label: 'İşleme açık' },
-          { kind: 'int', path: ['pairs', i, 'commission', 'buyBips'], label: 'Alıcı komisyonu', unit: 'bip', min: 0 },
-          { kind: 'int', path: ['pairs', i, 'commission', 'sellBips'], label: 'Satıcı komisyonu', unit: 'bip', min: 0 },
-          { kind: 'decimal', path: ['pairs', i, 'bipSize'], label: '1 bip değeri', unit: `${p.quote} / birim`, help: 'Örn. 0,01 TL' },
+          {
+            kind: 'select',
+            path: ['pairs', i, 'commission', 'mode'],
+            label: 'Komisyon birimi',
+            options: [['PIPS', 'Pip (birim başına sabit)'], ['BPS', 'Baz puan (fiyatın oranı)']],
+            help: 'Pip: kura sabit tutar eklenir. Baz puan: fiyatın binde/onbinde biri kadar (1 bps = %0,01)',
+          },
+          { kind: 'int', path: ['pairs', i, 'commission', 'buy'], label: 'Alıcı komisyonu', unit: p.commission.mode === 'BPS' ? 'bps' : 'pip', min: 0 },
+          { kind: 'int', path: ['pairs', i, 'commission', 'sell'], label: 'Satıcı komisyonu', unit: p.commission.mode === 'BPS' ? 'bps' : 'pip', min: 0 },
+          { kind: 'decimal', path: ['pairs', i, 'pipSize'], label: '1 pip değeri', unit: `${p.quote} / birim`, help: 'Örn. 0,0001 TL (500 pip = 0,05 TL)' },
           { kind: 'decimal', path: ['pairs', i, 'tickSize'], label: 'Fiyat adımı', unit: p.quote },
           { kind: 'decimal', path: ['pairs', i, 'minQty'], label: 'En küçük emir', unit: p.base },
           { kind: 'decimal', path: ['pairs', i, 'priceBandPct'], label: 'Fiyat bandı', unit: '%', help: 'Referans kurdan bu kadar uzak emirler reddedilir' },
@@ -231,13 +238,12 @@ const SECTIONS: Section[] = [
   {
     id: 'dealing',
     title: 'Banka satırı fiyatlama',
-    intro: "Bankanın kendi kurundan işlem: LP'lerin en iyi fiyatına segment marjı eklenir. Marjlar bellekte tutulur, LP her fiyat gönderdiğinde veritabanı okunmaz; kaydettiğiniz an tüm sunucularda geçerli olur.",
+    intro: "Bankanın kendi kurundan işlem (Direct; açıp kapatmak: Likidite kaynakları): LP'lerin en iyi fiyatına segment marjı eklenir. Marjlar bellekte tutulur, LP her fiyat gönderdiğinde veritabanı okunmaz; kaydettiğiniz an tüm sunucularda geçerli olur.",
     assumptions: ['margins', 'dealing'],
     groups: (c) => [
       {
         title: 'Genel',
         fields: [
-          { kind: 'bool', path: ['dealing', 'enabled'], label: 'Banka satırı açık' },
           { kind: 'int', path: ['dealing', 'quoteTtlSeconds'], label: 'Kotasyon geçerliliği', unit: 'saniye', min: 1, max: 120 },
           { kind: 'int', path: ['dealing', 'maxStalenessMs'], label: 'LP fiyatı en fazla', unit: 'ms eski', min: 100 },
           ...ccyFields(c, ['dealing', 'maxDealQty'], (ccy) => `Tek işlem üst sınırı ${ccy}`),
@@ -256,7 +262,7 @@ const SECTIONS: Section[] = [
     id: 'hedging',
     title: 'Pozisyon ve hedge',
     intro: "Banka pozisyonu limiti aşınca LP'lerle otomatik hedge. FX masası ekranı bu kuralları uygular.",
-    assumptions: ['hedging'],
+    assumptions: ['hedging', 'inventory'],
     groups: (c) => [
       {
         title: 'Kural',
@@ -266,7 +272,12 @@ const SECTIONS: Section[] = [
           { kind: 'select', path: ['dealing', 'hedging', 'split'], label: 'Dağıtım', options: [['ACROSS_LPS', "Parçaları LP'lere sırayla dağıt"], ['BEST_LP', 'Hepsi en iyi fiyatlı LP\'ye']] },
         ],
       },
-      { title: 'Pozisyon limitleri', fields: ccyFields(c, ['dealing', 'positionLimits'], (ccy) => ccy, { optional: true, placeholder: 'limitsiz' }) },
+      { title: 'Pozisyon limitleri (otomatik hedge eşiği)', fields: ccyFields(c, ['dealing', 'positionLimits'], (ccy) => ccy, { optional: true, placeholder: 'limitsiz' }) },
+      {
+        title: 'Envanter tavanı (sert sınır)',
+        note: 'Tavana ulaşılınca pozisyonu büyüten taraf kapanır: banka merdiveni ve bot o yönde emir girmez, Direct o yönde fiyat vermez. Merdiven, bot ve Direct aynı tavanı paylaşır.',
+        fields: ccyFields(c, ['inventory', 'maxPosition'], (ccy) => ccy, { optional: true, placeholder: 'tavan yok' }),
+      },
       { title: 'En büyük hedge parçası', fields: ccyFields(c, ['dealing', 'hedging', 'maxClipQty'], (ccy) => ccy, { optional: true, placeholder: 'tek parça' }) },
     ],
   },
@@ -280,7 +291,6 @@ const SECTIONS: Section[] = [
       {
         title: 'Genel',
         fields: [
-          { kind: 'bool', path: ['bankBook', 'enabled'], label: 'Banka emirleri tahtada' },
           { kind: 'text', path: ['bankBook', 'customerRef'], label: 'Bankanın işlem hesabı', help: 'Core banking müşteri no' },
           {
             kind: 'select',
@@ -292,9 +302,9 @@ const SECTIONS: Section[] = [
             kind: 'bool',
             path: ['bankBook', 'includeCommission'],
             label: 'Komisyonu hesaba kat',
-            help: 'Açıkken kademe fiyatına müşteri komisyonu eklendiğinde banka kurundan daha iyi bir fiyat oluşmaz',
+            help: 'Bank L1 paritesi: açıkken kademe fiyatına müşteri komisyonu eklendiğinde banka Direct kurundan daha iyi bir fiyat oluşmaz',
           },
-          { kind: 'int', path: ['bankBook', 'repriceBips'], label: 'Yeniden fiyatlama eşiği', unit: 'bip kur hareketi', min: 1 },
+          { kind: 'int', path: ['bankBook', 'repricePips'], label: 'Yeniden fiyatlama eşiği', unit: 'pip kur hareketi', min: 1 },
         ],
       },
       ...Object.keys(c.bankBook.pairs).flatMap((pair) =>
@@ -322,35 +332,99 @@ const SECTIONS: Section[] = [
         fields: [
           { kind: 'int', path: ['settlement', 'attempts'], label: 'Bacak başına deneme', unit: 'kez', min: 1, max: 10, help: 'Sonra işlem operasyon incelemesine düşer' },
           { kind: 'int', path: ['settlement', 'baseDelayMs'], label: 'İlk bekleme', unit: 'ms', min: 0, help: 'Her denemede iki katına çıkar' },
+          {
+            kind: 'select',
+            path: ['settlement', 'dispatch'],
+            label: 'Gönderim',
+            options: [['ASYNC', 'Asenkron (eşleşme beklemez)'], ['INLINE', 'Eşleşme core banking yanıtını bekler']],
+            help: 'Asenkron: eşleşme kesinleşir, bacaklar sırayla gönderilir; sonuç ayrıca bildirilir',
+          },
         ],
       },
     ],
   },
   {
-    id: 'bots',
-    title: 'Demo botlar',
-    intro: 'Demo sırasında tahtayı canlı tutan piyasa yapıcı botlar. Sadece demo içindir; canlıda likidite bankanın kendi hesabından gelir. Değişiklikler birkaç saniye içinde botlara ulaşır.',
-    assumptions: ['bots'],
+    id: 'sources',
+    title: 'Likidite kaynakları ve sunum',
+    intro:
+      'Tahtada fiyat önceliği kaynak ayrımı yapmaz: en iyi fiyat, eşit fiyatta önce gelen emir çalışır. Banka üç kaynağı ayrı ayrı açıp kapatır; kapatılan kaynağın tahtadaki emirleri hemen çekilir, gerçekleşmiş işlemlerin settlement\'ı sürer. Banka merdiveni, bot ve Direct aynı principal (banka) olduğundan birbirleriyle işlem yapmaz.',
+    assumptions: ['channels', 'marketOrders', 'selfTradePrevention'],
+    groups: () => [
+      {
+        title: 'Kaynaklar',
+        fields: [
+          { kind: 'bool', path: ['channels', 'bankDirect'], label: 'Bankayla anında işlem (Direct)' },
+          { kind: 'bool', path: ['channels', 'bankMarketMaker'], label: 'Banka merdiveni tahtada (Bank MM)' },
+          { kind: 'bool', path: ['channels', 'botMarketMaker'], label: 'Banka botu tahtada (Bot MM)' },
+        ],
+      },
+      {
+        title: 'Müşteri ekranı',
+        fields: [
+          {
+            kind: 'select',
+            path: ['marketPresentation'],
+            label: 'Sunum',
+            options: [['SEPARATE', 'Ayrı: banka kuru ve tahta iki alanda'], ['UNIFIED', 'Birleşik: tek tahta, Direct kısa yol']],
+            help: 'Geçiş açık emirleri ve fiyat-zaman önceliğini değiştirmez',
+          },
+          { kind: 'bool', path: ['sourceDisclosure'], label: 'Banka likiditesini tahtada işaretle' },
+        ],
+      },
+      {
+        title: 'Emir kuralları',
+        fields: [
+          { kind: 'bool', path: ['marketOrders', 'enabled'], label: 'Piyasa emri açık' },
+          { kind: 'int', path: ['marketOrders', 'maxSlippageBps'], label: 'Fiyat koruması', unit: 'bps (LP fiyatından)', min: 1, max: 1000 },
+          {
+            kind: 'select',
+            path: ['selfTradePrevention'],
+            label: 'Aynı principal eşleşirse',
+            options: [['CANCEL_TAKER', 'Gelen emrin kalanı iptal'], ['CANCEL_MAKER', 'Bekleyen emir iptal']],
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'killSwitch',
+    title: 'Kill switch',
+    intro: 'İşlemi farklı seviyelerde durdurur. Yeni girişleri durdurmak bir parametredir (kaydedince hemen uygulanır, banka likiditesi çekilir); tahtada bekleyen emirleri iptal etmek ayrı bir işlemdir ve denetim izine nedeniyle yazılır.',
+    header: killSwitchActions,
     groups: (c) => [
       {
         fields: [
-          { kind: 'bool', path: ['bots', 'enabled'], label: 'Botlar çalışsın' },
-          { kind: 'int', path: ['bots', 'intervalMs'], label: 'Ortalama aralık', unit: 'ms', min: 200 },
-          { kind: 'int', path: ['bots', 'maxOrdersPerSide'], label: 'Taraf başı en fazla emir', min: 1 },
-          { kind: 'int', path: ['bots', 'offsetBips', 'min'], label: 'Referanstan en az', unit: 'bip', min: 1 },
-          { kind: 'int', path: ['bots', 'offsetBips', 'max'], label: 'Referanstan en çok', unit: 'bip', min: 1 },
-          { kind: 'share', path: ['bots', 'tradeShare'], label: 'Kendi aralarında işlem payı' },
-          { kind: 'share', path: ['bots', 'cancelShare'], label: 'İptal payı' },
-          { kind: 'text', path: ['bots', 'segment'], label: 'Segment' },
-          { kind: 'list', path: ['bots', 'refs'], label: 'Bot müşterileri', help: 'Her satıra bir müşteri no' },
+          { kind: 'bool', path: ['killSwitch', 'allTrading'], label: 'Tüm işlemleri durdur' },
+          { kind: 'bool', path: ['killSwitch', 'newCustomerOrders'], label: 'Yeni müşteri emirlerini durdur' },
+          { kind: 'multi', path: ['killSwitch', 'haltedPairs'], label: 'Durdurulan pariteler', options: c.pairs.map((p: Cfg) => [p.symbol, `${p.base}/${p.quote}`] as [string, string]) },
+          { kind: 'list', path: ['killSwitch', 'disabledLps'], label: 'Devre dışı LP\'ler', help: 'Her satıra bir LP adı; fiyatları kullanılmaz' },
         ],
       },
-      ...Object.keys(c.bots.lots).map((k) => ({
+    ],
+  },
+  {
+    id: 'botMarketMaker',
+    title: 'Banka botu (Bot MM)',
+    intro: 'Tahtanın boş görünmemesi için bankanın kendi adına (principal: banka) LP orta kurunun etrafına girdiği emirler. Gerçek emirlerdir: müşteriyle eşleşir, banka pozisyonuna yazılır ve envanter limitini merdiven ve Direct ile paylaşır. Kendi aralarında ve banka merdiveniyle işlem yapmaz; LP fiyatı bayatlarsa çekilir.',
+    assumptions: ['botMarketMaker'],
+    groups: (c) => [
+      {
+        fields: [
+          { kind: 'text', path: ['botMarketMaker', 'strategyId'], label: 'Strateji kimliği' },
+          { kind: 'int', path: ['botMarketMaker', 'levels'], label: 'Taraf başı kademe', min: 1, max: 20 },
+          { kind: 'int', path: ['botMarketMaker', 'offsetPips', 'min'], label: 'Orta kurdan en az', unit: 'pip', min: 1 },
+          { kind: 'int', path: ['botMarketMaker', 'offsetPips', 'max'], label: 'Orta kurdan en çok', unit: 'pip', min: 1 },
+          { kind: 'int', path: ['botMarketMaker', 'stepPips'], label: 'Kademe aralığı', unit: 'pip', min: 1 },
+          { kind: 'int', path: ['botMarketMaker', 'refreshMs'], label: 'Yenileme', unit: 'ms', min: 200 },
+        ],
+      },
+      ...Object.keys(c.botMarketMaker.lots).map((k) => ({
         title: `Emir büyüklüğü: ${k === 'default' ? 'diğer dövizler' : k}`,
-        fields: (['min', 'max', 'step'] as const).map((f) => ({ kind: 'decimal', path: ['bots', 'lots', k, f], label: { min: 'En az', max: 'En çok', step: 'Adım' }[f] })) as Field[],
+        fields: (['min', 'max', 'step'] as const).map((f) => ({ kind: 'decimal', path: ['botMarketMaker', 'lots', k, f], label: { min: 'En az', max: 'En çok', step: 'Adım' }[f] })) as Field[],
       })),
     ],
   },
+  { id: 'reports', title: 'Raporlar ve istisnalar', intro: 'Akışa göre hacim (C2C müşteri-müşteri, C2B banka merdiveni ve bot, Direct), P2P eşleşme oranı, müşteri bacak hacmi, ücret ve katkı; operasyonun bakması gereken settlement, deal, hedge ve bloke istisnaları.', view: reports },
   {
     id: 'branding',
     title: 'Marka',
@@ -382,8 +456,8 @@ function limitFields(base: Path): Field[] {
 }
 function marginFields(base: Path): Field[] {
   return [
-    { kind: 'int', path: [...base, 'buyBips'], label: 'Müşteri alırken', unit: 'bip', min: 0 },
-    { kind: 'int', path: [...base, 'sellBips'], label: 'Müşteri satarken', unit: 'bip', min: 0 },
+    { kind: 'int', path: [...base, 'buyPips'], label: 'Müşteri alırken', unit: 'pip', min: 0 },
+    { kind: 'int', path: [...base, 'sellPips'], label: 'Müşteri satarken', unit: 'pip', min: 0 },
   ];
 }
 /** Every instrument the LPs quote: open or closed for trading here, or not set up yet (added with one click). */
@@ -411,10 +485,58 @@ function pairsTable(c: Cfg) {
 }
 
 function commissionNote(p: Cfg) {
-  const bip = Number(p.bipSize);
-  if (!bip) return '';
-  const per = (b: number) => (b * bip * 1000).toLocaleString('tr-TR', { maximumFractionDigits: 2 });
-  return `1.000 ${p.base} işlemde banka alıcıdan ${per(p.commission.buyBips)} ${p.quote}, satıcıdan ${per(p.commission.sellBips)} ${p.quote} kazanır.`;
+  const fmt = (v: number) => v.toLocaleString('tr-TR', { maximumFractionDigits: 2 });
+  if (p.commission.mode === 'BPS') {
+    return `Komisyon fiyatın oranıdır: alıcıdan %${fmt(p.commission.buy / 100)}, satıcıdan %${fmt(p.commission.sell / 100)} (1 bps = %0,01).`;
+  }
+  const pip = Number(p.pipSize);
+  if (!pip) return '';
+  const per = (n: number) => fmt(n * pip * 1000);
+  return `1 pip = ${String(p.pipSize).replace('.', ',')} ${p.quote}. 1.000 ${p.base} işlemde banka alıcıdan ${per(p.commission.buy)} ${p.quote}, satıcıdan ${per(p.commission.sell)} ${p.quote} kazanır.`;
+}
+
+/** Kill switch: cancels what rests in the book (all, a pair and/or a source), with a reason for the audit trail. */
+function killSwitchActions(c: Cfg) {
+  if (!canEdit(operator)) return '';
+  const pairs = c.pairs.map((p: Cfg) => `<option value="${esc(p.symbol)}">${esc(p.base)}/${esc(p.quote)}</option>`).join('');
+  return `<section class="card"><h2>Açık emirleri iptal et</h2>
+    <p class="note">Tahtada bekleyen emirleri hemen iptal eder; blokeler serbest kalır, müşterilere bildirim gider. Açık kalan banka kaynakları bir sonraki yenilemede yeniden emir girer: kalıcı durdurmak için aşağıdaki parametreleri de kaydedin.</p>
+    <div class="row"><label>Parite <select id="kill-pair"><option value="">Tümü</option>${pairs}</select></label>
+    <label>Kaynak <select id="kill-source"><option value="">Tümü</option><option value="CUSTOMER">Müşteri</option><option value="BANK_MM">Banka merdiveni</option><option value="BOT_MM">Banka botu</option></select></label>
+    <button class="danger" id="kill-cancel">Emirleri iptal et</button></div></section>`;
+}
+
+async function reports() {
+  const [r, ex] = await Promise.all([opsFetch<any>('GET', '/reports'), opsFetch<any>('GET', '/exceptions')]);
+  const pct = (v: string | null) => (v == null ? '—' : `%${(Number(v) * 100).toLocaleString('tr-TR', { maximumFractionDigits: 1 })}`);
+  const n = (v: string) => esc(trNum(v));
+  const rows = r.pairs
+    .map(
+      (p: any) => `<tr><td><strong>${esc(p.pair)}</strong></td><td class="num">${n(p.c2c.qty)}</td><td class="num">${n(p.c2b.bankMarketMaker.qty)}</td>
+      <td class="num">${n(p.c2b.botMarketMaker.qty)}</td><td class="num">${n(p.direct.qty)}</td><td class="num">${n(p.customerLegVolume)}</td>
+      <td class="num">${pct(p.p2pMatchRatio)}</td><td class="num">${n(p.fees)}</td><td class="num">${n(p.directMargin)}</td><td class="num">${n(p.principalContribution)}</td><td class="num">${n(p.hedgeCost)}</td><td class="num"><strong>${n(p.netContribution)}</strong> ${esc(p.currency)}</td></tr>`,
+    )
+    .join('');
+  const list = (title: string, items: any[], cols: [string, (x: any) => string][]) =>
+    `<h3>${title} <span class="badge${items.length ? ' warn' : ' ok'}">${items.length}</span></h3>${
+      items.length
+        ? `<table class="list"><thead><tr>${cols.map(([h]) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${items
+            .map((x) => `<tr>${cols.map(([, f]) => `<td>${f(x)}</td>`).join('')}</tr>`)
+            .join('')}</tbody></table>`
+        : ''
+    }`;
+  return `<section class="card"><h2>Akışa göre hacim</h2>
+    <p class="note">P2P oranı yalnızca müşteri-müşteri (C2C) eşleşmelerin müşteri bacak hacmindeki payıdır; banka merdiveni ve botla yapılan işlemler (C2B) ve Direct P2P sayılmaz. Katkı: komisyon + Direct marjı.</p>
+    <table class="list"><thead><tr><th>Parite</th><th class="num">C2C</th><th class="num">C2B merdiven</th><th class="num">C2B bot</th><th class="num">Direct</th><th class="num">Müşteri bacak</th><th class="num">Tahta P2P oranı</th><th class="num">Komisyon</th><th class="num">Direct marjı</th><th class="num">Tahta principal</th><th class="num">Hedge maliyeti</th><th class="num">Net katkı</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="10" class="muted">Henüz işlem yok</td></tr>'}</tbody></table></section>
+    <section class="card"><h2>İstisnalar</h2>
+    ${list('Settlement', ex.settlements, [['Parite', (x) => esc(x.pair)], ['Bacak', (x) => esc(x.leg)], ['Durum', (x) => esc(x.status)], ['Hata', (x) => esc(x.lastError ?? '')], ['Zaman', (x) => when(x.since)]])}
+    ${list('Banka işlemleri (Direct)', ex.deals, [['Parite', (x) => esc(x.pair)], ['Durum', (x) => esc(x.status)], ['Hata', (x) => esc(x.lastError ?? '')], ['Zaman', (x) => when(x.since)]])}
+    ${list('Hedge', ex.hedges, [['Parite', (x) => esc(x.pair)], ['Yön', (x) => esc(x.side)], ['LP', (x) => esc(x.lp)], ['Durum', (x) => esc(x.state)], ['Zaman', (x) => when(x.since)]])}
+    ${list('Bloke görevleri', ex.holdTasks, [['Bloke', (x) => esc(x.holdId ?? x.ref ?? '')], ['İşlem', (x) => esc(x.action)], ['Deneme', (x) => String(x.attempts)], ['Hata', (x) => esc(x.lastError ?? '')]])}
+    <h3>Pozisyonlar</h3><table class="list"><thead><tr><th>Parite</th><th class="num">Pozisyon</th><th class="num">Hedge limiti</th><th class="num">Envanter tavanı</th></tr></thead><tbody>${ex.positions
+      .map((p: any) => `<tr><td>${esc(p.pair)}</td><td class="num">${n(p.qty)}</td><td class="num">${p.limit ? n(p.limit) : '—'}</td><td class="num">${p.maxPosition ? n(p.maxPosition) : '—'}</td></tr>`)
+      .join('')}</tbody></table></section>`;
 }
 
 /** Field labels and kinds by diff path, for the diff and history views. */
@@ -663,6 +785,7 @@ const ACTIONS: Record<string, string> = {
   'ops.user.update': 'Kullanıcı güncellendi',
   'dealing.hedge': 'Hedge',
   'rate.set': 'Referans kur',
+  'ops.orders.cancel': 'Kill switch: emir iptali',
 };
 
 async function auditLog() {
@@ -853,6 +976,17 @@ app.addEventListener('click', async (e) => {
     return render();
   }
   if (el.dataset.addPair) return addPair(el.dataset.addPair);
+  if (el.id === 'kill-cancel') {
+    const pair = (document.getElementById('kill-pair') as HTMLSelectElement).value || undefined;
+    const source = (document.getElementById('kill-source') as HTMLSelectElement).value || undefined;
+    const form = await dialog(`<h2>Açık emirler iptal edilsin mi?</h2><p class="note">${esc(pair ?? 'Tüm pariteler')} · ${esc(source ?? 'tüm kaynaklar')}</p>${reasonField('Örn. piyasa olağandışı hareket')}`);
+    if (!form) return;
+    await opsFetch<{ cancelled: number }>('POST', '/controls/cancel-orders', { pair, source, reason: String(form.get('reason')) }).then(
+      (r) => toast(`${r.cancelled} emir iptal edildi`),
+      (err) => toast(err.message),
+    );
+    return render();
+  }
   if (el.dataset.revert) {
     const v = Number(el.dataset.revert);
     const data = (await opsFetch('GET', `/config/versions/${v}`)).data;
@@ -884,7 +1018,7 @@ async function addPair(symbol: string) {
   const x = instruments.find((i) => i.symbol === symbol);
   const label = `${symbol.slice(0, 3)}/${symbol.slice(3)}`;
   const form = await dialog(`<h2>${esc(label)} eklensin mi?</h2>
-    <p class="note">${esc(x?.name ?? '')} önerilen ayarlarla <strong>işleme kapalı</strong> eklenir: 5 bip komisyon, fiyat adımı, en küçük emir, pozisyon limiti, hedge parçası, bankanın tahtadaki kademeleri. Kontrol edip "İşleme aç" ile açarsınız.</p>
+    <p class="note">${esc(x?.name ?? '')} önerilen ayarlarla <strong>işleme kapalı</strong> eklenir: 500 pip (0,05 TL) komisyon, fiyat adımı, en küçük emir, pozisyon limiti, hedge parçası, bankanın tahtadaki kademeleri. Kontrol edip "İşleme aç" ile açarsınız.</p>
     ${reasonField(`Örn. ${label} müşteri talebi`)}`);
   if (!form) return;
   try {

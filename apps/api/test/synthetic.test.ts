@@ -56,4 +56,14 @@ describe('synthetic crosses', () => {
     expect(first).toMatchObject({ status: 'DONE', lp: expect.stringContaining('+') });
     expect(Number(first.rate)).toBeCloseTo(57.2, 0);
   });
+
+  it('switches off every synthetic combination that uses an LP the kill switch turned off', async () => {
+    h = await interbank();
+    const c = h.ctx.config.get().data;
+    await h.ctx.config.update({ ...c, killSwitch: { ...c.killSwitch, disabledLps: ['LP-A'] } }, 'test', 'LP-A kapatıldı');
+    const res = await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'XAUTRY', side: 'BUY', qty: '100' });
+    expect(res.status).toBe(200);
+    expect(res.body.clips.length).toBeGreaterThan(0);
+    for (const clip of res.body.clips) expect(clip.lp.split('+')).not.toContain('LP-A');
+  });
 });

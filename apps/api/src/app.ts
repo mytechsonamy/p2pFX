@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import type { CoreBankingAdapter, LiquidityAdapter } from '@p2p/core-adapter';
-import type { BankConfig } from '@p2p/shared';
+import { formatPrice, type BankConfig } from '@p2p/shared';
 import { createPool, type Db } from './db/pool.js';
 import { migrate } from './db/migrate.js';
 import { AuthService } from './auth.js';
@@ -16,10 +16,10 @@ import { customerRoutes } from './routes/customer.js';
 import { opsRoutes } from './routes/ops.js';
 import { streamRoutes } from './routes/stream.js';
 import { dealingRoutes } from './routes/dealing.js';
-import { PriceEngine } from './dealing/price-engine.js';
+import { PriceEngine, segmentRates } from './dealing/price-engine.js';
 import { PositionKeeper } from './dealing/positions.js';
 import { DealingService } from './dealing/dealing.js';
-import { BankBook } from './dealing/bank-book.js';
+import { BankAccount, BankBook, BotMarketMaker } from './dealing/bank-book.js';
 
 /**
  * Commands that move money or risk (orders, cancels, bank deals, hedges, settlement retries). They run only on the
@@ -35,6 +35,7 @@ const FINANCIAL_COMMANDS = new Set([
   'POST /ops/dealing/hedges/:id/resolve',
   'POST /ops/dealing/deals/:id/retry',
   'POST /ops/settlements/:id/retry',
+  'POST /ops/controls/cancel-orders',
 ]);
 
 export interface AppOptions {
@@ -63,6 +64,8 @@ export interface AppOptions {
   priceIntervalMs?: number;
   /** How often the bank's own ladder in the book is checked and repriced; 0 disables it (tests call tick()). */
   bankBookIntervalMs?: number;
+  /** How often the bot market maker checks its levels (it refreshes per its configuration); 0 disables it (tests call tick()). */
+  botIntervalMs?: number;
   logger?: boolean;
 }
 
@@ -82,6 +85,7 @@ export interface AppContext {
   positions: PositionKeeper;
   dealing: DealingService;
   bankBook: BankBook;
+  bot: BotMarketMaker;
   liquidity: LiquidityAdapter;
 }
 
@@ -115,12 +119,18 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const auth = new AuthService(db, { bankPublicKeyPem: opts.bankPublicKeyPem, sessionSecret: opts.sessionSecret, opsToken: opts.opsToken, clock, config });
   await auth.bootstrapAdmin(opts.opsAdminPassword);
   const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
-  const exchange = new Exchange(db, opts.core, config, settlement, events, app.log, clock);
-  const entry = new OrderEntry(db, opts.core, config, exchange, clock);
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
+  const exchange = new Exchange(db, opts.core, config, settlement, events, app.log, clock, {
+    evidence: (pair) => priceEvidence(config, prices, pair),
+    headroom: (pair, side, resting) => positions.headroom(pair, side, resting),
+    reserveExecution: (pair, delta) => positions.tryReserve(pair, delta),
+  });
+  const entry = new OrderEntry(db, opts.core, config, exchange, prices, clock);
   const dealing = new DealingService(db, opts.core, config, prices, positions, events, clock, app.log, opts.settlement);
-  const bankBook = new BankBook(db, config, entry, exchange, prices, positions, app.log);
+  const account = new BankAccount(db, opts.core);
+  const bankBook = new BankBook(db, config, exchange, prices, account, app.log);
+  const bot = new BotMarketMaker(config, exchange, prices, account, app.log, clock);
   const scheduler = new Scheduler(db, exchange, settlement, dealing, positions, config, clock, app.log);
 
   // Per-customer order entry rate limit (sliding window, in memory).
@@ -136,7 +146,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     hits.set(customerId, recent);
   };
 
-  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook, liquidity: opts.liquidity };
+  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook, bot, liquidity: opts.liquidity };
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ApiError) {
@@ -174,7 +184,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     checks.matching = exchange.running;
     if (!events.connected || ((opts.matching ?? true) && !exchange.running)) ok = false;
     const c = config.get().data;
-    checks.lpPricesFresh = c.dealing.enabled ? c.pairs.filter((p) => p.enabled).every((p) => !!prices.fresh(p.symbol)) : null;
+    checks.lpPricesFresh = c.pairs.filter((p) => p.enabled).every((p) => !!prices.fresh(p.symbol));
     return reply.status(ok ? 200 : 503).send({ ok, ...checks });
   });
   // Checked before authentication and the handler, so a refused command has no side effect at all. This also
@@ -190,26 +200,52 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   const matching = opts.matching ?? true;
   if (matching) {
+    await positions.load();
     await exchange.start();
     await positions.resolveOpenClips().catch((err) => app.log.error({ err }, 'resolving open hedge clips failed'));
     await dealing.resumePending().catch((err) => app.log.error({ err }, 'resuming pending deals failed'));
     if (opts.schedulerIntervalMs) scheduler.start(opts.schedulerIntervalMs);
     if (opts.bankBookIntervalMs) bankBook.start(opts.bankBookIntervalMs);
+    if (opts.botIntervalMs) bot.start(opts.botIntervalMs);
   }
+  // A configuration change (a source switched off, a halt, a disabled pair) reaches the bank's liquidity at once.
+  config.onChange(() => {
+    // Cached LP prices were built under the old configuration: an aggregate resting on an LP switched off is no longer
+    // traded on (PriceEngine checks that at use), and a new one is built from the LPs still on.
+    void prices.refreshAll().catch((err) => app.log.warn({ err }, 'price refresh after a configuration change failed'));
+    if (!exchange.running) return;
+    void bankBook.enforce().catch((err) => app.log.error({ err }, 'withdrawing the bank ladder after a configuration change failed'));
+    void bot.enforce().catch((err) => app.log.error({ err }, 'withdrawing the bot after a configuration change failed'));
+  });
   if (opts.priceIntervalMs) prices.start(opts.priceIntervalMs);
 
   const close = async () => {
     scheduler.stop();
     prices.stop();
     bankBook.stop();
+    bot.stop();
     await app.close();
     await exchange.idle();
+    await positions.idle();
     await exchange.stop();
     await events.stop();
     await config.stop();
     await db.end();
   };
   return { app, ctx, close };
+}
+
+/** LP best bid/ask and the bank's Direct rates for a pair at this moment, stored with each fill. */
+function priceEvidence(config: ConfigService, prices: PriceEngine, pair: string): Record<string, unknown> | undefined {
+  const agg = prices.cached(pair);
+  if (!agg) return undefined;
+  const c = config.get().data;
+  const p = c.pairs.find((x) => x.symbol === pair);
+  const direct = p ? segmentRates(c, p, agg, c.bankBook.anchorSegment) : undefined;
+  return {
+    lp: { bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), bidLp: agg.bidLp, askLp: agg.askLp, at: agg.at.toISOString(), fresh: !!prices.fresh(pair) },
+    direct: direct && { buy: formatPrice(direct.buy), sell: formatPrice(direct.sell), segment: c.bankBook.anchorSegment },
+  };
 }
 
 export function redactUrl(url: string) {

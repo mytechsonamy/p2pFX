@@ -85,6 +85,11 @@ export async function startHarness(
       .setJti(randomUUID())
       .sign(privateKey);
 
+  const idle = async () => {
+    await ctx.exchange.idle();
+    await ctx.positions.idle();
+  };
+
   const req: Harness['req'] = async (method, url, token, body, headers = {}) => {
     const res = await app.inject({
       method: method as 'GET',
@@ -92,6 +97,8 @@ export async function startHarness(
       headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
       ...(body !== undefined ? { payload: body as object } : {}),
     });
+    // Settlement runs behind matching (ASYNC dispatch) and hedges behind deals: tests see the state once they are done.
+    await idle();
     return { status: res.statusCode, body: res.body ? res.json() : undefined };
   };
 

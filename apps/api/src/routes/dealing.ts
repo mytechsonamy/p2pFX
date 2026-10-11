@@ -71,7 +71,7 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
           ? Object.fromEntries(
               segments.map((s) => {
                 const r = segmentRates(c, pair, agg, s);
-                return [s, { buy: formatPrice(r.buy), sell: formatPrice(r.sell), buyBips: r.buyBips, sellBips: r.sellBips }];
+                return [s, { buy: formatPrice(r.buy), sell: formatPrice(r.sell), buyPips: r.buyPips, sellPips: r.sellPips }];
               }),
             )
           : {},
@@ -84,7 +84,8 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
       deals: await dealing.recentDeals(),
       hedges: await positions.recentHedges(),
       lpStats: await positions.lpStats(),
-      bankBook: { enabled: c.bankBook.enabled, orders: await ctx.bankBook.snapshot() },
+      channels: c.channels,
+      bankBook: { enabled: c.channels.bankMarketMaker, botEnabled: c.channels.botMarketMaker, orders: await ctx.bankBook.snapshot() },
     };
   });
 

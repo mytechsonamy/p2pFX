@@ -6,6 +6,7 @@ import {
   parsePrice,
   valueOf,
   type BankConfig,
+  type FeeMode,
   type PairConfig,
   type QuoteBreakdown,
   type RoundingMode,
@@ -21,8 +22,12 @@ export interface PricingParams {
   side: Side;
   baseDecimals: number;
   quoteDecimals: number;
-  /** Commission per unit of base, in PRICE_SCALE units. */
+  /** PIPS: a fixed commission per unit (`commissionPerUnit`). BPS: a share of the book price (`commissionRate`). */
+  feeMode: FeeMode;
+  /** PIPS mode: commission per unit of base, in PRICE_SCALE units. */
   commissionPerUnit: bigint;
+  /** BPS mode: commission as a fraction of the book price, in PRICE_SCALE units (5 bps = 0.0005). */
+  commissionRate: bigint;
   /** Tax rate as a fraction, in PRICE_SCALE units. */
   taxRate: bigint;
   taxBase: 'effective' | 'book';
@@ -33,19 +38,38 @@ export interface PricingSnapshot {
   side: Side;
   baseDecimals: number;
   quoteDecimals: number;
+  /** Absent on orders entered before fee modes existed (PIPS). */
+  feeMode?: FeeMode;
   commissionPerUnit: string;
+  commissionRate?: string;
   taxRate: string;
   taxBase: 'effective' | 'book';
   rounding: RoundingMode;
 }
 
+/** Basis points to a PRICE_SCALE fraction: 1 bp = 1/10 000. */
+const BPS_DIVISOR = 10_000n;
+const PRICE_SCALE_BIG = 10n ** 8n;
+/** price × rate, both PRICE_SCALE, rounded half up to PRICE_SCALE. */
+const perUnitAt = (price: bigint, rate: bigint) => (price * rate + PRICE_SCALE_BIG / 2n) / PRICE_SCALE_BIG;
+
+/** The commission per unit of base a pair charges one side, at a given book price (PRICE_SCALE units). */
+export function commissionPerUnitOf(pair: PairConfig, side: Side, bookPrice: bigint): bigint {
+  const value = BigInt(side === 'BUY' ? pair.commission.buy : pair.commission.sell);
+  if (pair.commission.mode === 'PIPS') return value * parsePrice(pair.pipSize);
+  return perUnitAt(bookPrice, (value * PRICE_SCALE_BIG) / BPS_DIVISOR);
+}
+
 export function pricingParams(config: BankConfig, pair: PairConfig, side: Side): PricingParams {
-  const bips = side === 'BUY' ? pair.commission.buyBips : pair.commission.sellBips;
+  const value = BigInt(side === 'BUY' ? pair.commission.buy : pair.commission.sell);
+  const pips = pair.commission.mode === 'PIPS';
   return {
     side,
     baseDecimals: pair.baseDecimals,
     quoteDecimals: pair.quoteDecimals,
-    commissionPerUnit: BigInt(bips) * parsePrice(pair.bipSize),
+    feeMode: pair.commission.mode,
+    commissionPerUnit: pips ? value * parsePrice(pair.pipSize) : 0n,
+    commissionRate: pips ? 0n : (value * PRICE_SCALE_BIG) / BPS_DIVISOR,
     taxRate: parsePrice(taxRates(config, pair)[side === 'BUY' ? 'buyRate' : 'sellRate']),
     taxBase: config.tax.base,
     rounding: config.rounding,
@@ -53,12 +77,21 @@ export function pricingParams(config: BankConfig, pair: PairConfig, side: Side):
 }
 
 export function toSnapshot(p: PricingParams): PricingSnapshot {
-  return { ...p, commissionPerUnit: p.commissionPerUnit.toString(), taxRate: p.taxRate.toString() };
+  return { ...p, commissionPerUnit: p.commissionPerUnit.toString(), commissionRate: p.commissionRate.toString(), taxRate: p.taxRate.toString() };
 }
 
 export function fromSnapshot(s: PricingSnapshot): PricingParams {
-  return { ...s, commissionPerUnit: BigInt(s.commissionPerUnit), taxRate: BigInt(s.taxRate) };
+  return {
+    ...s,
+    feeMode: s.feeMode ?? 'PIPS',
+    commissionPerUnit: BigInt(s.commissionPerUnit),
+    commissionRate: BigInt(s.commissionRate ?? '0'),
+    taxRate: BigInt(s.taxRate),
+  };
 }
+
+/** The params with no commission (the bank's own orders, bank deals). */
+export const withoutCommission = (p: PricingParams): PricingParams => ({ ...p, feeMode: 'PIPS', commissionPerUnit: 0n, commissionRate: 0n });
 
 /** One side of a trade, all amounts in minor units of the quote currency. */
 export interface SidePricing {
@@ -79,7 +112,8 @@ export interface SidePricing {
  * Prices one side of a trade.
  *
  * notional   = qty × book price
- * commission = qty × commission per unit         (bank revenue for this side)
+ * commission = qty × commission per unit         (bank revenue for this side; per unit = pips × pip size, or
+ *                                                 book price × bps / 10 000)
  * gross      = notional ± commission             (= qty × effective price)
  * tax        = (gross or notional) × tax rate    (kambiyo vergisi, per `taxBase`)
  * total      = BUY: gross + tax  |  SELL: gross − tax
@@ -89,16 +123,17 @@ export interface SidePricing {
  */
 export function priceSide(qty: bigint, bookPrice: bigint, p: PricingParams): SidePricing {
   const sign = p.side === 'BUY' ? 1n : -1n;
+  const perUnit = p.feeMode === 'BPS' ? perUnitAt(bookPrice, p.commissionRate) : p.commissionPerUnit;
   const notional = valueOf(qty, p.baseDecimals, bookPrice, p.quoteDecimals, p.rounding);
-  const commission = valueOf(qty, p.baseDecimals, p.commissionPerUnit, p.quoteDecimals, p.rounding);
+  const commission = valueOf(qty, p.baseDecimals, perUnit, p.quoteDecimals, p.rounding);
   const gross = notional + sign * commission;
   const tax = applyRate(p.taxBase === 'effective' ? gross : notional, p.taxRate, p.rounding);
   return {
     side: p.side,
     qty,
     bookPrice,
-    commissionPerUnit: p.commissionPerUnit,
-    effectivePrice: bookPrice + sign * p.commissionPerUnit,
+    commissionPerUnit: perUnit,
+    effectivePrice: bookPrice + sign * perUnit,
     notional,
     commission,
     gross,

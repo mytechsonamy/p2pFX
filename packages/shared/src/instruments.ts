@@ -13,7 +13,8 @@ export interface Instrument {
   /** Decimals of the quantity (and of the customer's account in core banking). */
   decimals: number;
   tickSize: string;
-  bipSize: string;
+  /** The market pip fees and margins are counted in (quote currency per unit of base). */
+  pipSize: string;
   minQty: string;
   /** Demo bot order sizes. */
   lot: { min: string; max: string; step: string };
@@ -30,7 +31,7 @@ type Spec = Omit<Instrument, 'code' | 'name' | 'kind'>;
 const major: Spec = {
   decimals: 2,
   tickSize: '0.0001',
-  bipSize: '0.01',
+  pipSize: '0.0001',
   minQty: '1',
   lot: { min: '200', max: '3500', step: '50' },
   ladder: ['5000', '10000', '20000'],
@@ -40,10 +41,10 @@ const major: Spec = {
 };
 const pound: Spec = { ...major, lot: { min: '100', max: '1500', step: '50' }, ladder: ['2000', '5000', '10000'], maxDeal: '100000', position: '50000', clip: '25000' };
 const dollarBloc: Spec = { ...major, lot: { min: '200', max: '3000', step: '50' }, ladder: ['3000', '6000', '12000'], maxDeal: '150000', position: '75000', clip: '30000' };
-/** Currencies worth a few lira: a finer bip so that 5 bips stays a small fraction of the price. */
+/** Currencies worth a few lira: a finer pip so that the default commission stays a small fraction of the price. */
 const small: Spec = {
   ...major,
-  bipSize: '0.001',
+  pipSize: '0.00001',
   minQty: '10',
   lot: { min: '1000', max: '15000', step: '100' },
   ladder: ['20000', '40000', '80000'],
@@ -64,7 +65,7 @@ export const INSTRUMENTS: Record<string, Instrument> = Object.fromEntries(
     fx('JPY', 'Japon Yeni', {
       ...major,
       decimals: 0,
-      bipSize: '0.0001',
+      pipSize: '0.000001',
       minQty: '100',
       lot: { min: '20000', max: '500000', step: '10000' },
       ladder: ['500000', '1000000', '2000000'],
@@ -79,7 +80,7 @@ export const INSTRUMENTS: Record<string, Instrument> = Object.fromEntries(
     fx('QAR', 'Katar Riyali', small),
     fx('KWD', 'Kuveyt Dinarı', {
       ...major,
-      bipSize: '0.05',
+      pipSize: '0.0005',
       lot: { min: '50', max: '800', step: '10' },
       ladder: ['1000', '2000', '5000'],
       maxDeal: '30000',
@@ -93,7 +94,7 @@ export const INSTRUMENTS: Record<string, Instrument> = Object.fromEntries(
     metal('XAU', 'Altın (gram)', {
       decimals: 2,
       tickSize: '0.01',
-      bipSize: '1',
+      pipSize: '0.01',
       minQty: '0.1',
       lot: { min: '5', max: '150', step: '5' },
       ladder: ['250', '500', '1000'],
@@ -112,7 +113,7 @@ export const INSTRUMENTS: Record<string, Instrument> = Object.fromEntries(
     metal('XPT', 'Platin (gram)', {
       decimals: 2,
       tickSize: '0.01',
-      bipSize: '0.5',
+      pipSize: '0.005',
       minQty: '0.1',
       lot: { min: '5', max: '100', step: '5' },
       ladder: ['100', '250', '500'],
@@ -143,7 +144,7 @@ const pow10 = (v: number) => 10 ** Math.round(Math.log10(v));
 /** Plain decimal string (no exponent), at most 8 decimals. */
 const dec = (v: number) => v.toFixed(8).replace(/\.?0+$/, '');
 
-/** Catalog entry, or defaults derived from the rate (a bip ≈ 2 basis points of the price, lots ≈ 10–150 k TRY). */
+/** Catalog entry, or defaults derived from the rate (500 pips ≈ 10 basis points of the price, lots ≈ 10–150 k TRY). */
 export function instrument(code: string, rate?: number): Instrument {
   const known = INSTRUMENTS[code];
   if (known) return known;
@@ -155,7 +156,7 @@ export function instrument(code: string, rate?: number): Instrument {
     kind: isMetal(code) ? 'metal' : 'fx',
     decimals: 2,
     tickSize: dec(Math.max(0.0001, pow10(r * 2e-6))),
-    bipSize: dec(Math.max(0.0001, pow10(r * 2e-4))),
+    pipSize: dec(Math.max(0.000001, pow10(r * 2e-6))),
     minQty: '1',
     lot: { min: units(10_000), max: units(150_000), step: dec(Math.max(0.01, pow10(2_000 / r))) },
     ladder: [units(250_000), units(500_000), units(1_000_000)],
@@ -167,7 +168,7 @@ export function instrument(code: string, rate?: number): Instrument {
 
 export const instrumentName = (code: string) => INSTRUMENTS[code]?.name ?? code;
 
-/** A pair against TRY with the instrument's defaults: 5 bips of commission per side, a 3 % price band. */
+/** A pair against TRY with the instrument's defaults: 500 pips of commission per side, a 3 % price band. */
 export function pairFor(code: string, opts: { enabled?: boolean; rate?: number; quote?: string } = {}): PairConfig {
   const i = instrument(code, opts.rate);
   const quote = opts.quote ?? 'TRY';
@@ -178,10 +179,10 @@ export function pairFor(code: string, opts: { enabled?: boolean; rate?: number; 
     baseDecimals: i.decimals,
     quoteDecimals: 2,
     tickSize: i.tickSize,
+    pipSize: i.pipSize,
     minQty: i.minQty,
     priceBandPct: '3',
-    commission: { buyBips: 5, sellBips: 5 },
-    bipSize: i.bipSize,
+    commission: { mode: 'PIPS', buy: 500, sell: 500 },
     enabled: opts.enabled ?? true,
   };
 }
@@ -191,7 +192,7 @@ const ladderOf = (levels: string[]) => ({ enabled: true, startPct: '0.02', stepP
 /**
  * The configuration with one more pair: the pair itself (closed for trading unless `enabled`), and the
  * instrument's defaults for every per-currency parameter that has none yet (deal size, position limit, hedge
- * clip, bot lots, the bank's ladder).
+ * clip, inventory cap, bot lots, the bank's ladder).
  */
 export function withPair(config: BankConfig, code: string, opts: { enabled?: boolean; rate?: number } = {}): BankConfig {
   const pair = pairFor(code, opts);
@@ -207,7 +208,8 @@ export function withPair(config: BankConfig, code: string, opts: { enabled?: boo
       positionLimits: keep(config.dealing.positionLimits, i.position),
       hedging: { ...config.dealing.hedging, maxClipQty: keep(config.dealing.hedging.maxClipQty, i.clip) },
     },
-    bots: { ...config.bots, lots: keep(config.bots.lots, i.lot) },
+    botMarketMaker: { ...config.botMarketMaker, lots: keep(config.botMarketMaker.lots, i.lot) },
+    inventory: { ...config.inventory, maxPosition: keep(config.inventory.maxPosition, dec(Number(i.position) * 2.5)) },
     bankBook: {
       ...config.bankBook,
       pairs: pair.symbol in config.bankBook.pairs ? config.bankBook.pairs : { ...config.bankBook.pairs, [pair.symbol]: { asks: ladderOf(i.ladder), bids: ladderOf(i.ladder) } },

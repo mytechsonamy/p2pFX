@@ -37,13 +37,13 @@ const withTax = (rate: string) => {
 describe('config diff', () => {
   it('reports leaf changes, keying pairs by symbol', () => {
     const b = structuredClone(DEFAULT_CONFIG);
-    b.pairs[1].commission.buyBips = 7;
-    b.dealing.margins.segments.gold = { buyBips: 2, sellBips: 2 };
+    b.pairs[1].commission.buy = 700;
+    b.dealing.margins.segments.gold = { buyPips: 200, sellPips: 200 };
     expect(diffConfig(DEFAULT_CONFIG, b)).toEqual([
-      { path: 'pairs.EURTRY.commission.buyBips', from: 5, to: 7 },
-      { path: 'dealing.margins.segments.gold', from: undefined, to: { buyBips: 2, sellBips: 2 } },
+      { path: 'pairs.EURTRY.commission.buy', from: 500, to: 700 },
+      { path: 'dealing.margins.segments.gold', from: undefined, to: { buyPips: 200, sellPips: 200 } },
     ]);
-    expect(pathMatches('pairs.EURTRY.commission.buyBips', 'pairs.*.commission')).toBe(true);
+    expect(pathMatches('pairs.EURTRY.commission.buy', 'pairs.*.commission')).toBe(true);
     expect(pathMatches('pairs.EURTRY.minQty', 'pairs.*.commission')).toBe(false);
   });
 });
@@ -127,7 +127,7 @@ describe('back office', () => {
 
     await h.req('PUT', '/ops/config', editor, { config: withTax('0.001'), reason: 'Vergi oranı' });
     const c = structuredClone(h.ctx.config.get().data);
-    c.pairs[0].commission.buyBips = 6;
+    c.pairs[0].commission.buy = 600;
     await h.req('PUT', '/ops/config', editor, { config: c, reason: 'Komisyon' });
     expect((await h.req('POST', '/ops/config/assumptions/confirm', editor, { keys: ['tradingHours'], reason: '7/24 uygun' })).status).toBe(200);
 
@@ -145,11 +145,11 @@ describe('back office', () => {
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', vip)).body).toMatchObject({ buy: '49.1959' });
 
     await h.setConfig((c) => {
-      c.dealing.margins.segments.premium = { buyBips: 2, sellBips: 2 };
+      c.dealing.margins.segments.premium = { buyPips: 200, sellPips: 200 };
       c.session.ttlMinutes = 5;
       return c;
     });
-    // Same LP price, the new premium margin (2 bips instead of 4).
+    // Same LP price, the new premium margin (200 pips instead of 400).
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', vip)).body).toMatchObject({ buy: '49.1759', sell: '49.1241' });
     const s = await h.req('POST', '/v1/session', undefined, { launchToken: await h.launchToken('ayse') });
     expect(new Date(s.body.expiresAt).getTime() - h.clock.now.getTime()).toBe(5 * 60 * 1000);
@@ -163,7 +163,7 @@ describe('back office', () => {
     ws.send(JSON.stringify({ op: 'subscribe', channels: [] }));
     for (let i = 0; i < 50 && !messages.length; i++) await new Promise((r) => setTimeout(r, 10));
     await h.setConfig((c) => {
-      c.pairs[0].commission.buyBips = 6;
+      c.pairs[0].commission.buy = 600;
       return c;
     });
     expect(messages).toContainEqual({ channel: 'config', data: { version: h.ctx.config.get().version } });

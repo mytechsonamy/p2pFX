@@ -5,8 +5,9 @@ import type { AppContext } from '../app.js';
 import { ApiError, badRequest, notFound } from '../errors.js';
 import { audit } from '../audit.js';
 import { hashPassword } from '../auth.js';
+import { exceptions, flowReport } from '../reports.js';
 
-const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
+const parse = <T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, value: unknown): T => {
   const r = schema.safeParse(value);
   if (!r.success) throw badRequest('INVALID_REQUEST', 'request is invalid', r.error.issues);
   return r.data;
@@ -214,6 +215,42 @@ export function opsRoutes(app: FastifyInstance, ctx: AppContext) {
         currency: pair?.quote ?? 'TRY',
       };
     });
+  });
+
+  const range = (q: { from?: string; to?: string }) => {
+    const from = q.from ? new Date(q.from) : new Date(0);
+    const to = q.to ? new Date(q.to) : new Date(8.64e15);
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) throw badRequest('INVALID_RANGE', 'from/to must be ISO dates');
+    return { from, to };
+  };
+
+  /** C2C, C2B (ladder, bot) and Direct volumes, the P2P match ratio, customer leg volume, fees and contribution per pair. */
+  app.get<{ Querystring: { from?: string; to?: string } }>('/ops/reports', async (req) => {
+    await auth.ops(req);
+    return { pairs: await flowReport(db, config.get().data, range(req.query)) };
+  });
+
+  /** Settlements, deals and hedges in doubt, open hold tasks, and positions against their limits. */
+  app.get('/ops/exceptions', async (req) => {
+    await auth.ops(req);
+    const positions = (await ctx.positions.snapshot()).map((p) => ({ pair: p.pair, qty: p.qty, limit: p.limit, maxPosition: p.maxPosition }));
+    return { ...(await exceptions(db)), positions };
+  });
+
+  /**
+   * Kill switch, second half: cancels open orders (all, one pair and/or one source). Stopping new entries is the
+   * configuration's `killSwitch`; this takes out what is already resting. Audited with its reason.
+   */
+  app.post('/ops/controls/cancel-orders', async (req) => {
+    const actor = await auth.ops(req, 'editor');
+    const body = parse(
+      z.object({ pair: z.string().optional(), source: z.enum(['CUSTOMER', 'BANK_MM', 'BOT_MM']).optional(), reason: z.string().min(3) }),
+      req.body,
+    );
+    if (body.pair && !findPair(config.get().data, body.pair)) throw badRequest('UNKNOWN_PAIR', `pair ${body.pair} not found`);
+    const cancelled = await ctx.exchange.cancelOrders({ pair: body.pair, source: body.source });
+    await audit(db, actor, 'ops.orders.cancel', { pair: body.pair ?? null, source: body.source ?? null, reason: body.reason, cancelled });
+    return { cancelled };
   });
 
   /** Prototype only: moves the mock core's reference rate (drives the price band). */
