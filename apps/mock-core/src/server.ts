@@ -13,7 +13,9 @@ export function mockLiquidity(bank: MockCoreBank, mode: LpMode) {
   if (mode === 'direct') return new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs() });
   const crosses = () => bank.referencePairs().flatMap((p) => syntheticRoute(p)?.cross ?? []);
   return new MockLiquidity({
-    anchor: (pair) => (pair === 'USDTRY' ? bank.referenceRate(pair) : crosses().includes(pair) ? crossFromReference(pair, (p) => bank.referenceRate(p)) : undefined),
+    // A cross follows its own reference rate when one is set (synced from a real LP), else the TRY rates.
+    anchor: (pair) =>
+      pair === 'USDTRY' ? bank.referenceRate(pair) : crosses().includes(pair) ? (bank.referenceRate(pair) ?? crossFromReference(pair, (p) => bank.referenceRate(p))) : undefined,
     instruments: () => ['USDTRY', ...crosses()],
   });
 }

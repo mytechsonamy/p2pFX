@@ -1,0 +1,222 @@
+import {
+  LiquidityError,
+  LiquidityOutcomeUnknownError,
+  type LiquidityAdapter,
+  type LpExecution,
+  type LpExecutionRequest,
+  type LpQuote,
+} from './liquidity.js';
+
+export interface SaxoOptions {
+  /** Access token (the developer portal's 24-hour token for SIM). */
+  token: string;
+  /** OpenAPI base URL; SIM by default. */
+  baseUrl?: string;
+  /** Pairs to price from Saxo, in Saxo's symbols (USDTRY, XAUUSD…). */
+  pairs: string[];
+  /** LP name the quotes and trades carry. */
+  name?: string;
+  /** Prices are fetched at most this often (one call for every pair); Saxo rate-limits each session. */
+  minPollMs?: number;
+  /** How long to wait for a market order to be confirmed filled before the outcome is unknown. */
+  fillTimeoutMs?: number;
+  /** Accept indicative prices (Saxo marks prices it would not trade on as Indicative). */
+  allowIndicative?: boolean;
+  fetch?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+interface InfoPrice {
+  Uic: number;
+  LastUpdated?: string;
+  Quote?: { Bid?: number; Ask?: number; PriceTypeBid?: string; PriceTypeAsk?: string };
+}
+
+interface OrderActivity {
+  OrderId: string;
+  ExternalReference?: string;
+  Status?: string;
+  SubStatus?: string;
+  BuySell?: string;
+  Amount?: number;
+  FilledAmount?: number;
+  AveragePrice?: number;
+  ExecutionPrice?: number;
+  Price?: number;
+  ActivityTime?: string;
+}
+
+/** Saxo prices with up to 8 decimals as plain strings (no exponent). */
+const num = (v: number) => v.toFixed(8).replace(/\.?0+$/, '');
+
+/**
+ * Saxo Bank OpenAPI as one LP (FxSpot): prices from `infoprices/list`, market orders with the bank's reference
+ * as `ExternalReference`, fills confirmed from the order activity audit. Prices are polled (one request for
+ * every pair, cached for `minPollMs`); Saxo's streaming would replace this in production.
+ */
+export class SaxoLiquidity implements LiquidityAdapter {
+  readonly name: string;
+  private readonly base: string;
+  private readonly fetchFn: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private uics?: Promise<Map<string, number>>;
+  private accountKey?: Promise<string>;
+  private cache?: { at: number; quotes: Promise<Map<string, LpQuote>> };
+
+  constructor(private readonly opts: SaxoOptions) {
+    this.name = opts.name ?? 'SAXO';
+    this.base = (opts.baseUrl ?? 'https://gateway.saxobank.com/sim/openapi').replace(/\/$/, '');
+    this.fetchFn = opts.fetch ?? fetch;
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  }
+
+  /** `trade`: a call that may have traded, so transport failures and 5xx are an unknown outcome. */
+  private async call<T>(method: string, path: string, body?: unknown, opts: { trade?: boolean; requestId?: string } = {}): Promise<T> {
+    const fail = (message: string) => (opts.trade ? new LiquidityOutcomeUnknownError(message) : new LiquidityError(message));
+    let res: Response;
+    try {
+      res = await this.fetchFn(`${this.base}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${this.opts.token}`,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(opts.requestId ? { 'x-request-id': opts.requestId } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err) {
+      throw fail(`Saxo unreachable: ${(err as Error).message}`);
+    }
+    const json = (await res.json().catch(() => undefined)) as any;
+    if (res.status === 401) throw new LiquidityError('Saxo rejected the token (expired 24-hour token?)');
+    if (res.status >= 500) throw fail(`Saxo returned ${res.status}`);
+    if (!res.ok) throw new LiquidityError(`Saxo ${json?.ErrorInfo?.ErrorCode ?? json?.ErrorCode ?? res.status}: ${json?.ErrorInfo?.Message ?? json?.Message ?? ''}`.trim());
+    return json as T;
+  }
+
+  private uicMap() {
+    this.uics ??= (async () => {
+      const map = new Map<string, number>();
+      for (const pair of this.opts.pairs) {
+        const r = await this.call<{ Data?: { Identifier: number; Symbol: string }[] }>('GET', `/ref/v1/instruments?Keywords=${pair}&AssetTypes=FxSpot`);
+        const hit = r.Data?.find((d) => d.Symbol?.toUpperCase() === pair);
+        if (hit) map.set(pair, hit.Identifier);
+      }
+      return map;
+    })().catch((err) => {
+      this.uics = undefined;
+      throw err;
+    });
+    return this.uics;
+  }
+
+  private account() {
+    this.accountKey ??= this.call<{ Data?: { AccountKey: string }[] }>('GET', '/port/v1/accounts/me')
+      .then((r) => {
+        const key = r.Data?.[0]?.AccountKey;
+        if (!key) throw new LiquidityError('Saxo returned no account');
+        return key;
+      })
+      .catch((err) => {
+        this.accountKey = undefined;
+        throw err;
+      });
+    return this.accountKey;
+  }
+
+  async instruments() {
+    return [...(await this.uicMap()).keys()];
+  }
+
+  private prices(): Promise<Map<string, LpQuote>> {
+    const now = Date.now();
+    if (this.cache && now - this.cache.at < (this.opts.minPollMs ?? 1000)) return this.cache.quotes;
+    const quotes = (async () => {
+      const uics = await this.uicMap();
+      const out = new Map<string, LpQuote>();
+      if (!uics.size) return out;
+      const pairOf = new Map([...uics].map(([p, u]) => [u, p]));
+      const r = await this.call<{ Data?: InfoPrice[] }>('GET', `/trade/v1/infoprices/list?Uics=${[...uics.values()].join(',')}&AssetType=FxSpot&FieldGroups=Quote`);
+      for (const d of r.Data ?? []) {
+        const pair = pairOf.get(d.Uic);
+        const q = d.Quote;
+        if (!pair || !q?.Bid || !q?.Ask) continue;
+        if (!this.opts.allowIndicative && (q.PriceTypeBid !== 'Tradable' || q.PriceTypeAsk !== 'Tradable')) continue;
+        out.set(pair, { lp: this.name, pair, bid: num(q.Bid), ask: num(q.Ask), at: d.LastUpdated ?? new Date().toISOString() });
+      }
+      return out;
+    })();
+    this.cache = { at: now, quotes };
+    quotes.catch(() => (this.cache = undefined));
+    return quotes;
+  }
+
+  async quotes(pair: string): Promise<LpQuote[]> {
+    const q = (await this.prices()).get(pair);
+    if (!q) throw new LiquidityError(`Saxo has no tradable price for ${pair}`);
+    return [q];
+  }
+
+  async execute(req: LpExecutionRequest): Promise<LpExecution> {
+    if (req.lp !== this.name) throw new LiquidityError(`unknown LP ${req.lp}`);
+    const done = await this.findExecution(req.lp, req.ref);
+    if (done) return done;
+    const uic = (await this.uicMap()).get(req.pair);
+    if (uic === undefined) throw new LiquidityError(`Saxo does not trade ${req.pair}`);
+    const placed = await this.call<{ OrderId?: string }>(
+      'POST',
+      '/trade/v2/orders',
+      {
+        AccountKey: await this.account(),
+        Uic: uic,
+        AssetType: 'FxSpot',
+        BuySell: req.side === 'BUY' ? 'Buy' : 'Sell',
+        Amount: Number(req.qty),
+        OrderType: 'Market',
+        OrderDuration: { DurationType: 'DayOrder' },
+        ManualOrder: false,
+        ExternalReference: req.ref,
+      },
+      { trade: true, requestId: req.ref },
+    );
+    if (!placed.OrderId) throw new LiquidityOutcomeUnknownError('Saxo accepted the order without an order id');
+    const deadline = Date.now() + (this.opts.fillTimeoutMs ?? 5_000);
+    for (;;) {
+      const last = await this.call<{ Data?: OrderActivity[] }>('GET', `/cs/v1/audit/orderactivities?OrderId=${placed.OrderId}&EntryType=Last`, undefined, { trade: true });
+      const a = last.Data?.[0];
+      const exec = a && this.toExecution(req, a);
+      if (exec) return exec;
+      if (a && /Cancel|Reject|Expired/i.test(`${a.Status} ${a.SubStatus}`)) throw new LiquidityError(`Saxo ${a.Status}: order ${placed.OrderId} not filled`);
+      if (Date.now() > deadline) throw new LiquidityOutcomeUnknownError(`Saxo order ${placed.OrderId} not confirmed filled in time`);
+      await this.sleep(250);
+    }
+  }
+
+  private toExecution(req: Pick<LpExecutionRequest, 'lp' | 'ref'> & Partial<LpExecutionRequest>, a: OrderActivity): LpExecution | undefined {
+    if (a.Status !== 'FinalFill') return undefined;
+    const rate = a.AveragePrice ?? a.ExecutionPrice ?? a.Price;
+    if (!rate) return undefined;
+    return {
+      lp: req.lp,
+      ref: req.ref,
+      pair: req.pair ?? '',
+      side: req.side ?? (a.BuySell === 'Sell' ? 'SELL' : 'BUY'),
+      qty: req.qty ?? num(a.FilledAmount ?? a.Amount ?? 0),
+      rate: num(rate),
+      tradeRef: `SAXO-${a.OrderId}`,
+      at: a.ActivityTime ?? new Date().toISOString(),
+    };
+  }
+
+  /**
+   * The order activity audit cannot be filtered by reference, so the latest activities are searched for the
+   * bank's reference (the hedge lookup runs soon after the trade, well within that window).
+   */
+  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
+    if (lp !== this.name) return undefined;
+    const r = await this.call<{ Data?: OrderActivity[] }>('GET', '/cs/v1/audit/orderactivities?EntryType=Last&$top=500');
+    const a = r.Data?.find((x) => x.ExternalReference === ref && x.Status === 'FinalFill');
+    return a ? this.toExecution({ lp, ref, ...request }, a) : undefined;
+  }
+}

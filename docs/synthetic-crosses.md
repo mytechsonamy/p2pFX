@@ -37,3 +37,19 @@ MOCK_LP_MODE=interbank docker compose up
 ```
 
 Bu modda mock LP'ler yalnızca USDTRY ve dolar çaprazlarını fiyatlar. Diğer bütün pariteler sentetik olarak gelir.
+
+## Saxo SIM ile gerçek fiyat
+
+`SaxoLiquidity` (`packages/core-adapter/src/saxo.ts`), Saxo OpenAPI'yi tek bir LP olarak bağlar. LP adı `SAXO` olur. `CompositeLiquidity` ise bunu mock LP'lerin yanına ekler.
+
+- **Fiyat:** Bütün pariteler için tek bir `infoprices/list` isteği atılır ve en sık saniyede bir yenilenir (`SAXO_POLL_MS`). Saxo'nun "Indicative" olarak işaretlediği fiyatlar kullanılmaz.
+- **İşlem:** Market emri gönderilir. Referans olarak `ExternalReference` ve `x-request-id` kullanılır. Dolum, order activity kaydından okunur. Süresi içinde doğrulanamayan emir "sonucu belirsiz" sayılır.
+- **Fiyat eşitleme:** Saxo açıkken mock LP'lerin referans kurları her dakika Saxo'nun orta kuruna çekilir. Bu yapılmazsa iki piyasa birbirinden çok uzak kalır. Kapatmak için `SAXO_SYNC_MOCK=0` kullanılır.
+
+Çalıştırmak için [developer.saxo/openapi/token/current](https://www.developer.saxo/openapi/token/current) adresinden 24 saatlik token alınır ve şu komut çalıştırılır:
+
+```
+SAXO_TOKEN='…' docker compose up
+```
+
+Varsayılan pariteler: `USDTRY,EURTRY,EURUSD,GBPUSD,USDCHF,USDJPY,XAUUSD,XAGUSD`. Bunlar `SAXO_PAIRS` ile değiştirilebilir. Saxo'da olmayan pariteler sessizce atlanır.
