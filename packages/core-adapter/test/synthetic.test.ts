@@ -109,4 +109,15 @@ describe('synthetic crosses', () => {
     expect(await lp.findExecution('LP-A+LP-B', 'h4', req)).toEqual(found);
     expect(inner.executionCount).toBe(2);
   });
+
+  it('rejects a trade whose price moved beyond the limit, before any leg is sent', async () => {
+    const { inner, lp } = setup();
+    const ask = (await lp.quotes('XAUTRY')).find((q) => q.lp === 'LP-A+LP-A')!.ask;
+    await expect(lp.execute({ lp: 'LP-A+LP-A', pair: 'XAUTRY', side: 'BUY', qty: '10', ref: 'l1', limitRate: String(Number(ask) - 1) })).rejects.toBeInstanceOf(LiquidityError);
+    expect(inner.executionCount).toBe(0);
+    await lp.execute({ lp: 'LP-A+LP-A', pair: 'XAUTRY', side: 'BUY', qty: '10', ref: 'l2', limitRate: ask });
+    expect(inner.executionCount).toBe(2);
+    // A direct trade beyond its limit is rejected by the LP itself.
+    await expect(lp.execute({ lp: 'LP-A', pair: 'USDTRY', side: 'SELL', qty: '10', ref: 'l3', limitRate: '50' })).rejects.toBeInstanceOf(LiquidityError);
+  });
 });

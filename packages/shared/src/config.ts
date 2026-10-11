@@ -46,6 +46,8 @@ const HedgingSchema = z.object({
   maxClipQty: z.record(decimalString),
   /** BEST_LP: every clip goes to the best-priced LP. ACROSS_LPS: clips go round the LPs from best to worst price. */
   split: z.enum(['BEST_LP', 'ACROSS_LPS']),
+  /** Worst price a clip may fill at, in basis points away from the LP price it was sent at (0 = that price exactly). */
+  maxSlippageBps: z.number().min(0).max(500).default(10),
 });
 export type HedgingConfig = z.infer<typeof HedgingSchema>;
 
@@ -53,6 +55,7 @@ export const DEFAULT_HEDGING: HedgingConfig = {
   targetPct: 0,
   maxClipQty: { USD: '50000', EUR: '50000', GBP: '25000' },
   split: 'ACROSS_LPS',
+  maxSlippageBps: 10,
 };
 
 export const DealingSchema = z.object({

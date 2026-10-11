@@ -111,3 +111,14 @@ and side:
 - Positions are computed from deals and hedges in the platform database; a bank would reconcile them with its
   treasury system.
 - Bank quotes are not placed into the P2P book; P2P limit orders never execute against the bank.
+
+## Slippage limit and LP execution quality
+
+Every hedge clip goes to its LP with a **limit rate**: the LP price the clip was sent at, moved against the bank by `dealing.hedging.maxSlippageBps` basis points (default 10). An LP that cannot fill at that rate or better rejects the clip, and the clip moves on to the next LP, which is how last-look rejections of real LPs play out. For synthetic crosses and Saxo the limit is checked against the current price before anything is sent.
+
+The dealer screen's **LP performansı** table covers the hedge clips of the last 24 hours, per LP:
+- clips sent, filled, rejected and still open, and the reject rate,
+- how long the LP took (median and 95th percentile),
+- average slippage of fills against the price sent (basis points, positive = worse for the bank).
+
+The data is in `hedges.expected_rate`, `limit_rate`, `latency_ms` and `reject_reason` (migration 008).

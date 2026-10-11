@@ -86,7 +86,7 @@ describe('bank dealing', () => {
       dealing: {
         ...c.dealing,
         positionLimits: { ...c.dealing.positionLimits, USD: '1500' },
-        hedging: { targetPct: 50, maxClipQty: { USD: '500' }, split: 'ACROSS_LPS' },
+        hedging: { targetPct: 50, maxClipQty: { USD: '500' }, split: 'ACROSS_LPS', maxSlippageBps: 10 },
       },
     }));
     h.customer('zeynep', { USD: '0', TRY: '1000000' });
@@ -111,6 +111,25 @@ describe('bank dealing', () => {
 
     h.liquidity.rejecting.add('LP-B').add('LP-C');
     expect((await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'BUY', qty: '100' })).status).toBe(503);
+  });
+
+  it('sends clips with a slippage limit and keeps execution quality per LP', async () => {
+    h = await startHarness();
+    const sent: { lp: string; limitRate?: string }[] = [];
+    const execute = h.liquidity.execute.bind(h.liquidity);
+    h.liquidity.execute = (r) => (sent.push(r), execute(r));
+    h.liquidity.rejecting.add('LP-A');
+    expect((await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'BUY', qty: '100' })).status).toBe(200);
+    // LP-A's ask 49.1559 + 10 bps = 49.20505…, rounded up against the bank's favour.
+    expect(sent.map((r) => [r.lp, r.limitRate])).toEqual([['LP-A', '49.2050559'], ['LP-B', expect.any(String)]]);
+
+    const stats = (await h.req('GET', '/ops/dealing', OPS)).body.lpStats;
+    expect(stats).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ lp: 'LP-A', sent: 1, filled: 0, rejected: 1, rejectPct: 100 }),
+        expect.objectContaining({ lp: 'LP-B', sent: 1, filled: 1, rejected: 0, slippageBps: 0 }),
+      ]),
+    );
   });
 
   it('hedges back to flat with the best LP when a deal takes the position over its limit', async () => {

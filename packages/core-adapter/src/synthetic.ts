@@ -150,6 +150,19 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     const { route, crossLp } = legs;
     const qty = dec8(req.qty);
     if (qty <= 0n) throw new LiquidityError('quantity must be positive');
+    const traded = await this.inner.findExecution(crossLp, legRef(req.ref, 1));
+    if (traded) return this.complete(req, legs, traded);
+    // The limit is checked against the combination's current price: the legs themselves go without one, so
+    // a cross that traded is never left without its funding leg because of a price move.
+    if (req.limitRate) {
+      const now = (await this.syntheticQuotes(route)).find((q) => q.lp === req.lp);
+      if (!now) throw new LiquidityError(`${req.lp} does not quote ${req.pair}`);
+      const rate = parsePrice(req.side === 'BUY' ? now.ask : now.bid);
+      const limit = parsePrice(req.limitRate);
+      if (req.side === 'BUY' ? rate > limit : rate < limit) {
+        throw new LiquidityError(`${req.lp} price moved: ${formatPrice(rate)} is beyond the limit ${req.limitRate}`);
+      }
+    }
     let crossQty: bigint;
     let crossSide: 'BUY' | 'SELL';
     if (!route.inverted) {

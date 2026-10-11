@@ -164,6 +164,15 @@ export class SaxoLiquidity implements LiquidityAdapter {
     if (done) return done;
     const uic = (await this.uicMap()).get(req.pair);
     if (uic === undefined) throw new LiquidityError(`Saxo does not trade ${req.pair}`);
+    // Saxo gets a market order; the limit is enforced against its current price before the order is sent.
+    if (req.limitRate) {
+      this.cache = undefined;
+      const [q] = await this.quotes(req.pair);
+      const rate = Number(req.side === 'BUY' ? q.ask : q.bid);
+      if (req.side === 'BUY' ? rate > Number(req.limitRate) : rate < Number(req.limitRate)) {
+        throw new LiquidityError(`SAXO price moved: ${rate} is beyond the limit ${req.limitRate}`);
+      }
+    }
     const placed = await this.call<{ OrderId?: string }>(
       'POST',
       '/trade/v2/orders',

@@ -19,6 +19,11 @@ export interface LpExecutionRequest {
   qty: string;
   /** The bank's reference for the trade (idempotent per LP). */
   ref: string;
+  /**
+   * Worst rate the bank accepts (BUY: highest, SELL: lowest), decimal string. An LP that cannot fill at it or
+   * better rejects the trade (LiquidityError); without it the trade fills at the LP's current price.
+   */
+  limitRate?: string;
 }
 
 export interface LpExecution extends LpExecutionRequest {
@@ -150,9 +155,13 @@ export class MockLiquidity implements LiquidityAdapter {
     const quote = (await this.quotes(req.pair)).find((q) => q.lp === req.lp);
     if (!quote) throw new LiquidityError(`unknown LP ${req.lp}`);
     if (this.rejecting.has(req.lp)) throw new LiquidityError(`${req.lp} rejected the order`);
+    const rate = req.side === 'BUY' ? quote.ask : quote.bid;
+    if (req.limitRate && (req.side === 'BUY' ? Number(rate) > Number(req.limitRate) : Number(rate) < Number(req.limitRate))) {
+      throw new LiquidityError(`${req.lp} price moved: ${rate} is beyond the limit ${req.limitRate}`);
+    }
     const exec: LpExecution = {
       ...req,
-      rate: req.side === 'BUY' ? quote.ask : quote.bid,
+      rate,
       tradeRef: `${req.lp}-${String(++this.seq).padStart(6, '0')}`,
       at: quote.at,
     };
