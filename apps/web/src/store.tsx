@@ -3,7 +3,7 @@ import type { WebBridge, WebMessage } from '@p2p/sdk-bridge';
 import { Api, ApiError } from './api';
 import { Stream, type StreamMessage } from './stream';
 import { createTranslator, hasKey, type Translate } from './i18n';
-import type { Account, AppConfig, BankRates, Book, Branding, Fill, Order, PairStats, Rate, Side, Trade } from './types';
+import type { Account, AppConfig, BankRates, BankRatesState, BankPriceOff, Book, Branding, Fill, Order, PairStats, Rate, Side, Trade } from './types';
 import { addDecimal, compareDecimal, formatDecimal, formatPrice } from './format';
 
 export type Tab = 'trade' | 'board' | 'orders' | 'fills' | 'accounts';
@@ -51,7 +51,7 @@ export interface Exchange {
   books: Record<string, Book>;
   rates: Record<string, Rate>;
   /** The bank's live rates for this customer's segment, when the bank deals. */
-  bankRates: Record<string, BankRates>;
+  bankRates: Record<string, BankRatesState>;
   /** Opens the deal-with-the-bank sheet. */
   bankDeal: { side: Side; qty?: string } | null;
   openBankDeal: (d: { side: Side; qty?: string } | null) => void;
@@ -103,7 +103,7 @@ export function ExchangeProvider({ api, bridge, config: initialConfig, branding,
   const [fills, setFills] = useState<Fill[]>([]);
   const [books, setBooks] = useState<Record<string, Book>>({});
   const [rates, setRates] = useState<Record<string, Rate>>({});
-  const [bankRates, setBankRates] = useState<Record<string, BankRates>>({});
+  const [bankRates, setBankRates] = useState<Record<string, BankRatesState>>({});
   const [bankDeal, setBankDeal] = useState<{ side: Side; qty?: string } | null>(null);
   const dealing = !!config.dealing?.enabled;
   const [trades, setTrades] = useState<Record<string, Trade[]>>({});
@@ -200,8 +200,23 @@ export function ExchangeProvider({ api, bridge, config: initialConfig, branding,
     const rs = await Promise.all(config.pairs.map((p) => api.rate(p.symbol).catch(() => undefined)));
     setRates((cur) => ({ ...cur, ...Object.fromEntries(rs.filter((r): r is Rate => !!r).map((r) => [r.pair, r])) }));
     if (!dealing) return;
-    const bs = await Promise.all(config.pairs.map((p) => api.bankRates(p.symbol).catch(() => undefined)));
-    setBankRates((cur) => ({ ...Object.fromEntries(bs.filter((r): r is BankRates => !!r).map((r) => [r.pair, r])), ...cur }));
+    const bs = await Promise.all(
+      config.pairs.map((p) =>
+        api.bankRates(p.symbol).then(
+          (r): BankRatesState => ({ ...r, receivedAt: Date.now() }),
+          (e): BankRatesState | undefined =>
+            e instanceof ApiError && e.code === 'PRICE_UNAVAILABLE'
+              ? { pair: p.symbol, unavailable: true, reason: ((e.details as { reason?: BankPriceOff })?.reason ?? 'NO_PRICE'), receivedAt: Date.now() }
+              : undefined,
+        ),
+      ),
+    );
+    // The stream is the live source: a polled answer only replaces what the stream has not updated since.
+    setBankRates((cur) => {
+      const next = { ...cur };
+      for (const r of bs) if (r && !(cur[r.pair] && cur[r.pair].receivedAt > r.receivedAt)) next[r.pair] = r;
+      return next;
+    });
   }, [api, config.pairs, dealing]);
 
   // Latest handlers for the stream callbacks, which are created once.
@@ -223,8 +238,8 @@ export function ExchangeProvider({ api, bridge, config: initialConfig, branding,
         if (m.channel === 'config') {
           api.config().then((next) => setConfig((cur) => ({ ...next, bank: cur.bank })), () => {});
         } else if (m.channel.startsWith('bank:')) {
-          const r = m.data as BankRates;
-          setBankRates((cur) => ({ ...cur, [r.pair]: r }));
+          const r = m.data as BankRates | { pair: string; unavailable: true; reason: BankPriceOff };
+          setBankRates((cur) => ({ ...cur, [r.pair]: { ...r, receivedAt: Date.now() } as BankRatesState }));
         } else if (m.channel.startsWith('book:')) {
           const b = m.data as Book;
           setBooks((cur) => ({ ...cur, [b.pair]: b }));

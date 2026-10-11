@@ -29,6 +29,8 @@ export const PairConfigSchema = z.object({
    * e.g. "0.0001" (5 pips = 0.0005 TRY). Never a basis point: bps are always a fraction of the price.
    */
   pipSize: decimalString,
+  /** The bank stops quoting the pair while the LPs' best spread is wider than this, in bps of the mid (default: dealing.maxSpreadBps). */
+  maxSpreadBps: z.number().min(1).max(10_000).optional(),
   /**
    * Bank commission per side. PIPS: an absolute fee of `buy`/`sell` pips per unit of base (500 pips × 0.0001 =
    * 0.05 TRY per USD). BPS: a share of the book price (5 bps = 0.05 %). Added to the book price for buyers,
@@ -76,6 +78,11 @@ export const DealingSchema = z.object({
   quoteTtlSeconds: z.number().int().min(1).max(120),
   /** LP quotes older than this are ignored. */
   maxStalenessMs: z.number().int().min(100),
+  /**
+   * Spread guard: while the best LP bid and ask are further apart than this (bps of the mid), or crossed, the pair has
+   * no bank price (Direct, ladder and bot stop) until the market narrows. A pair can set its own limit.
+   */
+  maxSpreadBps: z.number().min(1).max(10_000).default(100),
   /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
   margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
   /** Largest single deal per base currency. */
@@ -88,8 +95,9 @@ export const DealingSchema = z.object({
 export type DealingConfig = z.infer<typeof DealingSchema>;
 
 export const DEFAULT_DEALING: DealingConfig = {
-  quoteTtlSeconds: 10,
+  quoteTtlSeconds: 5,
   maxStalenessMs: 3000,
+  maxSpreadBps: 100,
   margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
   maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
   positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },

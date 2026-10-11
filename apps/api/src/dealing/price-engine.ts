@@ -3,7 +3,7 @@ import type { LiquidityAdapter, LpQuote } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Db } from '../db/pool.js';
 import type { ConfigService } from '../config-service.js';
-import type { EventBus } from '../events.js';
+import type { EventBus, PriceOffReason } from '../events.js';
 import { ApiError } from '../errors.js';
 
 /** Best LP prices for a pair, PRICE_SCALE units. */
@@ -41,6 +41,8 @@ const FUTURE_TOLERANCE_MS = 2000;
 export class PriceEngine {
   private readonly latest = new Map<string, Aggregate>();
   private readonly lastTick = new Map<string, number>();
+  /** Pairs announced as without a bank price, so 'lpOff' goes out once per outage. */
+  private readonly off = new Map<string, PriceOffReason>();
   private timer?: NodeJS.Timeout;
 
   constructor(
@@ -83,7 +85,14 @@ export class PriceEngine {
   async refresh(pair: string): Promise<Aggregate> {
     const c = this.config.get().data;
     // An LP operations switched off (kill switch) is ignored entirely.
-    const quotes = (await this.lp.quotes(pair)).filter((q) => !lpDisabled(c.killSwitch.disabledLps, q.lp));
+    let all: LpQuote[];
+    try {
+      all = await this.lp.quotes(pair);
+    } catch (err) {
+      this.log.warn({ err, pair }, 'LP quotes failed');
+      return this.unavailable(pair, 'NO_PRICE', `no LP price for ${pair}`);
+    }
+    const quotes = all.filter((q) => !lpDisabled(c.killSwitch.disabledLps, q.lp));
     const now = this.clock();
     // Only sane, recent quotes: positive prices, bid below ask, not stamped in the future, within the staleness limit.
     const fresh = quotes.filter((q) => {
@@ -97,19 +106,43 @@ export class PriceEngine {
         return false;
       }
     });
-    if (!fresh.length) throw new ApiError(503, 'PRICE_UNAVAILABLE', `no live LP price for ${pair}`);
+    if (!fresh.length) return this.unavailable(pair, 'NO_PRICE', `no live LP price for ${pair}`);
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => fresh.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
     const askQ = best((a, b) => parsePrice(a.ask) <= parsePrice(b.ask));
     const sourceAt = new Date(Math.min(new Date(bidQ.at).getTime(), new Date(askQ.at).getTime()));
     const agg: Aggregate = { pair, bid: parsePrice(bidQ.bid), ask: parsePrice(askQ.ask), bidLp: bidQ.lp, askLp: askQ.lp, quotes: fresh, at: now, sourceAt };
+    // Spread guard: a crossed best price (one LP's bid above another's ask) or a spread wider than the limit is a
+    // market the bank does not quote into; the bank's price comes back when the LPs narrow again.
+    const limitBps = findPair(c, pair)?.maxSpreadBps ?? c.dealing.maxSpreadBps;
+    const spreadBps = spreadInBps(agg.bid, agg.ask);
+    if (agg.bid > agg.ask || spreadBps > limitBps) {
+      this.log.warn({ pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), bidLp: agg.bidLp, askLp: agg.askLp, spreadBps, limitBps }, 'spread guard: no bank price');
+      return this.unavailable(pair, 'WIDE_MARKET', `${pair} spread ${spreadBps.toFixed(1)} bps is beyond the limit ${limitBps} bps`);
+    }
     this.latest.set(pair, agg);
+    this.off.delete(pair);
     await this.events.publish({ type: 'lp', pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), at: now.toISOString() });
     if (now.getTime() - (this.lastTick.get(pair) ?? 0) >= TICK_EVERY_MS) {
       this.lastTick.set(pair, now.getTime());
       await this.db.query('insert into price_ticks (pair, bid, ask, at) values ($1, $2, $3, $4)', [pair, formatPrice(agg.bid), formatPrice(agg.ask), now]);
     }
     return agg;
+  }
+
+  /** Drops the pair's price so nothing trades on it, tells the stream once, and fails the refresh. */
+  private async unavailable(pair: string, reason: PriceOffReason, message: string): Promise<never> {
+    this.latest.delete(pair);
+    if (this.off.get(pair) !== reason) {
+      this.off.set(pair, reason);
+      await this.events.publish({ type: 'lpOff', pair, reason }).catch((err) => this.log.warn({ err, pair }, 'lpOff not published'));
+    }
+    throw new ApiError(503, 'PRICE_UNAVAILABLE', message, { reason });
+  }
+
+  /** Why the pair has no bank price right now, if it has none. */
+  offReason(pair: string): PriceOffReason | undefined {
+    return this.off.get(pair);
   }
 
   /**
@@ -155,6 +188,13 @@ export class PriceEngine {
     if (lpDisabled(c.killSwitch.disabledLps, q.lp)) return false;
     return this.clock().getTime() - new Date(q.at).getTime() <= c.dealing.maxStalenessMs;
   }
+}
+
+/** (ask − bid) in basis points of the mid; negative when crossed. */
+export function spreadInBps(bid: bigint, ask: bigint): number {
+  const mid = (bid + ask) / 2n;
+  if (mid <= 0n) return Infinity;
+  return Number(((ask - bid) * 1_000_000n) / mid) / 100;
 }
 
 interface PairPricing {

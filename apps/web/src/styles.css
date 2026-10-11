@@ -275,6 +275,9 @@ h2, h3 { margin: 0; }
 .bank-row .card-head { flex-direction: column; align-items: flex-start; gap: 2px; }
 .bank-row h3 { display: flex; align-items: center; gap: 6px; }
 .pill { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: var(--c-primary-soft); color: var(--c-primary); text-transform: uppercase; letter-spacing: 0.02em; }
+.pill-muted { background: var(--c-surface); color: var(--c-muted); }
+.bank-row-off { border-color: var(--c-border); }
+.bank-row-off .bank-price strong { opacity: 0.45; }
 .bank-prices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .bank-price { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 0; border-radius: calc(var(--radius) * 0.75); padding: 10px 12px; text-align: left; color: var(--c-text); }
 .bank-price.buy { background: var(--c-buy-soft); }

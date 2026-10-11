@@ -145,6 +145,7 @@ const SECTIONS: Section[] = [
           { kind: 'decimal', path: ['pairs', i, 'tickSize'], label: 'Fiyat adımı', unit: p.quote },
           { kind: 'decimal', path: ['pairs', i, 'minQty'], label: 'En küçük emir', unit: p.base },
           { kind: 'decimal', path: ['pairs', i, 'priceBandPct'], label: 'Fiyat bandı', unit: '%', help: 'Referans kurdan bu kadar uzak emirler reddedilir' },
+          { kind: 'number', path: ['pairs', i, 'maxSpreadBps'], label: 'Spread koruması', unit: 'bps', min: 1, max: 10000, optional: true, placeholder: 'genel ayar', help: 'Boşsa banka genelindeki sınır geçerli' },
         ] as Field[],
       })),
   },
@@ -246,6 +247,7 @@ const SECTIONS: Section[] = [
         fields: [
           { kind: 'int', path: ['dealing', 'quoteTtlSeconds'], label: 'Kotasyon geçerliliği', unit: 'saniye', min: 1, max: 120 },
           { kind: 'int', path: ['dealing', 'maxStalenessMs'], label: 'LP fiyatı en fazla', unit: 'ms eski', min: 100 },
+          { kind: 'number', path: ['dealing', 'maxSpreadBps'], label: 'Spread koruması', unit: 'bps', min: 1, max: 10000, help: 'LP alış-satış farkı bundan genişse (veya fiyatlar ters düşerse) banka fiyat vermez' },
           ...ccyFields(c, ['dealing', 'maxDealQty'], (ccy) => `Tek işlem üst sınırı ${ccy}`),
         ],
       },
