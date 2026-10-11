@@ -66,12 +66,12 @@ export interface BankRates {
 }
 
 /** Why the bank has no price for a pair: no fresh LP price, or the spread guard (market too wide). */
-export type BankPriceOff = 'NO_PRICE' | 'WIDE_MARKET';
+export type BankPriceOff = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED';
 
 /** What the client holds per pair: the latest rates with when they arrived (client clock), or why there are none. */
 export type BankRatesState =
   | (BankRates & { unavailable?: false; receivedAt: number })
-  | { pair: string; unavailable: true; reason: BankPriceOff; receivedAt: number };
+  | { pair: string; unavailable: true; reason: BankPriceOff; nextOpen?: string; receivedAt: number };
 
 /** A firm bank quote, executable until `expiresAt`. */
 export interface BankQuote {

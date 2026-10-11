@@ -1,4 +1,4 @@
-import type { BankConfig } from './config.js';
+import type { BankConfig, LpMarketConfig } from './config.js';
 
 type TradingHours = BankConfig['tradingHours'];
 
@@ -94,4 +94,51 @@ export function currentOrNextSessionClose(now: Date, hours: TradingHours): Date 
     if (s.trading && s.close > now) return s.close;
   }
   throw new Error('no trading session in the next 30 days');
+}
+
+const toMinutes = (hhmm: string) => {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+};
+
+/** Whether the LP market is open at `now` for an instrument kind (see `dealing.lpMarket`). */
+export function isLpMarketOpen(now: Date, m: LpMarketConfig, kind: 'fx' | 'metal'): boolean {
+  if (!m.enabled) return true;
+  const p = localParts(now, m.timezone);
+  if (m.holidays.includes(isoDate(p))) return false;
+  const minute = p.hour * 60 + p.minute;
+  // Minutes from Monday 00:00 local.
+  const ofWeek = (day: number, t: number) => (day - 1) * 1440 + t;
+  const at = ofWeek(p.weekday, minute);
+  const open = ofWeek(m.weekOpen.day, toMinutes(m.weekOpen.time));
+  const close = ofWeek(m.weekClose.day, toMinutes(m.weekClose.time));
+  const weekClosed = close < open ? at >= close && at < open : at >= close || at < open;
+  if (weekClosed) return false;
+  const brk = m.dailyBreaks[kind];
+  if (brk) {
+    const [from, to] = [toMinutes(brk.from), toMinutes(brk.to)];
+    if (from < to ? minute >= from && minute < to : minute >= from || minute < to) return false;
+  }
+  return true;
+}
+
+/**
+ * The next instant the LP market opens after `now` (to the minute), or undefined if it opens within no 10 days.
+ * Scans in 15-minute steps, then to the minute.
+ */
+export function nextLpMarketOpen(now: Date, m: LpMarketConfig, kind: 'fx' | 'metal'): Date | undefined {
+  const start = Math.floor(now.getTime() / 60_000) * 60_000;
+  const step = 15 * 60_000;
+  for (let t = start; t <= start + 10 * 86_400_000; t += step) {
+    if (!isLpMarketOpen(new Date(t), m, kind)) continue;
+    let first = t;
+    for (let u = Math.max(start, t - step + 60_000); u < t; u += 60_000) {
+      if (isLpMarketOpen(new Date(u), m, kind)) {
+        first = u;
+        break;
+      }
+    }
+    return new Date(first);
+  }
+  return undefined;
 }

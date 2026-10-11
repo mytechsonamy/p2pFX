@@ -73,6 +73,33 @@ export const DEFAULT_HEDGING: HedgingConfig = {
   maxSlippageBps: 10,
 };
 
+const WeekTimeSchema = z.object({ day: z.number().int().min(1).max(7), time: hhmm });
+
+/**
+ * When the LPs trade, in the LPs' own convention (FX: Sunday 17:00 to Friday 17:00 New York). Outside it LP prices are
+ * at best indicative, so the bank gives no price and says when the market opens. P2P keeps its own `tradingHours`.
+ */
+const LpMarketSchema = z.object({
+  enabled: z.boolean(),
+  timezone: z.string(),
+  weekOpen: WeekTimeSchema,
+  weekClose: WeekTimeSchema,
+  /** A daily break by instrument kind (e.g. metals 17:00–18:00 New York), local times in `timezone`. */
+  dailyBreaks: z.object({ fx: z.object({ from: hhmm, to: hhmm }).optional(), metal: z.object({ from: hhmm, to: hhmm }).optional() }),
+  /** Local dates (YYYY-MM-DD) the LP market is closed all day (e.g. 25 December, 1 January). */
+  holidays: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)),
+});
+export type LpMarketConfig = z.infer<typeof LpMarketSchema>;
+
+export const DEFAULT_LP_MARKET: LpMarketConfig = {
+  enabled: true,
+  timezone: 'America/New_York',
+  weekOpen: { day: 7, time: '17:00' },
+  weekClose: { day: 5, time: '17:00' },
+  dailyBreaks: { metal: { from: '17:00', to: '18:00' } },
+  holidays: [],
+};
+
 export const DealingSchema = z.object({
   /** How long a firm bank quote can be executed. */
   quoteTtlSeconds: z.number().int().min(1).max(120),
@@ -83,6 +110,7 @@ export const DealingSchema = z.object({
    * no bank price (Direct, ladder and bot stop) until the market narrows. A pair can set its own limit.
    */
   maxSpreadBps: z.number().min(1).max(10_000).default(100),
+  lpMarket: LpMarketSchema.default(DEFAULT_LP_MARKET),
   /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
   margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
   /** Largest single deal per base currency. */
@@ -98,6 +126,7 @@ export const DEFAULT_DEALING: DealingConfig = {
   quoteTtlSeconds: 5,
   maxStalenessMs: 3000,
   maxSpreadBps: 100,
+  lpMarket: DEFAULT_LP_MARKET,
   margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
   maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
   positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },
@@ -375,7 +404,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
   { key: 'limits', label: 'Emir ve günlük tutar limitleri', paths: ['limits', 'orderRateLimit'] },
   { key: 'hedging', label: 'Pozisyon limitleri ve otomatik hedge kuralı', paths: ['dealing.positionLimits', 'dealing.autoHedge', 'dealing.hedging'] },
-  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxDealQty'] },
+  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.lpMarket', 'dealing.maxDealQty'] },
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler (Bank MM)', paths: ['bankBook'] },

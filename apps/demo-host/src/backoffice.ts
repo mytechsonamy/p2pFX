@@ -223,6 +223,20 @@ const SECTIONS: Section[] = [
           { kind: 'list', path: ['tradingHours', 'holidays'], label: 'Tatil günleri', placeholder: '2026-10-29', help: 'Her satıra bir tarih (YYYY-AA-GG)' },
         ],
       },
+      {
+        title: 'LP piyasa saatleri (banka fiyatı)',
+        fields: [
+          { kind: 'bool', path: ['dealing', 'lpMarket', 'enabled'], label: 'Uygula', help: 'Kapalıyken banka fiyat vermez (Direct, merdiven, bot) ve müşteriye açılış saati gösterilir' },
+          { kind: 'text', path: ['dealing', 'lpMarket', 'timezone'], label: 'Saat dilimi', help: 'FX piyasası New York saatine göre açılıp kapanır' },
+          { kind: 'int', path: ['dealing', 'lpMarket', 'weekOpen', 'day'], label: 'Hafta açılış günü', min: 1, max: 7, help: '1 = Pazartesi … 7 = Pazar' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'weekOpen', 'time'], label: 'Açılış saati' },
+          { kind: 'int', path: ['dealing', 'lpMarket', 'weekClose', 'day'], label: 'Hafta kapanış günü', min: 1, max: 7, help: '1 = Pazartesi … 7 = Pazar' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'weekClose', 'time'], label: 'Kapanış saati' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'dailyBreaks', 'metal', 'from'], label: 'Kıymetli maden arası başlangıç' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'dailyBreaks', 'metal', 'to'], label: 'Kıymetli maden arası bitiş' },
+          { kind: 'list', path: ['dealing', 'lpMarket', 'holidays'], label: 'LP tatil günleri', placeholder: '2026-12-25', help: 'Her satıra bir tarih (YYYY-AA-GG), piyasanın saat diliminde' },
+        ],
+      },
     ],
   },
   {

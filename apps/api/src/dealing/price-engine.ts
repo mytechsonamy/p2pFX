@@ -1,4 +1,4 @@
-import { findPair, formatPrice, lpDisabled, parsePrice, type BankConfig, type PairConfig } from '@p2p/shared';
+import { findPair, formatPrice, isLpMarketOpen, isMetal, lpDisabled, nextLpMarketOpen, parsePrice, type BankConfig, type PairConfig } from '@p2p/shared';
 import type { LiquidityAdapter, LpQuote } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Db } from '../db/pool.js';
@@ -42,7 +42,7 @@ export class PriceEngine {
   private readonly latest = new Map<string, Aggregate>();
   private readonly lastTick = new Map<string, number>();
   /** Pairs announced as without a bank price, so 'lpOff' goes out once per outage. */
-  private readonly off = new Map<string, PriceOffReason>();
+  private readonly off = new Map<string, { reason: PriceOffReason; nextOpen?: Date }>();
   private timer?: NodeJS.Timeout;
 
   constructor(
@@ -84,6 +84,14 @@ export class PriceEngine {
   /** Pulls fresh LP quotes for a pair and publishes the aggregate. */
   async refresh(pair: string): Promise<Aggregate> {
     const c = this.config.get().data;
+    const now = this.clock();
+    // Outside the LP market's hours LP prices are at best indicative: no bank price, and the customer is told when it opens.
+    const kind = isMetal(findPair(c, pair)?.base ?? pair.slice(0, 3)) ? 'metal' : 'fx';
+    if (!isLpMarketOpen(now, c.dealing.lpMarket, kind)) {
+      const known = this.off.get(pair);
+      const nextOpen = known?.reason === 'MARKET_CLOSED' && known.nextOpen && known.nextOpen > now ? known.nextOpen : nextLpMarketOpen(now, c.dealing.lpMarket, kind);
+      return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} market is closed`, nextOpen);
+    }
     // An LP operations switched off (kill switch) is ignored entirely.
     let all: LpQuote[];
     try {
@@ -93,7 +101,6 @@ export class PriceEngine {
       return this.unavailable(pair, 'NO_PRICE', `no LP price for ${pair}`);
     }
     const quotes = all.filter((q) => !lpDisabled(c.killSwitch.disabledLps, q.lp));
-    const now = this.clock();
     // Only sane, recent quotes: positive prices, bid below ask, not stamped in the future, within the staleness limit.
     const fresh = quotes.filter((q) => {
       const age = now.getTime() - new Date(q.at).getTime();
@@ -131,18 +138,22 @@ export class PriceEngine {
   }
 
   /** Drops the pair's price so nothing trades on it, tells the stream once, and fails the refresh. */
-  private async unavailable(pair: string, reason: PriceOffReason, message: string): Promise<never> {
+  private async unavailable(pair: string, reason: PriceOffReason, message: string, nextOpen?: Date): Promise<never> {
     this.latest.delete(pair);
-    if (this.off.get(pair) !== reason) {
-      this.off.set(pair, reason);
-      await this.events.publish({ type: 'lpOff', pair, reason }).catch((err) => this.log.warn({ err, pair }, 'lpOff not published'));
+    const known = this.off.get(pair);
+    if (known?.reason !== reason || known.nextOpen?.getTime() !== nextOpen?.getTime()) {
+      this.off.set(pair, { reason, nextOpen });
+      await this.events
+        .publish({ type: 'lpOff', pair, reason, nextOpen: nextOpen?.toISOString() })
+        .catch((err) => this.log.warn({ err, pair }, 'lpOff not published'));
     }
-    throw new ApiError(503, 'PRICE_UNAVAILABLE', message, { reason });
+    throw new ApiError(503, 'PRICE_UNAVAILABLE', message, { reason, ...(nextOpen ? { nextOpen: nextOpen.toISOString() } : {}) });
   }
 
-  /** Why the pair has no bank price right now, if it has none. */
-  offReason(pair: string): PriceOffReason | undefined {
-    return this.off.get(pair);
+  /** Why the pair has no bank price right now (and when its market opens, if closed), if it has none. */
+  offState(pair: string): { reason: PriceOffReason; nextOpen?: string } | undefined {
+    const o = this.off.get(pair);
+    return o && { reason: o.reason, ...(o.nextOpen ? { nextOpen: o.nextOpen.toISOString() } : {}) };
   }
 
   /**

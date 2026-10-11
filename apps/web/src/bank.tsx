@@ -10,7 +10,7 @@ import type { BankPriceOff, BankQuote, BankRates, PairInfo, Side } from './types
  */
 const STALE_AFTER_MS = 5000;
 
-type BankPrice = { state: 'live'; rates: BankRates } | { state: 'stale'; rates: BankRates } | { state: 'off'; reason: BankPriceOff };
+type BankPrice = { state: 'live'; rates: BankRates } | { state: 'stale'; rates: BankRates } | { state: 'off'; reason: BankPriceOff; nextOpen?: string };
 
 /** The pair's bank price and whether it can be dealt on now; re-renders every second so a stalled price greys out. */
 export function useBankPrice(symbol: string): BankPrice {
@@ -22,7 +22,7 @@ export function useBankPrice(symbol: string): BankPrice {
   }, []);
   const r = bankRates[symbol];
   if (!r) return { state: 'off', reason: 'NO_PRICE' };
-  if (r.unavailable) return { state: 'off', reason: r.reason };
+  if (r.unavailable) return { state: 'off', reason: r.reason, nextOpen: r.nextOpen };
   return { state: now - r.receivedAt <= STALE_AFTER_MS ? 'live' : 'stale', rates: r };
 }
 
@@ -34,14 +34,25 @@ export function BankRow({ pair }: { pair: PairInfo }) {
   // Prices are shown only while they can be dealt on; an out-of-date one stays visible, greyed and not tappable.
   const r = price.state === 'off' ? undefined : price.rates;
   const live = price.state === 'live';
-  const pill = live ? t('bank.live') : price.state === 'stale' ? t('bank.stale') : t('bank.off');
+  const closed = price.state === 'off' && price.reason === 'MARKET_CLOSED';
+  const pill = live ? t('bank.live') : price.state === 'stale' ? t('bank.stale') : closed ? t('bank.closed') : t('bank.off');
+  const why =
+    price.state !== 'off'
+      ? t('bank.noPrice')
+      : price.reason === 'WIDE_MARKET'
+        ? t('bank.wideMarket')
+        : price.reason === 'MARKET_CLOSED'
+          ? price.nextOpen
+            ? t('bank.closedUntil', { at: new Date(price.nextOpen).toLocaleString(locale, { weekday: 'long', hour: '2-digit', minute: '2-digit' }) })
+            : t('bank.closedNoTime')
+          : t('bank.noPrice');
   return (
     <section className={`card bank-row${live ? '' : ' bank-row-off'}`}>
       <div className="card-head">
         <h3>
           {t('bank.title', { bank: config.bank.name })} <span className={`pill${live ? '' : ' pill-muted'}`}>{pill}</span>
         </h3>
-        <small>{live ? t('bank.hint') : price.state === 'off' && price.reason === 'WIDE_MARKET' ? t('bank.wideMarket') : t('bank.noPrice')}</small>
+        <small>{live ? t('bank.hint') : why}</small>
       </div>
       <div className="bank-prices">
         <button className="bank-price buy" disabled={!live} onClick={() => openBankDeal({ side: 'BUY' })}>

@@ -35,6 +35,11 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
   has no bank price. Direct quotes return `503 PRICE_UNAVAILABLE` with `details.reason = WIDE_MARKET`, and the
   ladder and bot stop. The price comes back on the first refresh where the LPs are within the limit again. When no
   LP answers or every quote is stale, the reason is `NO_PRICE`.
+- **LP market hours.** `dealing.lpMarket` follows the LPs' own week (FX: Sunday 17:00 to Friday 17:00 New York,
+  daylight saving included), a daily break per instrument kind (metals 17:00–18:00 New York) and holiday dates.
+  Outside it the pair has no bank price, with `reason = MARKET_CLOSED` and `nextOpen`, and the app says when the
+  bank's price comes back. P2P matching keeps its own `tradingHours`. `enabled: false` turns the calendar off
+  (e.g. for a weekend demo with the simulated LPs).
 - **What the customer sees.** The stream sends `{ pair, unavailable: true, reason }` on the `bank:<pair>` channel
   when a pair loses its price, and new subscribers get only a dealable price. The app labels the bank row "Canlı"
   only while updates keep arriving. After 5 s without one, the last price stays visible but is greyed out and can't
@@ -120,6 +125,7 @@ and side:
 "dealing": {
   "quoteTtlSeconds": 5,
   "maxSpreadBps": 100,
+  "lpMarket": { "enabled": true, "timezone": "America/New_York", "weekOpen": { "day": 7, "time": "17:00" }, "weekClose": { "day": 5, "time": "17:00" }, "dailyBreaks": { "metal": { "from": "17:00", "to": "18:00" } }, "holidays": [] },
   "maxStalenessMs": 3000,
   "margins": { "default": { "buyPips": 1000, "sellPips": 1000 }, "segments": { "premium": { "buyPips": 400, "sellPips": 400 } } },
   "maxDealQty": { "USD": "250000", "EUR": "250000", "GBP": "100000" },

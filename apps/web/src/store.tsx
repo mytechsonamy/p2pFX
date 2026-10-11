@@ -206,7 +206,13 @@ export function ExchangeProvider({ api, bridge, config: initialConfig, branding,
           (r): BankRatesState => ({ ...r, receivedAt: Date.now() }),
           (e): BankRatesState | undefined =>
             e instanceof ApiError && e.code === 'PRICE_UNAVAILABLE'
-              ? { pair: p.symbol, unavailable: true, reason: ((e.details as { reason?: BankPriceOff })?.reason ?? 'NO_PRICE'), receivedAt: Date.now() }
+              ? {
+                  pair: p.symbol,
+                  unavailable: true,
+                  reason: (e.details as { reason?: BankPriceOff })?.reason ?? 'NO_PRICE',
+                  nextOpen: (e.details as { nextOpen?: string })?.nextOpen,
+                  receivedAt: Date.now(),
+                }
               : undefined,
         ),
       ),
@@ -238,7 +244,7 @@ export function ExchangeProvider({ api, bridge, config: initialConfig, branding,
         if (m.channel === 'config') {
           api.config().then((next) => setConfig((cur) => ({ ...next, bank: cur.bank })), () => {});
         } else if (m.channel.startsWith('bank:')) {
-          const r = m.data as BankRates | { pair: string; unavailable: true; reason: BankPriceOff };
+          const r = m.data as BankRates | { pair: string; unavailable: true; reason: BankPriceOff; nextOpen?: string };
           setBankRates((cur) => ({ ...cur, [r.pair]: { ...r, receivedAt: Date.now() } as BankRatesState }));
         } else if (m.channel.startsWith('book:')) {
           const b = m.data as Book;

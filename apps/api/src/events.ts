@@ -10,9 +10,9 @@ export type StreamEvent =
   /** Best LP prices; the stream turns them into each customer's segment rates. */
   | { type: 'lp'; pair: string; bid: string; ask: string; at: string }
   /** The pair has no bank price any more (no fresh LP price, or the spread guard tripped) until the next 'lp'. */
-  | { type: 'lpOff'; pair: string; reason: PriceOffReason };
+  | { type: 'lpOff'; pair: string; reason: PriceOffReason; nextOpen?: string };
 
-export type PriceOffReason = 'NO_PRICE' | 'WIDE_MARKET';
+export type PriceOffReason = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED';
 
 export interface LevelView {
   price: string;
