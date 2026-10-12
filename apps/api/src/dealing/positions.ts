@@ -225,12 +225,17 @@ export class PositionKeeper {
     return this.committed.get(pairSymbol) ?? 0n;
   }
 
-  /** The hard inventory cap for the pair's base currency (base minor units), if one is set. */
+  /**
+   * The hard inventory cap for the pair's base currency (base minor units), if one is set. While the LP market is
+   * closed nothing can be hedged, so the cap shrinks to `dealing.offHours.positionCapPct` of it.
+   */
   maxPosition(pairSymbol: string): bigint | undefined {
     const c = this.config.get().data;
     const pair = findPair(c, pairSymbol);
     const max = pair && c.inventory.maxPosition[pair.base];
-    return pair && max ? parseDecimal(max, pair.baseDecimals) : undefined;
+    if (!pair || !max) return undefined;
+    const cap = parseDecimal(max, pair.baseDecimals);
+    return this.prices.isOffHours(pairSymbol) ? (cap * BigInt(Math.round(c.dealing.offHours.positionCapPct * 100))) / 10_000n : cap;
   }
 
   /**
@@ -444,6 +449,8 @@ export class PositionKeeper {
     if (qty <= 0n) throw badRequest('INVALID_QTY', 'quantity must be positive');
     const { hedging } = this.config.get().data.dealing;
     const first = await this.prices.current(pair.symbol);
+    // Off-hours prices have no LP behind them: the position waits for the LP market to open.
+    if (first.offHours) throw new ApiError(503, 'LP_MARKET_CLOSED', 'the LP market is closed; hedge after it opens');
     const maxClip = hedging.maxClipQty[pair.base];
     const plan = planHedge(qty, maxClip ? parseDecimal(maxClip, pair.baseDecimals) : undefined, lpsByPrice(first, side), hedging.split);
     const batchId = randomUUID();

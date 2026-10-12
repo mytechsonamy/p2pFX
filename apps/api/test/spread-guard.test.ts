@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LpQuote } from '@p2p/core-adapter';
-import { startHarness, type Harness } from './helpers.js';
+import { OPS, startHarness, type Harness } from './helpers.js';
 
 let h: Harness;
 afterEach(async () => {
@@ -76,5 +76,58 @@ describe('LP market hours', () => {
     // Sunday evening it opens again.
     h.clock.now = new Date('2026-10-11T21:00:05Z');
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'))).status).toBe(200);
+  });
+});
+
+describe('off-hours bank price', () => {
+  it('quotes from the close, widened, with a smaller inventory cap, and hedges once the market opens', async () => {
+    h = await startHarness();
+    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, positionLimits: { ...c.dealing.positionLimits, USD: '10000' } } }));
+    h.customer('ayse', { USD: '0', TRY: '10000000' });
+    // Friday evening, just before the close: the last LP price.
+    h.clock.now = new Date('2026-10-09T20:55:00Z');
+    let ayse = await h.login('ayse');
+    const friday = (await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).body;
+    expect(friday.offHours).toBeUndefined();
+
+    // Saturday: the bank still quotes, from the close widened by 50 bps of the mid on each side.
+    h.clock.now = new Date('2026-10-10T12:00:00Z');
+    ayse = await h.login('ayse');
+    const vip = await h.login('ayse', 'premium');
+    const saturday = await h.req('GET', '/v1/bank/rates/USDTRY', ayse);
+    expect(saturday.status).toBe(200);
+    expect(saturday.body.offHours).toEqual({ nextOpen: '2026-10-11T21:00:00.000Z' });
+    const widen = 49.15 * 0.005;
+    expect(Number(saturday.body.buy) - Number(friday.buy)).toBeCloseTo(widen, 2);
+    expect(Number(friday.sell) - Number(saturday.body.sell)).toBeCloseTo(widen, 2);
+
+    // The cap is 20 % of the 250 000 USD inventory cap while closed.
+    expect((await h.req('POST', '/v1/bank/quotes', vip, { pair: 'USDTRY', side: 'BUY', qty: '60000' })).body.error).toBe('INVENTORY_LIMIT');
+    const q = await h.req('POST', '/v1/bank/quotes', ayse, { pair: 'USDTRY', side: 'BUY', qty: '20000' });
+    expect(q.body).toMatchObject({ offHours: true });
+    expect((await h.req('POST', '/v1/bank/deals', ayse, { quoteId: q.body.id })).status).toBe(201);
+    // Nothing can be hedged while closed.
+    expect((await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'BUY', qty: '1000' })).body.error).toBe('LP_MARKET_CLOSED');
+    expect((await h.ctx.db.query('select count(*)::int as n from hedges')).rows[0].n).toBe(0);
+
+    // Sunday 17:00 New York: live prices again, and the position over its limit is hedged at once.
+    h.clock.now = new Date('2026-10-11T21:00:05Z');
+    await h.ctx.prices.refresh('USDTRY');
+    await h.ctx.positions.idle();
+    const { rows } = await h.ctx.db.query(`select side, status from hedges`);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r: { side: string; status: string }) => r.side === 'BUY' && r.status === 'DONE')).toBe(true);
+  });
+
+  it('gives no price when off-hours quoting is switched off or the close is too old', async () => {
+    h = await startHarness();
+    h.clock.now = new Date('2026-10-09T20:55:00Z');
+    await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'));
+    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, offHours: { ...c.dealing.offHours, enabled: false } } }));
+    h.clock.now = new Date('2026-10-10T12:00:00Z');
+    const off = await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'));
+    expect(off.body.details?.reason).toBe('MARKET_CLOSED');
+    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, offHours: { ...c.dealing.offHours, enabled: true, maxCloseAgeHours: 6 } } }));
+    expect((await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'))).body.details?.reason).toBe('MARKET_CLOSED');
   });
 });

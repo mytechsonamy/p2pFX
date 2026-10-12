@@ -40,6 +40,12 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
   Outside it the pair has no bank price, with `reason = MARKET_CLOSED` and `nextOpen`, and the app says when the
   bank's price comes back. P2P matching keeps its own `tradingHours`. `enabled: false` turns the calendar off
   (e.g. for a weekend demo with the simulated LPs).
+- **Off-hours price.** With `dealing.offHours.enabled` (default on), the bank keeps quoting while the LP market is
+  closed. The price is the last raw LP price before the close, widened by `extraSpreadBps` of its mid on each side
+  (default 50), with the segment margin on top. After a restart the close comes from the last price tick. The
+  inventory cap shrinks to `positionCapPct` (default 20 %), and hedges are refused with `LP_MARKET_CLOSED`. When the
+  market opens, auto-hedge runs on every pair at once. A close older than `maxCloseAgeHours` (default 72) is not
+  used. The app labels the row "Kapanış fiyatı", says when the market opens, and the quote sheet repeats it.
 - **What the customer sees.** The stream sends `{ pair, unavailable: true, reason }` on the `bank:<pair>` channel
   when a pair loses its price, and new subscribers get only a dealable price. The app labels the bank row "Canlı"
   only while updates keep arriving. After 5 s without one, the last price stays visible but is greyed out and can't
@@ -126,6 +132,7 @@ and side:
   "quoteTtlSeconds": 5,
   "maxSpreadBps": 100,
   "lpMarket": { "enabled": true, "timezone": "America/New_York", "weekOpen": { "day": 7, "time": "17:00" }, "weekClose": { "day": 5, "time": "17:00" }, "dailyBreaks": { "metal": { "from": "17:00", "to": "18:00" } }, "holidays": [] },
+  "offHours": { "enabled": true, "extraSpreadBps": 50, "positionCapPct": 20, "maxCloseAgeHours": 72 },
   "maxStalenessMs": 3000,
   "margins": { "default": { "buyPips": 1000, "sellPips": 1000 }, "segments": { "premium": { "buyPips": 400, "sellPips": 400 } } },
   "maxDealQty": { "USD": "250000", "EUR": "250000", "GBP": "100000" },

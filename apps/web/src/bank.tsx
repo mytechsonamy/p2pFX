@@ -35,7 +35,9 @@ export function BankRow({ pair }: { pair: PairInfo }) {
   const r = price.state === 'off' ? undefined : price.rates;
   const live = price.state === 'live';
   const closed = price.state === 'off' && price.reason === 'MARKET_CLOSED';
-  const pill = live ? t('bank.live') : price.state === 'stale' ? t('bank.stale') : closed ? t('bank.closed') : t('bank.off');
+  const offHours = live ? r?.offHours : undefined;
+  const opensAt = (iso: string) => new Date(iso).toLocaleString(locale, { weekday: 'long', hour: '2-digit', minute: '2-digit' });
+  const pill = offHours ? t('bank.offHours') : live ? t('bank.live') : price.state === 'stale' ? t('bank.stale') : closed ? t('bank.closed') : t('bank.off');
   const why =
     price.state !== 'off'
       ? t('bank.noPrice')
@@ -43,16 +45,18 @@ export function BankRow({ pair }: { pair: PairInfo }) {
         ? t('bank.wideMarket')
         : price.reason === 'MARKET_CLOSED'
           ? price.nextOpen
-            ? t('bank.closedUntil', { at: new Date(price.nextOpen).toLocaleString(locale, { weekday: 'long', hour: '2-digit', minute: '2-digit' }) })
+            ? t('bank.closedUntil', { at: opensAt(price.nextOpen) })
             : t('bank.closedNoTime')
           : t('bank.noPrice');
   return (
     <section className={`card bank-row${live ? '' : ' bank-row-off'}`}>
       <div className="card-head">
         <h3>
-          {t('bank.title', { bank: config.bank.name })} <span className={`pill${live ? '' : ' pill-muted'}`}>{pill}</span>
+          {t('bank.title', { bank: config.bank.name })} <span className={`pill${offHours ? ' pill-warn' : live ? '' : ' pill-muted'}`}>{pill}</span>
         </h3>
-        <small>{live ? t('bank.hint') : why}</small>
+        <small>
+          {offHours ? (offHours.nextOpen ? t('bank.offHoursUntil', { at: opensAt(offHours.nextOpen) }) : t('bank.offHoursHint')) : live ? t('bank.hint') : why}
+        </small>
       </div>
       <div className="bank-prices">
         <button className="bank-price buy" disabled={!live} onClick={() => openBankDeal({ side: 'BUY' })}>
@@ -206,6 +210,7 @@ export function BankDealSheet() {
         </div>
       )}
       <ul className="fineprint">
+        {quote?.offHours && <li>{t('bank.offHoursQuote')}</li>}
         <li>{t('bank.counterparty', { bank: config.bank.name })}</li>
         <li>{t('bank.noCommission')}</li>
       </ul>

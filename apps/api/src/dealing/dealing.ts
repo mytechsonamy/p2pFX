@@ -11,7 +11,7 @@ import type { EventBus } from '../events.js';
 import type { SettlementOptions } from '../settlement.js';
 import { ApiError, badRequest, conflict, notFound, unprocessable } from '../errors.js';
 import { audit } from '../audit.js';
-import { segmentRates, type PriceEngine } from './price-engine.js';
+import { ratesView, segmentRates, type PriceEngine } from './price-engine.js';
 import type { PositionKeeper } from './positions.js';
 import { appendEvent } from '../event-store.js';
 import { haltReason } from '../order-entry.js';
@@ -47,8 +47,7 @@ export class DealingService {
   async rates(session: Session, pairSymbol: string) {
     const { pair, config } = this.pair(pairSymbol, 'view');
     const agg = await this.prices.current(pair.symbol);
-    const r = segmentRates(config, pair, agg, session.segment);
-    return { pair: pair.symbol, buy: formatPrice(r.buy), sell: formatPrice(r.sell), at: agg.at.toISOString() };
+    return ratesView(config, pair.symbol, agg, session.segment)!;
   }
 
   async quote(session: Session, body: z.infer<typeof BankQuoteRequestSchema>) {
@@ -85,7 +84,9 @@ export class DealingService {
       [session.customerId, pair.symbol, body.side, qty, formatPrice(rate), formatPrice(lpRate), session.segment,
         body.side === 'BUY' ? r.buyPips : r.sellPips, s.notional, s.tax, s.total, expiresAt, version],
     );
-    return quoteView(rows[0], pair, taxRates(config, pair)[body.side === 'BUY' ? 'buyRate' : 'sellRate']);
+    const view = quoteView(rows[0], pair, taxRates(config, pair)[body.side === 'BUY' ? 'buyRate' : 'sellRate']);
+    // Priced from the close while the LP market is closed: the customer is told before confirming.
+    return agg.offHours ? { ...view, offHours: true } : view;
   }
 
   async execute(session: Session, quoteId: string) {

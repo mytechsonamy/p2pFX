@@ -50,7 +50,7 @@ export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
       else if (e.type === 'trade' && channels.has(`trades:${e.pair}`)) send(`trades:${e.pair}`, e.trade);
       else if (e.type === 'lp' && channels.has(`bank:${e.pair}`)) {
         // Each customer sees the bank's rates for their own segment.
-        const rates = ratesView(ctx.config.get().data, e.pair, { bid: parsePrice(e.bid), ask: parsePrice(e.ask), at: e.at }, session.segment);
+        const rates = ratesView(ctx.config.get().data, e.pair, { bid: parsePrice(e.bid), ask: parsePrice(e.ask), at: e.at, offHours: e.offHours }, session.segment);
         if (rates) send(`bank:${e.pair}`, rates);
       } else if (e.type === 'lpOff' && channels.has(`bank:${e.pair}`)) {
         send(`bank:${e.pair}`, { pair: e.pair, unavailable: true, reason: e.reason, ...(e.nextOpen ? { nextOpen: e.nextOpen } : {}) });

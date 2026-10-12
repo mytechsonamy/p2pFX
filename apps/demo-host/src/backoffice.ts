@@ -237,6 +237,15 @@ const SECTIONS: Section[] = [
           { kind: 'list', path: ['dealing', 'lpMarket', 'holidays'], label: 'LP tatil günleri', placeholder: '2026-12-25', help: 'Her satıra bir tarih (YYYY-AA-GG), piyasanın saat diliminde' },
         ],
       },
+      {
+        title: 'Piyasa kapalıyken banka fiyatı',
+        fields: [
+          { kind: 'bool', path: ['dealing', 'offHours', 'enabled'], label: 'Fiyat ver', help: 'Kapalıyken son kapanış fiyatından, ek marjla fiyat verilir; kapalıysa banka fiyatı olmaz' },
+          { kind: 'number', path: ['dealing', 'offHours', 'extraSpreadBps'], label: 'Ek marj (her taraf)', unit: 'bps', min: 0, max: 5000 },
+          { kind: 'number', path: ['dealing', 'offHours', 'positionCapPct'], label: 'Pozisyon tavanı', unit: '% (envanter tavanının)', min: 0, max: 100, help: 'Kapalıyken hedge yapılamaz; açılışta otomatik hedge edilir' },
+          { kind: 'number', path: ['dealing', 'offHours', 'maxCloseAgeHours'], label: 'Kapanış fiyatı en fazla', unit: 'saat eski', min: 1, max: 336 },
+        ],
+      },
     ],
   },
   {

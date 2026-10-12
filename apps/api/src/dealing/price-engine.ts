@@ -18,6 +18,11 @@ export interface Aggregate {
   at: Date;
   /** The LP timestamp of the older of the two quotes behind bid and ask: freshness is measured from this. */
   sourceAt: Date;
+  /**
+   * Set while the LP market is closed: the price is the last LP price before the close, widened (`dealing.offHours`).
+   * It has no LP quotes, so nothing hedges on it.
+   */
+  offHours?: { closeAt: Date; nextOpen?: Date };
 }
 
 export interface SegmentRates {
@@ -28,6 +33,9 @@ export interface SegmentRates {
   buyPips: number;
   sellPips: number;
 }
+
+/** The LP name an off-hours price carries (no LP stands behind it). */
+export const OFF_HOURS_LP = 'CLOSE';
 
 /** How often a price tick is written to the history. */
 const TICK_EVERY_MS = 5000;
@@ -43,6 +51,9 @@ export class PriceEngine {
   private readonly lastTick = new Map<string, number>();
   /** Pairs announced as without a bank price, so 'lpOff' goes out once per outage. */
   private readonly off = new Map<string, { reason: PriceOffReason; nextOpen?: Date }>();
+  /** The last LP price per pair (raw, before any widening): the close price the bank quotes from while closed. */
+  private readonly lastLp = new Map<string, { bid: bigint; ask: bigint; at: Date }>();
+  private readonly reopenListeners: ((pair: string) => void)[] = [];
   private timer?: NodeJS.Timeout;
 
   constructor(
@@ -89,8 +100,36 @@ export class PriceEngine {
     const kind = isMetal(findPair(c, pair)?.base ?? pair.slice(0, 3)) ? 'metal' : 'fx';
     if (!isLpMarketOpen(now, c.dealing.lpMarket, kind)) {
       const known = this.off.get(pair);
-      const nextOpen = known?.reason === 'MARKET_CLOSED' && known.nextOpen && known.nextOpen > now ? known.nextOpen : nextLpMarketOpen(now, c.dealing.lpMarket, kind);
-      return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} market is closed`, nextOpen);
+      const cached = this.latest.get(pair)?.offHours?.nextOpen ?? (known?.reason === 'MARKET_CLOSED' ? known.nextOpen : undefined);
+      const nextOpen = cached && cached > now ? cached : nextLpMarketOpen(now, c.dealing.lpMarket, kind);
+      const close = c.dealing.offHours.enabled ? await this.closePrice(pair) : undefined;
+      if (!close || now.getTime() - close.at.getTime() > c.dealing.offHours.maxCloseAgeHours * 3_600_000) {
+        return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} market is closed`, nextOpen);
+      }
+      // The close price widened by extraSpreadBps of its mid on each side; the segment margin comes on top as usual.
+      const widen = (((close.bid + close.ask) / 2n) * BigInt(Math.round(c.dealing.offHours.extraSpreadBps * 100))) / 1_000_000n;
+      const agg: Aggregate = {
+        pair,
+        bid: close.bid - widen,
+        ask: close.ask + widen,
+        bidLp: OFF_HOURS_LP,
+        askLp: OFF_HOURS_LP,
+        quotes: [],
+        at: now,
+        sourceAt: now,
+        offHours: { closeAt: close.at, nextOpen },
+      };
+      this.latest.set(pair, agg);
+      this.off.delete(pair);
+      await this.events.publish({
+        type: 'lp',
+        pair,
+        bid: formatPrice(agg.bid),
+        ask: formatPrice(agg.ask),
+        at: now.toISOString(),
+        offHours: { nextOpen: nextOpen?.toISOString() },
+      });
+      return agg;
     }
     // An LP operations switched off (kill switch) is ignored entirely.
     let all: LpQuote[];
@@ -127,7 +166,10 @@ export class PriceEngine {
       this.log.warn({ pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), bidLp: agg.bidLp, askLp: agg.askLp, spreadBps, limitBps }, 'spread guard: no bank price');
       return this.unavailable(pair, 'WIDE_MARKET', `${pair} spread ${spreadBps.toFixed(1)} bps is beyond the limit ${limitBps} bps`);
     }
+    const reopened = !!this.latest.get(pair)?.offHours;
     this.latest.set(pair, agg);
+    this.lastLp.set(pair, { bid: agg.bid, ask: agg.ask, at: sourceAt });
+    if (reopened) for (const fn of this.reopenListeners) fn(pair);
     this.off.delete(pair);
     await this.events.publish({ type: 'lp', pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), at: now.toISOString() });
     if (now.getTime() - (this.lastTick.get(pair) ?? 0) >= TICK_EVERY_MS) {
@@ -135,6 +177,30 @@ export class PriceEngine {
       await this.db.query('insert into price_ticks (pair, bid, ask, at) values ($1, $2, $3, $4)', [pair, formatPrice(agg.bid), formatPrice(agg.ask), now]);
     }
     return agg;
+  }
+
+  /**
+   * The last raw LP price before the close: from memory, or after a restart the last sampled tick (ticks hold only raw
+   * LP prices, never off-hours ones).
+   */
+  private async closePrice(pair: string) {
+    const known = this.lastLp.get(pair);
+    if (known) return known;
+    const { rows } = await this.db.query('select bid, ask, at from price_ticks where pair = $1 order by at desc limit 1', [pair]);
+    if (!rows.length) return undefined;
+    const close = { bid: parsePrice(String(rows[0].bid)), ask: parsePrice(String(rows[0].ask)), at: new Date(rows[0].at) };
+    this.lastLp.set(pair, close);
+    return close;
+  }
+
+  /** Called with the pair when the LP market opens after an off-hours period (the position can be hedged again). */
+  onReopen(fn: (pair: string) => void) {
+    this.reopenListeners.push(fn);
+  }
+
+  /** Whether the pair's current bank price is an off-hours one (LP market closed). */
+  isOffHours(pair: string): boolean {
+    return !!this.latest.get(pair)?.offHours;
   }
 
   /** Drops the pair's price so nothing trades on it, tells the stream once, and fails the refresh. */
@@ -255,9 +321,22 @@ export function segmentRates(config: BankConfig, pair: PairConfig, agg: { bid: b
   return { buy: up(agg.ask + m.buy), sell: down(agg.bid - m.sell), buyPips: m.buyPips, sellPips: m.sellPips };
 }
 
-export function ratesView(config: BankConfig, pairSymbol: string, agg: { bid: bigint; ask: bigint; at: Date | string }, segment: string) {
+export function ratesView(
+  config: BankConfig,
+  pairSymbol: string,
+  agg: { bid: bigint; ask: bigint; at: Date | string; offHours?: { nextOpen?: Date | string } },
+  segment: string,
+) {
   const pair = findPair(config, pairSymbol);
   if (!pair) return undefined;
   const r = segmentRates(config, pair, agg, segment);
-  return { pair: pairSymbol, buy: formatPrice(r.buy), sell: formatPrice(r.sell), at: typeof agg.at === 'string' ? agg.at : agg.at.toISOString() };
+  const iso = (d: Date | string) => (typeof d === 'string' ? d : d.toISOString());
+  return {
+    pair: pairSymbol,
+    buy: formatPrice(r.buy),
+    sell: formatPrice(r.sell),
+    at: iso(agg.at),
+    // While the LP market is closed the price comes from the close, widened; the app says so and when it opens.
+    ...(agg.offHours ? { offHours: { ...(agg.offHours.nextOpen ? { nextOpen: iso(agg.offHours.nextOpen) } : {}) } } : {}),
+  };
 }

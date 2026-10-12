@@ -100,6 +100,24 @@ export const DEFAULT_LP_MARKET: LpMarketConfig = {
   holidays: [],
 };
 
+/**
+ * The bank's price while the LP market is closed (weekends, LP holidays): the last LP price before the close, widened
+ * on each side, with a smaller inventory cap. Nothing can be hedged until the market opens, so the bank carries that
+ * position over the gap at the opening.
+ */
+const OffHoursSchema = z.object({
+  enabled: z.boolean(),
+  /** Added to each side of the close price, in bps of its mid (on top of the segment margin). */
+  extraSpreadBps: z.number().min(0).max(5_000),
+  /** The inventory cap while closed, as a share of `inventory.maxPosition` (100 = the same cap). */
+  positionCapPct: z.number().min(0).max(100),
+  /** The close price is not used once it is older than this (e.g. after a long holiday): then there is no bank price. */
+  maxCloseAgeHours: z.number().min(1).max(24 * 14),
+});
+export type OffHoursConfig = z.infer<typeof OffHoursSchema>;
+
+export const DEFAULT_OFF_HOURS: OffHoursConfig = { enabled: true, extraSpreadBps: 50, positionCapPct: 20, maxCloseAgeHours: 72 };
+
 export const DealingSchema = z.object({
   /** How long a firm bank quote can be executed. */
   quoteTtlSeconds: z.number().int().min(1).max(120),
@@ -111,6 +129,7 @@ export const DealingSchema = z.object({
    */
   maxSpreadBps: z.number().min(1).max(10_000).default(100),
   lpMarket: LpMarketSchema.default(DEFAULT_LP_MARKET),
+  offHours: OffHoursSchema.default(DEFAULT_OFF_HOURS),
   /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
   margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
   /** Largest single deal per base currency. */
@@ -127,6 +146,7 @@ export const DEFAULT_DEALING: DealingConfig = {
   maxStalenessMs: 3000,
   maxSpreadBps: 100,
   lpMarket: DEFAULT_LP_MARKET,
+  offHours: DEFAULT_OFF_HOURS,
   margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
   maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
   positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },
@@ -404,7 +424,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
   { key: 'limits', label: 'Emir ve günlük tutar limitleri', paths: ['limits', 'orderRateLimit'] },
   { key: 'hedging', label: 'Pozisyon limitleri ve otomatik hedge kuralı', paths: ['dealing.positionLimits', 'dealing.autoHedge', 'dealing.hedging'] },
-  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.lpMarket', 'dealing.maxDealQty'] },
+  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.lpMarket', 'dealing.offHours', 'dealing.maxDealQty'] },
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler (Bank MM)', paths: ['bankBook'] },

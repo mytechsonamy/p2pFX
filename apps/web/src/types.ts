@@ -63,6 +63,8 @@ export interface BankRates {
   /** The customer sells to the bank at this rate. */
   sell: string;
   at: string;
+  /** Set while the international market is closed: the price is the last close plus a wider margin. */
+  offHours?: { nextOpen?: string };
 }
 
 /** Why the bank has no price for a pair: no fresh LP price, or the spread guard (market too wide). */
@@ -86,6 +88,8 @@ export interface BankQuote {
   total: string;
   currency: string;
   expiresAt: string;
+  /** Priced from the close while the international market is closed. */
+  offHours?: boolean;
 }
 
 export interface Account {
