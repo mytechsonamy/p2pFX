@@ -60,6 +60,10 @@ services:
       PORT: "4000"
       # Saxo SIM as a real LP next to the simulated ones (docs/synthetic-crosses.md).
       SAXO_TOKEN: ${SAXO_TOKEN:-}
+      # LMAX Global demo over FIX 4.4 as a real LP (docs/lmax.md).
+      LMAX_FIX_USERNAME: ${LMAX_FIX_USERNAME:-}
+      LMAX_FIX_PASSWORD: ${LMAX_FIX_PASSWORD:-}
+      LMAX_PAIRS: ${LMAX_PAIRS:-}
     ports: ["127.0.0.1:4000:4000"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]

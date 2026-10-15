@@ -2,6 +2,8 @@ import {
   CompositeLiquidity,
   HttpCoreBankingAdapter,
   HttpLiquidityAdapter,
+  LMAX_DEMO,
+  LmaxLiquidity,
   SaxoLiquidity,
   SyntheticLiquidity,
   type LiquidityAdapter,
@@ -34,7 +36,29 @@ const saxo = process.env.SAXO_TOKEN
       minPollMs: Number(process.env.SAXO_POLL_MS ?? 1000),
     })
   : undefined;
-const liquidity: LiquidityAdapter = saxo ? new CompositeLiquidity([lpGateway, saxo]) : lpGateway;
+// LMAX_FIX_USERNAME / LMAX_FIX_PASSWORD add LMAX Global over FIX 4.4 (the demo gateways by default) as a real LP.
+const lmax =
+  process.env.LMAX_FIX_USERNAME && process.env.LMAX_FIX_PASSWORD
+    ? new LmaxLiquidity({
+        username: process.env.LMAX_FIX_USERNAME,
+        password: process.env.LMAX_FIX_PASSWORD,
+        pairs: (process.env.LMAX_PAIRS || 'USDTRY,EURTRY,GBPTRY,EURUSD,GBPUSD,USDCHF,USDJPY,XAUUSD,XAGUSD').split(','),
+        marketData: {
+          ...LMAX_DEMO.marketData,
+          ...(process.env.LMAX_MD_HOST ? { host: process.env.LMAX_MD_HOST } : {}),
+          ...(process.env.LMAX_MD_TARGET ? { targetCompId: process.env.LMAX_MD_TARGET } : {}),
+        },
+        trading: {
+          ...LMAX_DEMO.trading,
+          ...(process.env.LMAX_TRADING_HOST ? { host: process.env.LMAX_TRADING_HOST } : {}),
+          ...(process.env.LMAX_TRADING_TARGET ? { targetCompId: process.env.LMAX_TRADING_TARGET } : {}),
+        },
+      })
+    : undefined;
+const realLps = [saxo, lmax].filter((lp): lp is SaxoLiquidity | LmaxLiquidity => !!lp);
+const liquidity: LiquidityAdapter = realLps.length ? new CompositeLiquidity([lpGateway, ...realLps]) : lpGateway;
+
+lmax?.start();
 
 const { app, close } = await buildApp({
   databaseUrl: env('DATABASE_URL', 'postgres://postgres:postgres@localhost:5432/p2pfx'),
@@ -56,10 +80,10 @@ const { app, close } = await buildApp({
 
 await app.listen({ port: Number(process.env.PORT ?? 4000), host: '0.0.0.0' });
 
-// With Saxo next to the mock core's simulated LPs, the simulated LPs follow Saxo's mid (else the two markets
-// would be far apart and the best bid would sit above the best ask).
-if (saxo && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MOCK !== '0') {
-  const real = new SyntheticLiquidity(saxo);
+// With a real LP (Saxo, LMAX) next to the mock core's simulated LPs, the simulated LPs follow the real mid (else the
+// two markets would be far apart and the best bid would sit above the best ask).
+if (realLps.length && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MOCK !== '0') {
+  const real = new SyntheticLiquidity(realLps.length === 1 ? realLps[0]! : new CompositeLiquidity(realLps));
   const sync = async () => {
     for (const pair of await lpGateway.instruments().catch(() => [] as string[])) {
       try {
@@ -81,6 +105,7 @@ if (saxo && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MO
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
+    lmax?.stop();
     close().finally(() => process.exit(0));
   });
 }
