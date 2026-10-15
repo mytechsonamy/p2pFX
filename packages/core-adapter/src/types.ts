@@ -22,6 +22,8 @@ export class CoreBankingError extends Error {
   constructor(
     public readonly code: CoreErrorCode,
     message: string,
+    /** The HTTP status, when the error came from an HTTP core (404/501: the endpoint does not exist). */
+    public readonly httpStatus?: number,
   ) {
     super(message);
     this.name = 'CoreBankingError';

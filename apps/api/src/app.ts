@@ -201,7 +201,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     const c = config.get().data;
     checks.lpPricesFresh = c.pairs.filter((p) => p.enabled).every((p) => !!prices.fresh(p.symbol));
     // Informational: the last reconciliation and what it found (breaks do not make the instance unready).
-    const last = await reconciliation.latest().catch(() => undefined);
+    const last = await reconciliation.latestForReadiness().catch(() => undefined);
     checks.reconciliation = last
       ? { runId: last.id, status: last.status, finishedAt: last.finishedAt, breaks: last.summary?.breaks ?? null, openItems: last.summary?.openItems ?? null }
       : null;

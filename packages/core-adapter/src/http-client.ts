@@ -57,7 +57,7 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
     const json = text ? JSON.parse(text) : undefined;
     if (!res.ok) {
       const code = (json?.code as CoreErrorCode) ?? (res.status >= 500 ? 'UNAVAILABLE' : 'INVALID_REQUEST');
-      throw new CoreBankingError(code, json?.message ?? `core banking returned ${res.status}`);
+      throw new CoreBankingError(code, json?.message ?? `core banking returned ${res.status}`, res.status);
     }
     return json as T;
   }

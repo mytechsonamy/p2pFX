@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { MockCoreBank, type FxTransactionRequest } from '@p2p/core-adapter';
+import { CoreBankingError, MockCoreBank, type FxTransactionRequest } from '@p2p/core-adapter';
 import { OPS, startHarness, type Harness } from './helpers.js';
 
 let h: Harness;
@@ -273,13 +273,58 @@ describe('reconciliation', () => {
     expect((await run(h)).items.map((i) => i.kind)).toEqual(['OPEN_SETTLEMENT', 'OPEN_SETTLEMENT']);
   });
 
+  it('reconciles posting by posting when the core has no listing endpoint, and fails on any other listing error', async () => {
+    h = await startHarness();
+    await day(h);
+    h.bank.listFxTransactions = async () => {
+      throw new CoreBankingError('INVALID_REQUEST', 'core banking returned 404', 404);
+    };
+    const r = await run(h);
+    expect(r).toMatchObject({ status: 'CLEAN', coreListing: false, items: [] });
+    h.bank.listFxTransactions = async () => {
+      throw new CoreBankingError('UNAVAILABLE', 'core banking returned 503', 503);
+    };
+    expect((await run(h)).status).toBe('FAILED');
+  });
+
+  it('counts the same postings on both sides of the totals, even one posted after the window', async () => {
+    h = await startHarness();
+    await day(h);
+    // Core booked bob's leg just after the window closes (a fill at the cutoff).
+    for (const t of coreTxns(h).values()) if (t.request.leg === 'BANK_SELL' && t.request.customerRef === 'bob') t.postedAt = new Date(Date.now() + 3_600_000).toISOString();
+    const r = await run(h);
+    expect(r.items).toEqual([]);
+    expect(r.summary.totals.USD).toEqual({ platformBought: '100000', platformSold: '110000', coreBought: '100000', coreSold: '110000' });
+  });
+
+  it('serves the last run to the readiness probe from a short cache', async () => {
+    h = await startHarness();
+    const r = await run(h);
+    expect((await h.req('GET', '/ready')).body.reconciliation).toMatchObject({ runId: r.id });
+    await h.ctx.db.query(`insert into recon_runs (window_from, window_to, trigger, actor, status, started_at, finished_at) values (now(), now(), 'MANUAL', 'y', 'CLEAN', now() + interval '1 minute', now())`);
+    expect((await h.req('GET', '/ready')).body.reconciliation).toMatchObject({ runId: r.id });
+  });
+
   it('refuses a second run while one is running, and a reversed range', async () => {
     h = await startHarness();
-    await h.ctx.db.query(`insert into recon_runs (window_from, window_to, trigger, actor, status) values (now(), now(), 'MANUAL', 'x', 'RUNNING')`);
+    // Another instance is running one: it holds the run lock.
+    const other = await h.ctx.db.connect();
+    await other.query('select pg_advisory_lock(727277)');
     const busy = await h.req('POST', '/ops/reconciliation/runs', OPS, {});
     expect(busy.status).toBe(409);
     expect(busy.body.error).toBe('RECONCILIATION_RUNNING');
+    await other.query('select pg_advisory_unlock(727277)');
+    other.release();
     const reversed = await h.req('POST', '/ops/reconciliation/runs', OPS, { from: '2026-10-05T10:00:00Z', to: '2026-10-05T09:00:00Z' });
     expect(reversed.status).toBe(400);
+  });
+
+  it('closes a run left RUNNING by a crash at once instead of blocking for hours', async () => {
+    h = await startHarness();
+    await h.ctx.db.query(`insert into recon_runs (window_from, window_to, trigger, actor, status) values (now() - interval '1 day', now(), 'MANUAL', 'x', 'RUNNING')`);
+    const res = await h.req('POST', '/ops/reconciliation/runs', OPS, {});
+    expect(res.status).toBeLessThan(300);
+    const { rows } = await h.ctx.db.query(`select status, error from recon_runs where actor = 'x'`);
+    expect(rows).toEqual([{ status: 'FAILED', error: 'interrupted' }]);
   });
 });

@@ -21,6 +21,32 @@ function quote(prices: [string, string][], stepMs = 2000) {
 const lp = (name: string, bid: string, ask: string): LpQuote => ({ lp: name, pair: 'USDTRY', bid, ask, at: '2026-10-05T09:00:00Z' });
 
 describe('dropOutliers', () => {
+  /** Synthetic quotes for every combination of cross and funding LPs; `off` is each LP's error on each leg. */
+  const combos = (lps: string[], off: Record<string, [number, number]>) =>
+    lps.flatMap((c) =>
+      lps.map((f) => {
+        const mid = 6320 * (1 + (off[c]?.[0] ?? 0)) * (1 + (off[f]?.[1] ?? 0));
+        return { lp: `${c}+${f}`, pair: 'XAUTRY', bid: (mid - 0.5).toFixed(2), ask: (mid + 0.5).toFixed(2), at: '2026-10-05T09:00:00Z' } as LpQuote;
+      }),
+    );
+
+  it('judges synthetic quotes per leg: one bad LP is excluded even though it is in most combinations', () => {
+    const quotes = combos(['LP-A', 'LP-B', 'LP-C'], { 'LP-C': [0.02, 0.02] });
+    const { kept, excluded } = dropOutliers(quotes, 50);
+    expect(kept.map((q) => q.lp).sort()).toEqual(['LP-A+LP-A', 'LP-A+LP-B', 'LP-B+LP-A', 'LP-B+LP-B']);
+    expect(excluded).toHaveLength(5);
+  });
+
+  it('excludes only the leg that is wrong', () => {
+    const quotes = combos(['LP-A', 'LP-B', 'LP-C'], { 'LP-C': [0, 0.02] });
+    expect(dropOutliers(quotes, 50).excluded.map((q) => q.lp).sort()).toEqual(['LP-A+LP-C', 'LP-B+LP-C', 'LP-C+LP-C']);
+  });
+
+  it('does not judge a leg with fewer than three LPs, like a direct pair with two', () => {
+    const quotes = combos(['LP-A', 'LP-B'], { 'LP-B': [0, 0.02] });
+    expect(dropOutliers(quotes, 50)).toEqual({ kept: quotes, excluded: [] });
+  });
+
   it('leaves one or two quotes alone: there is no majority to say which one is wrong', () => {
     const two = [lp('A', '49.14', '49.16'), lp('B', '52.00', '52.02')];
     expect(dropOutliers(two, 50)).toEqual({ kept: two, excluded: [] });
@@ -77,9 +103,12 @@ describe('price sanity', () => {
     expect(h.ctx.prices.offState('USDTRY')).toEqual({ reason: 'PRICE_SUSPECT' });
     expect((await h.req('POST', '/v1/bank/quotes', ayse, { pair: 'USDTRY', side: 'BUY', qty: '100' })).status).toBe(503);
 
-    // Core banking moves its reference rate: once it is read again (a minute later) the price is quoted.
+    // Core banking moves its reference rate: a minute later it is read again in the background (the refresh does not
+    // wait for core banking), and the next refresh quotes with it.
     h.bank.setReferenceRate('USDTRY', '51.15');
     quote([['51.14', '51.16']], 61_000);
+    await h.req('GET', '/v1/bank/rates/USDTRY', ayse);
+    quote([['51.14', '51.16']], 1000);
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).status).toBe(200);
     expect(h.ctx.prices.offState('USDTRY')).toBeUndefined();
   });
@@ -209,12 +238,16 @@ describe('price sanity', () => {
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).body.details).toEqual({ reason: 'PRICE_JUMP' });
   });
 
-  it('does not take the jump limit to a price last seen more than a minute ago', async () => {
+  it('holds back a jump after an outage too, and takes the new level once it has held', async () => {
     h = await startHarness();
     const ayse = await h.login('ayse');
     quote([['49.14', '49.16']]);
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).status).toBe(200);
+    // More than a minute without a price, then a level 150 bps away: not taken at once.
     quote([['49.88', '49.90']], 61_000);
+    expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).body.details).toEqual({ reason: 'PRICE_JUMP' });
+    // It holds for jumpConfirmMs (3 s): accepted as the new level.
+    quote([['49.88', '49.90']], 3100);
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).status).toBe(200);
   });
 });

@@ -64,8 +64,6 @@ const REFERENCE_TTL_MS = 60_000;
 const REFERENCE_SKEW_MS = 5 * 60_000;
 /** How long the price engine waits for the reference rate before going on with the one it has. */
 const REFERENCE_TIMEOUT_MS = 500;
-/** The jump check compares with the last accepted price only while it is this recent (else any level is accepted). */
-const JUMP_WINDOW_MS = 60_000;
 /** An excluded LP is logged at most this often per pair. */
 const EXCLUDE_LOG_EVERY_MS = 30_000;
 
@@ -151,13 +149,11 @@ export class PriceEngine {
       const nextOpen = cached && cached > now ? cached : nextLpMarketOpen(now, c.dealing.lpMarket, kind);
       const close = c.dealing.offHours.enabled ? await this.closePrice(pair) : undefined;
       if (!close || now.getTime() - close.at.getTime() > c.dealing.offHours.maxCloseAgeHours * 3_600_000) {
-        if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
-        this.applied.set(pair, seq);
+        if (!this.claim(pair, seq)) return this.superseded(pair);
         return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} market is closed`, nextOpen);
       }
       // The close price may have been read from the database: a later refresh may have decided meanwhile.
-      if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
-      this.applied.set(pair, seq);
+      if (!this.claim(pair, seq)) return this.superseded(pair);
       // A close set by an LP operations has switched off since (kill switch) is not quoted from.
       if (close.lps?.some((lp) => lpDisabled(c.killSwitch.disabledLps, lp))) {
         return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} close came from an LP that is switched off`, nextOpen);
@@ -214,7 +210,7 @@ export class PriceEngine {
     const { kept: usable, excluded } = sanity.enabled ? dropOutliers(fresh, sanity.maxLpDeviationBps) : { kept: fresh, excluded: [] };
     if (excluded.length) this.logExcluded(pair, excluded, now);
     // No majority agrees (e.g. two LPs against two): there is no telling which side is right.
-    if (excluded.length && usable.length * 2 <= fresh.length) {
+    if (!usable.length) {
       return this.fail(pair, seq, 'PRICE_SUSPECT', `${pair} LPs disagree: ${excluded.length} of ${fresh.length} are far from the median`);
     }
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => usable.reduce((a, b) => (pick(a, b) ? a : b));
@@ -245,7 +241,7 @@ export class PriceEngine {
       // Against core banking's own rate: a feed that drifts away (all LPs together, or the only LP) is not quoted.
       const ref = await this.referenceFor(pair, now, sanity.referenceMaxAgeMinutes * 60_000);
       // The read may have been awaited: a refresh that started later has decided meanwhile.
-      if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
+      if (!this.claim(pair, seq)) return this.superseded(pair);
       if (ref !== undefined) {
         const off = deviationBps(mid, ref);
         if (off > sanity.maxReferenceDeviationBps) {
@@ -253,9 +249,10 @@ export class PriceEngine {
           return this.fail(pair, seq, 'PRICE_SUSPECT', `${pair} LP price is ${off.toFixed(1)} bps from the reference rate (limit ${sanity.maxReferenceDeviationBps} bps)`);
         }
       }
-      // Against the last accepted price: a jump is held back until the new level has held for jumpConfirmMs.
+      // Against the last accepted price, however old (after an outage too): a jump is held back until the new level has
+      // held for jumpConfirmMs, so a genuine move is taken after a short wait and a single bad tick never is.
       const last = this.lastLp.get(pair);
-      if (last && now.getTime() - last.at.getTime() <= JUMP_WINDOW_MS) {
+      if (last) {
         const jump = deviationBps(mid, (last.bid + last.ask) / 2n);
         if (jump > sanity.maxJumpBps) {
           const pending = this.pendingJump.get(pair);
@@ -272,8 +269,7 @@ export class PriceEngine {
     }
     // A slower refresh that started earlier must not replace the outcome of one that started later (refreshes of a
     // pair can overlap): neither its price nor the absence of one.
-    if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
-    this.applied.set(pair, seq);
+    if (!this.claim(pair, seq)) return this.superseded(pair);
     // The first live price after a close: the position can be hedged again.
     const reopened = this.awaitingOpen.delete(pair);
     this.latest.set(pair, agg);
@@ -333,8 +329,9 @@ export class PriceEngine {
         )
         .finally(() => (state.inflight = undefined));
     }
-    // Only the refresh that started the read waits for it (briefly); the others go on with the rate they have.
-    if (started && state.inflight) {
+    // Only the very first read is waited for (briefly), so the check has a rate from the start; after that a refresh
+    // never waits on core banking and goes on with the rate it has while the new one is read in the background.
+    if (started && state.inflight && state.rate === undefined) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([state.inflight, new Promise<void>((resolve) => (timer = setTimeout(resolve, REFERENCE_TIMEOUT_MS)))]);
       clearTimeout(timer);
@@ -368,9 +365,18 @@ export class PriceEngine {
 
   /** Fails this refresh as unavailable, unless a refresh that started later has already decided the pair's state. */
   private async fail(pair: string, seq: number, reason: PriceOffReason, message: string): Promise<Aggregate> {
-    if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
-    this.applied.set(pair, seq);
+    if (!this.claim(pair, seq)) return this.superseded(pair);
     return this.unavailable(pair, reason, message);
+  }
+
+  /**
+   * Whether refresh `seq` may still decide the pair's outcome (no refresh that started later has), and if so claims it:
+   * refreshes of a pair can overlap, and a slower earlier one must not replace a later one's price or its absence.
+   */
+  private claim(pair: string, seq: number): boolean {
+    if ((this.applied.get(pair) ?? 0) > seq) return false;
+    this.applied.set(pair, seq);
+    return true;
   }
 
   /** The outcome a later refresh decided: its price, or the reason there is none. */
@@ -459,16 +465,84 @@ export function deviationBps(a: bigint, b: bigint): number {
  * whose mid is more than maxBps from the median mid is an outlier. With one or two quotes nothing is dropped (there is
  * no majority to tell which one is wrong; the spread guard and the reference check cover that case).
  */
+/**
+ * Quotes far from the others, by LP. Direct quotes: with three or more LPs, one whose mid is more than `maxBps` from
+ * the median is a bad feed. Synthetic quotes (`crossLp+fundingLp`) are judged per leg, not as independent quotes: one
+ * bad LP appears in many combinations, so a vote over combinations can let it outnumber the good ones. Each leg's LPs
+ * are compared within the combinations that share the other leg, and every combination using a bad LP goes. A group
+ * with no clear majority (as many bad LPs as good, on a leg or directly) cannot be told apart and is dropped whole.
+ * An empty `kept` means nothing can be trusted.
+ */
 export function dropOutliers(quotes: LpQuote[], maxBps: number): { kept: LpQuote[]; excluded: LpQuote[] } {
-  if (quotes.length < 3) return { kept: quotes, excluded: [] };
-  const mid = (q: LpQuote) => (parsePrice(q.bid) + parsePrice(q.ask)) / 2n;
-  const mids = quotes.map(mid).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  const n = mids.length;
-  const median = n % 2 ? mids[(n - 1) / 2]! : (mids[n / 2 - 1]! + mids[n / 2]!) / 2n;
+  const direct = quotes.filter((q) => !q.lp.includes('+'));
+  const combos = quotes.filter((q) => q.lp.includes('+'));
   const kept: LpQuote[] = [];
   const excluded: LpQuote[] = [];
-  for (const q of quotes) (deviationBps(mid(q), median) > maxBps ? excluded : kept).push(q);
+  for (const r of [judgeDirect(direct, maxBps), judgeCombos(combos, maxBps)]) {
+    if (r.split) excluded.push(...r.kept, ...r.excluded);
+    else {
+      kept.push(...r.kept);
+      excluded.push(...r.excluded);
+    }
+  }
   return { kept, excluded };
+}
+
+const midOf = (q: LpQuote) => (parsePrice(q.bid) + parsePrice(q.ask)) / 2n;
+
+function medianOf(values: bigint[]): bigint {
+  const v = [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const n = v.length;
+  return n % 2 ? v[(n - 1) / 2]! : (v[n / 2 - 1]! + v[n / 2]!) / 2n;
+}
+
+function judgeDirect(quotes: LpQuote[], maxBps: number) {
+  if (quotes.length < 3) return { kept: quotes, excluded: [] as LpQuote[], split: false };
+  const median = medianOf(quotes.map(midOf));
+  const kept: LpQuote[] = [];
+  const excluded: LpQuote[] = [];
+  for (const q of quotes) (deviationBps(midOf(q), median) > maxBps ? excluded : kept).push(q);
+  return { kept, excluded, split: excluded.length > 0 && kept.length * 2 <= quotes.length };
+}
+
+function judgeCombos(quotes: LpQuote[], maxBps: number) {
+  const legs = (q: LpQuote) => {
+    const i = q.lp.indexOf('+');
+    return [q.lp.slice(0, i), q.lp.slice(i + 1)] as const;
+  };
+  let split = false;
+  const bad = new Set<string>();
+  for (const leg of [0, 1] as const) {
+    const names = new Set(quotes.map((q) => legs(q)[leg]));
+    if (names.size < 3) continue;
+    // Within each set of combinations sharing the other leg's LP, this leg's LPs differ only by their own price.
+    const columns = new Map<string, LpQuote[]>();
+    for (const q of quotes) {
+      const other = legs(q)[1 - leg]!;
+      columns.set(other, [...(columns.get(other) ?? []), q]);
+    }
+    const deviations = new Map<string, number[]>();
+    for (const column of columns.values()) {
+      if (column.length < 3) continue;
+      const median = medianOf(column.map(midOf));
+      for (const q of column) {
+        const lp = legs(q)[leg];
+        deviations.set(lp, [...(deviations.get(lp) ?? []), deviationBps(midOf(q), median)]);
+      }
+    }
+    // An LP is bad when it is far from its peers in most of the combinations it is in.
+    const typical = (d: number[]) => [...d].sort((x, y) => x - y)[Math.floor((d.length - 1) / 2)]!;
+    const badHere = [...deviations].filter(([, d]) => typical(d) > maxBps).map(([lp]) => lp);
+    if (badHere.length && badHere.length * 2 >= names.size) split = true;
+    for (const lp of badHere) bad.add(`${leg}:${lp}`);
+  }
+  const kept: LpQuote[] = [];
+  const excluded: LpQuote[] = [];
+  for (const q of quotes) {
+    const [c, f] = legs(q);
+    (bad.has(`0:${c}`) || bad.has(`1:${f}`) ? excluded : kept).push(q);
+  }
+  return { kept, excluded, split };
 }
 
 /** (ask − bid) in basis points of the mid; negative when crossed. */

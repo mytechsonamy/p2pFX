@@ -1,5 +1,5 @@
 import { findPair, formatDecimal, localParts, parsePrice, zonedTime } from '@p2p/shared';
-import type { CoreBankingAdapter, CoreFxTransactionRecord, FxLeg, LiquidityAdapter } from '@p2p/core-adapter';
+import { CoreBankingError, type CoreBankingAdapter, type CoreFxTransactionRecord, type FxLeg, type LiquidityAdapter } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Db } from './db/pool.js';
 import type { ConfigService } from './config-service.js';
@@ -34,7 +34,13 @@ export interface ReconBreak {
 export type ReconStatus = 'RUNNING' | 'CLEAN' | 'OPEN_ITEMS' | 'BREAKS' | 'FAILED';
 
 /** A run left RUNNING longer than this (database time) was interrupted (process stopped) and is closed as FAILED. */
-const STALE_RUN_HOURS = 6;
+/**
+ * Session advisory lock held by the instance running a reconciliation. A run left RUNNING by a crash or a deploy is
+ * recognised at once (nobody holds the lock), not after hours; the lock goes with the connection of a dead process.
+ */
+const RECON_LOCK = 727277;
+/** How long /ready reuses the last run it read (the probe runs every few seconds on every instance). */
+const READY_CACHE_MS = 30_000;
 /** A scheduled run that failed is tried again after this long, at most MAX_DAILY_ATTEMPTS times per day. */
 const DAILY_RETRY_MS = 30 * 60_000;
 const MAX_DAILY_ATTEMPTS = 3;
@@ -73,7 +79,7 @@ export class ReconciliationService {
     if (now < due) due = at(new Date(now.getTime() - 24 * 3_600_000));
     if (now < due) return undefined;
     // A run interrupted by a stop or a crash is closed first, so it neither blocks the day nor counts as done.
-    await this.closeStaleRuns();
+    await this.closeInterruptedRuns();
     const { rows } = await this.db.query(
       `select status, started_at from recon_runs where trigger = 'SCHEDULED' and window_to = $1 order by started_at desc`,
       [due],
@@ -105,7 +111,11 @@ export class ReconciliationService {
   startDailyIfDue() {
     if (this.daily || this.stopping) return;
     this.daily = this.runDailyIfDue()
-      .catch((err) => this.log.error({ err }, 'daily reconciliation failed'))
+      .catch((err) => {
+        // Another run is in progress (a manual one, or another instance's scheduler): the next tick tries again.
+        if (err instanceof ApiError && err.code === 'RECONCILIATION_RUNNING') this.log.debug('daily reconciliation waits for the run in progress');
+        else this.log.error({ err }, 'daily reconciliation failed');
+      })
       .finally(() => (this.daily = undefined));
   }
 
@@ -117,7 +127,22 @@ export class ReconciliationService {
   /** Runs a reconciliation of [from, to) and returns the run with its breaks. */
   async run(from: Date, to: Date, trigger: 'SCHEDULED' | 'MANUAL', actor: string) {
     if (!(from < to)) throw new ApiError(400, 'INVALID_RANGE', 'from must be before to');
-    await this.closeStaleRuns();
+    // One run at a time across instances, held for the whole run on its own connection.
+    const lock = await this.db.connect();
+    let locked = false;
+    try {
+      locked = (await lock.query('select pg_try_advisory_lock($1) as ok', [RECON_LOCK])).rows[0].ok === true;
+      if (!locked) throw new ApiError(409, 'RECONCILIATION_RUNNING', 'a reconciliation is already running');
+      // Holding the lock, any run still marked RUNNING was interrupted (crash, deploy).
+      await this.markInterrupted();
+      return await this.runLocked(from, to, trigger, actor);
+    } finally {
+      if (locked) await lock.query('select pg_advisory_unlock($1)', [RECON_LOCK]).catch(() => {});
+      lock.release();
+    }
+  }
+
+  private async runLocked(from: Date, to: Date, trigger: 'SCHEDULED' | 'MANUAL', actor: string) {
     let id: string;
     try {
       const { rows } = await this.db.query(
@@ -165,15 +190,27 @@ export class ReconciliationService {
       await this.db.query(`update recon_runs set status = 'FAILED', error = $2, finished_at = now() where id = $1`, [id, message]);
       this.log.error({ err, runId: id }, 'reconciliation failed');
     }
+    this.readyCache = undefined;
     return this.get(id);
   }
 
-  private async closeStaleRuns() {
-    await this.db.query(
-      `update recon_runs set status = 'FAILED', error = 'interrupted', finished_at = now()
-        where status = 'RUNNING' and started_at < now() - make_interval(hours => $1)`,
-      [STALE_RUN_HOURS],
-    );
+  private async markInterrupted() {
+    await this.db.query(`update recon_runs set status = 'FAILED', error = 'interrupted', finished_at = now() where status = 'RUNNING'`);
+  }
+
+  /** Closes runs left RUNNING by a process that is gone: only when no instance holds the run lock. */
+  private async closeInterruptedRuns() {
+    const lock = await this.db.connect();
+    try {
+      if ((await lock.query('select pg_try_advisory_lock($1) as ok', [RECON_LOCK])).rows[0].ok !== true) return;
+      try {
+        await this.markInterrupted();
+      } finally {
+        await lock.query('select pg_advisory_unlock($1)', [RECON_LOCK]).catch(() => {});
+      }
+    } finally {
+      lock.release();
+    }
   }
 
   async get(id: string) {
@@ -194,6 +231,16 @@ export class ReconciliationService {
     return rows.length ? runView(rows[0]) : undefined;
   }
 
+  private readyCache?: { at: number; run: Awaited<ReturnType<ReconciliationService['latest']>> };
+
+  /** The last finished run for the readiness probe, read at most every READY_CACHE_MS (a run here refreshes it). */
+  async latestForReadiness() {
+    if (this.readyCache && Date.now() - this.readyCache.at < READY_CACHE_MS) return this.readyCache.run;
+    const run = await this.latest();
+    this.readyCache = { at: Date.now(), run };
+    return run;
+  }
+
   private async check(from: Date, to: Date) {
     const c = this.config.get().data;
     const openAfterMs = c.reconciliation.openItemAfterMinutes * 60_000;
@@ -206,9 +253,15 @@ export class ReconciliationService {
     const listed = new Map<string, CoreFxTransactionRecord>();
     let coreRecords: CoreFxTransactionRecord[] = [];
     if (this.core.listFxTransactions) {
-      coreRecords = await this.core.listFxTransactions(from, to);
-      for (const r of coreRecords) listed.set(r.idempotencyKey, r);
-      coreListing = true;
+      try {
+        coreRecords = await this.core.listFxTransactions(from, to);
+        for (const r of coreRecords) listed.set(r.idempotencyKey, r);
+        coreListing = true;
+      } catch (err) {
+        // The core does not offer the listing endpoint: each posting is looked up by its key instead.
+        if (!(err instanceof CoreBankingError && (err.httpStatus === 404 || err.httpStatus === 501))) throw err;
+        this.log.warn({ err }, 'core banking has no posting list; reconciling posting by posting');
+      }
     }
     /** The posting under this key: from the list, else asked for (a posting made after the window, a retry). */
     const lookup = async (key: string): Promise<CoreFxTransactionRecord | { txnRef: string; receiptRef: string; reversed?: undefined } | undefined> => {
@@ -216,8 +269,8 @@ export class ReconciliationService {
       if (hit) return hit;
       const found = await this.core.findFxTransaction(key);
       if (!found) return undefined;
-      // A posting outside the listed window: read its details too when the adapter can list.
-      if (this.core.listFxTransactions) {
+      // A posting outside the listed window: read its details too when the core can list.
+      if (coreListing && this.core.listFxTransactions) {
         const at = new Date(found.postedAt);
         const around = await this.core.listFxTransactions(new Date(at.getTime() - 1000), new Date(at.getTime() + 1000));
         const exact = around.find((r) => r.idempotencyKey === key);
@@ -254,6 +307,20 @@ export class ReconciliationService {
       if (!t) totals.set(ccy, (t = { platformBought: 0n, platformSold: 0n, coreBought: 0n, coreSold: 0n }));
       return t;
     };
+    /**
+     * Totals cover the same postings on both sides: the platform's settled legs and deals of the window, and what core
+     * banking holds under their keys (whenever it was posted). Postings core holds that the platform does not know are
+     * reported as breaks, not added here, so the totals do not drift apart at the window's edges.
+     */
+    const addTotals = (base: string, leg: string, qty: bigint, core: (Partial<CoreFxTransactionRecord> & { txnRef: string }) | undefined) => {
+      const t = total(base);
+      if (leg === 'BANK_BUY') t.platformBought += qty;
+      else t.platformSold += qty;
+      if (!core || core.reversed !== false || core.qty === undefined) return;
+      const ct = total(core.currency ?? base);
+      if (core.leg === 'BANK_BUY') ct.coreBought += core.qty;
+      else ct.coreSold += core.qty;
+    };
     for (const s of legs) {
       const buyer = s.leg === 'BANK_SELL';
       const base = findPair(c, s.pair)?.base ?? String(s.pair).slice(0, 3);
@@ -268,17 +335,14 @@ export class ReconciliationService {
       };
       const ref = s.id as string;
       const base_ = { fillId: s.fill_id, leg: s.leg, idempotencyKey: s.idempotency_key, platformStatus: s.status };
-      if (s.status === 'SETTLED' && s.in_window) {
-        if (s.leg === 'BANK_BUY') total(base).platformBought += expected.qty;
-        else total(base).platformSold += expected.qty;
-      }
-      await this.checkPosting(add, 'SETTLEMENT', ref, s.status, s.core_txn_ref, expected, base_, lookup, {
+      const coreLeg = await this.checkPosting(add, 'SETTLEMENT', ref, s.status, s.core_txn_ref, expected, base_, lookup, {
         open: ['PENDING', 'UNKNOWN_OUTCOME', 'REVERSAL_PENDING'].includes(s.status),
         // Measured from creation or the last operations retry, not updated_at: recovery touches a stuck leg every minute.
         stale: now - new Date(s.open_since).getTime() > openAfterMs,
         mustNotBeBooked: s.status === 'FAILED_NEEDS_REVIEW',
         mustBeReversed: s.status === 'REVERSED',
       });
+      if (s.status === 'SETTLED' && s.in_window) addTotals(base, s.leg, expected.qty, coreLeg);
       // Earlier retry rounds of the leg (a new round's key is issued only after the previous posting was reversed):
       // one still booked means the customer was booked twice.
       for (let round = 0; round < Number(s.retry_round ?? 0); round++) {
@@ -322,17 +386,14 @@ export class ReconciliationService {
         tax: BigInt(d.tax),
         currency: base,
       };
-      if (d.status === 'SETTLED' && d.in_window) {
-        if (leg === 'BANK_BUY') total(base).platformBought += expected.qty;
-        else total(base).platformSold += expected.qty;
-      }
-      await this.checkPosting(add, 'BANK_DEAL', d.id, d.status, d.core_txn_ref, expected, { dealId: d.id, idempotencyKey: `deal:${d.id}`, platformStatus: d.status }, lookup, {
+      const coreLeg = await this.checkPosting(add, 'BANK_DEAL', d.id, d.status, d.core_txn_ref, expected, { dealId: d.id, idempotencyKey: `deal:${d.id}`, platformStatus: d.status }, lookup, {
         open: d.status === 'PENDING',
         stale: now - new Date(d.open_since).getTime() > openAfterMs,
         mustNotBeBooked: d.status === 'REJECTED' || d.status === 'FAILED_NEEDS_REVIEW',
         mustBeReversed: false,
         key: `deal:${d.id}`,
       });
+      if (d.status === 'SETTLED' && d.in_window) addTotals(base, leg, expected.qty, coreLeg);
     }
 
     // ---- core banking → platform: postings the platform does not know, or stale retry rounds still booked ----
@@ -345,11 +406,6 @@ export class ReconciliationService {
         if (f) fillIds.add(f[1]);
         const d = DEAL_KEY.exec(r.idempotencyKey);
         if (d) dealIds.add(d[1]);
-        if (!r.reversed) {
-          const ccy = r.currency;
-          if (r.leg === 'BANK_BUY') total(ccy).coreBought += r.qty;
-          else total(ccy).coreSold += r.qty;
-        }
       }
       const current = new Map<string, string>();
       if (fillIds.size) {
@@ -457,25 +513,25 @@ export class ReconciliationService {
     details: Record<string, unknown>,
     lookup: (key: string) => Promise<(Partial<CoreFxTransactionRecord> & { txnRef: string }) | undefined>,
     rules: { open: boolean; stale: boolean; mustNotBeBooked: boolean; mustBeReversed: boolean; key?: string },
-  ) {
+  ): Promise<(Partial<CoreFxTransactionRecord> & { txnRef: string }) | undefined> {
     const key = rules.key ?? (details.idempotencyKey as string);
     if (rules.open) {
       if (rules.stale) add({ severity: 'OPEN_ITEM', kind: source === 'SETTLEMENT' ? 'OPEN_SETTLEMENT' : 'OPEN_DEAL', source, ref, details });
-      return;
+      return undefined;
     }
     let core;
     try {
       core = await lookup(key);
     } catch (err) {
       add({ severity: 'OPEN_ITEM', kind: 'CORE_LOOKUP_FAILED', source, ref, details: { ...details, error: (err as Error).message } });
-      return;
+      return undefined;
     }
     const coreView = core && { txnRef: core.txnRef, reversed: core.reversed, postedAt: core.postedAt };
     // The platform never reverses a rejected deal or the failed leg itself: booked is a break, listed or not
     // (without a listing, reversed is unknown and taken as not reversed).
     if (rules.mustNotBeBooked) {
       if (core && core.reversed !== true) add({ severity: 'BREAK', kind: 'BOOKED_BUT_NOT_SETTLED', source, ref, details: { ...details, core: coreView } });
-      return;
+      return core;
     }
     // A reversed leg must show reversed; without a listing that cannot be told, so it is unverifiable.
 
@@ -483,16 +539,16 @@ export class ReconciliationService {
       if (!core) add({ severity: 'BREAK', kind: 'MISSING_IN_CORE', source, ref, details: { ...details, note: 'the platform reversed this leg but core banking has no posting under its key' } });
       else if (core.reversed === false) add({ severity: 'BREAK', kind: 'NOT_REVERSED_IN_CORE', source, ref, details: { ...details, core: coreView } });
       else if (core.reversed === undefined) add({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source, ref, details: { ...details, core: coreView } });
-      return;
+      return core;
     }
-    if (status !== 'SETTLED') return;
+    if (status !== 'SETTLED') return core;
     if (!core) {
       add({ severity: 'BREAK', kind: 'MISSING_IN_CORE', source, ref, details: { ...details, platformTxnRef } });
-      return;
+      return core;
     }
     if (core.reversed) add({ severity: 'BREAK', kind: 'REVERSED_IN_CORE', source, ref, details: { ...details, core: coreView } });
     if (platformTxnRef && core.txnRef !== platformTxnRef) add({ severity: 'BREAK', kind: 'TXN_REF_MISMATCH', source, ref, details: { ...details, platformTxnRef, core: coreView } });
-    if (core.qty === undefined) return; // looked up by key only: no amounts to compare
+    if (core.qty === undefined) return core; // looked up by key only: no amounts to compare
     const diffs: Record<string, { platform: unknown; core: unknown }> = {};
     const cmp = (name: string, a: unknown, b: unknown) => {
       if (a !== b) diffs[name] = { platform: a, core: b };
@@ -505,6 +561,7 @@ export class ReconciliationService {
     cmp('commission', expected.commission, core.commission);
     cmp('tax', expected.tax, core.tax);
     if (Object.keys(diffs).length) add({ severity: 'BREAK', kind: 'AMOUNT_MISMATCH', source, ref, details: { ...details, txnRef: core.txnRef, diffs } });
+    return core;
   }
 }
 
