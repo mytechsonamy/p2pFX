@@ -47,7 +47,8 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
     minute per pair, failures included; only the refresh that starts a read waits for it, at most 500 ms; the last
     good rate is used while core banking is down. A rate older than `referenceMaxAgeMinutes` (default 15) by its own
     `asOf` is not compared with, so a core that publishes a daily board rate switches the check off rather than
-    halting pricing on an intraday move. No reference rate for a pair (a synthetic cross): the check is skipped.
+    halting pricing on an intraday move (logged once an hour per pair while it is off; an `asOf` in the future is
+    taken as clock skew and aged from the read). No reference rate for a pair (a synthetic cross): the check is skipped.
   - A move of the aggregate mid larger than `maxJumpBps` (default 100) from the last accepted price is held back
     with `reason = PRICE_JUMP` until the new level has held for `jumpConfirmMs` (default 3,000). A spike that
     comes back is dropped without a gap in the old level. The new level must hold through consecutive prices: any

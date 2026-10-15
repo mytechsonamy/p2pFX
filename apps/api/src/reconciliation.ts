@@ -40,6 +40,8 @@ const DAILY_RETRY_MS = 30 * 60_000;
 const MAX_DAILY_ATTEMPTS = 3;
 /** Records created before the window that are still open (or changed in it) are looked at this far back. */
 const CARRY_DAYS = 31;
+/** A DONE hedge the LP does not find is a break only this soon after it was made (LP searches can be capped). */
+const LP_SEARCH_HORIZON_MS = 24 * 3_600_000;
 const FILL_KEY = /^fill:([0-9a-f-]{36}):(BANK_BUY|BANK_SELL)(?::r(\d+))?$/;
 const DEAL_KEY = /^deal:([0-9a-f-]{36})$/;
 
@@ -72,6 +74,8 @@ export class ReconciliationService {
     let due = at(now);
     if (now < due) due = at(new Date(now.getTime() - 24 * 3_600_000));
     if (now < due) return undefined;
+    // A run interrupted by a stop or a crash is closed first, so it neither blocks the day nor counts as done.
+    await this.closeStaleRuns();
     const { rows } = await this.db.query(
       `select status, started_at from recon_runs where trigger = 'SCHEDULED' and window_to = $1 order by started_at desc`,
       [due],
@@ -109,11 +113,7 @@ export class ReconciliationService {
   /** Runs a reconciliation of [from, to) and returns the run with its breaks. */
   async run(from: Date, to: Date, trigger: 'SCHEDULED' | 'MANUAL', actor: string) {
     if (!(from < to)) throw new ApiError(400, 'INVALID_RANGE', 'from must be before to');
-    await this.db.query(
-      `update recon_runs set status = 'FAILED', error = 'interrupted', finished_at = now()
-        where status = 'RUNNING' and started_at < now() - make_interval(hours => $1)`,
-      [STALE_RUN_HOURS],
-    );
+    await this.closeStaleRuns();
     let id: string;
     try {
       const { rows } = await this.db.query(
@@ -162,6 +162,14 @@ export class ReconciliationService {
       this.log.error({ err, runId: id }, 'reconciliation failed');
     }
     return this.get(id);
+  }
+
+  private async closeStaleRuns() {
+    await this.db.query(
+      `update recon_runs set status = 'FAILED', error = 'interrupted', finished_at = now()
+        where status = 'RUNNING' and started_at < now() - make_interval(hours => $1)`,
+      [STALE_RUN_HOURS],
+    );
   }
 
   async get(id: string) {
@@ -223,7 +231,10 @@ export class ReconciliationService {
     const { rows: legs } = await this.db.query(
       `select s.id, s.fill_id, s.leg, s.idempotency_key, s.status, s.core_txn_ref, s.retry_round, s.created_at, s.updated_at,
               f.pair, f.qty, f.buyer_commission, f.seller_commission, f.buyer_tax, f.seller_tax, f.buyer_total, f.seller_total,
-              bc.customer_ref as buyer_ref, sc.customer_ref as seller_ref, f.created_at >= $1 as in_window
+              bc.customer_ref as buyer_ref, sc.customer_ref as seller_ref, f.created_at >= $1 as in_window,
+              -- in flight since creation, or since operations last retried the fill
+              greatest(s.created_at, (select max(a.created_at) from audit_log a
+                                       where a.action = 'settlement.retry' and a.payload->>'fillId' = s.fill_id::text)) as open_since
          from settlements s
          join fills f on f.id = s.fill_id
          join orders b on b.id = f.buy_order_id join customers bc on bc.id = b.customer_id
@@ -260,8 +271,8 @@ export class ReconciliationService {
       }
       await this.checkPosting(add, 'SETTLEMENT', ref, s.status, s.core_txn_ref, expected, base_, lookup, {
         open: ['PENDING', 'UNKNOWN_OUTCOME', 'REVERSAL_PENDING'].includes(s.status),
-        // Measured from creation: the scheduler touches updated_at of a stuck leg on every recovery attempt.
-        stale: now - new Date(s.created_at).getTime() > openAfterMs,
+        // Measured from creation or the last operations retry, not updated_at: recovery touches a stuck leg every minute.
+        stale: now - new Date(s.open_since).getTime() > openAfterMs,
         mustNotBeBooked: s.status === 'FAILED_NEEDS_REVIEW',
         mustBeReversed: s.status === 'REVERSED',
       });
@@ -288,7 +299,10 @@ export class ReconciliationService {
 
     // ---- bank deals created in the window ----
     const { rows: deals } = await this.db.query(
-      `select d.*, c.customer_ref, d.created_at >= $1 as in_window from bank_deals d join customers c on c.id = d.customer_id
+      `select d.*, c.customer_ref, d.created_at >= $1 as in_window,
+              greatest(d.created_at, (select max(a.created_at) from audit_log a
+                                       where a.action = 'dealing.retry' and a.payload->>'dealId' = d.id::text)) as open_since
+         from bank_deals d join customers c on c.id = d.customer_id
         where (d.created_at >= $1 and d.created_at < $2)
            or (d.created_at >= $3 and d.created_at < $1 and (d.updated_at >= $1 or d.status in ('PENDING', 'FAILED_NEEDS_REVIEW')))
         order by d.seq`,
@@ -312,7 +326,7 @@ export class ReconciliationService {
       }
       await this.checkPosting(add, 'BANK_DEAL', d.id, d.status, d.core_txn_ref, expected, { dealId: d.id, idempotencyKey: `deal:${d.id}`, platformStatus: d.status }, lookup, {
         open: d.status === 'PENDING',
-        stale: now - new Date(d.created_at).getTime() > openAfterMs,
+        stale: now - new Date(d.open_since).getTime() > openAfterMs,
         mustNotBeBooked: d.status === 'REJECTED' || d.status === 'FAILED_NEEDS_REVIEW',
         mustBeReversed: false,
         key: `deal:${d.id}`,
@@ -368,11 +382,13 @@ export class ReconciliationService {
     }
 
     // ---- hedges created in the window, against the LPs ----
+    // Hedges carry no update time: the day before the window is checked again (a clip in flight at the previous
+    // cutoff is checked once resolved), and older clips still open are reported.
     const { rows: hedges } = await this.db.query(
       `select * from hedges
         where (created_at >= $1 and created_at < $2) or (created_at >= $3 and created_at < $1 and status in ('PENDING', 'UNKNOWN'))
         order by seq`,
-      [from, to, carryFrom],
+      [new Date(from.getTime() - 24 * 3_600_000), to, carryFrom],
     );
     for (const h of hedges) {
       const decimals = findPair(c, h.pair)?.baseDecimals ?? 2;
@@ -397,7 +413,10 @@ export class ReconciliationService {
       }
       if (h.status === 'DONE') {
         if (!exec) {
-          add({ severity: 'BREAK', kind: 'HEDGE_MISSING_AT_LP', source: 'HEDGE', ref: h.id, details });
+          // Some LP APIs search recent activity only (Saxo: the last 500 order activities): an older clip they do
+          // not find is unverified, not missing.
+          const recent = now - new Date(h.created_at).getTime() <= LP_SEARCH_HORIZON_MS;
+          add({ severity: recent ? 'BREAK' : 'OPEN_ITEM', kind: recent ? 'HEDGE_MISSING_AT_LP' : 'HEDGE_NOT_FOUND_AT_LP', source: 'HEDGE', ref: h.id, details });
           continue;
         }
         const diffs: string[] = [];
@@ -450,12 +469,14 @@ export class ReconciliationService {
       return;
     }
     const coreView = core && { txnRef: core.txnRef, reversed: core.reversed, postedAt: core.postedAt };
-    // Without a core listing, whether a posting is reversed is not known: that is reported as unverifiable.
+    // The platform never reverses a rejected deal or the failed leg itself: booked is a break, listed or not
+    // (without a listing, reversed is unknown and taken as not reversed).
     if (rules.mustNotBeBooked) {
-      if (core?.reversed === false) add({ severity: 'BREAK', kind: 'BOOKED_BUT_NOT_SETTLED', source, ref, details: { ...details, core: coreView } });
-      else if (core && core.reversed === undefined) add({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source, ref, details: { ...details, core: coreView } });
+      if (core && core.reversed !== true) add({ severity: 'BREAK', kind: 'BOOKED_BUT_NOT_SETTLED', source, ref, details: { ...details, core: coreView } });
       return;
     }
+    // A reversed leg must show reversed; without a listing that cannot be told, so it is unverifiable.
+
     if (rules.mustBeReversed) {
       if (!core) add({ severity: 'BREAK', kind: 'MISSING_IN_CORE', source, ref, details: { ...details, note: 'the platform reversed this leg but core banking has no posting under its key' } });
       else if (core.reversed === false) add({ severity: 'BREAK', kind: 'NOT_REVERSED_IN_CORE', source, ref, details: { ...details, core: coreView } });

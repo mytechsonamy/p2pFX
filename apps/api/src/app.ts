@@ -245,6 +245,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     bankBook.stop();
     bot.stop();
     await app.close();
+    // A daily reconciliation in the background finishes before the database pool closes.
+    await reconciliation.idle();
     await exchange.idle();
     await positions.idle();
     await exchange.stop();

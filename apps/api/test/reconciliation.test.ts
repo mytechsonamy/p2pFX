@@ -210,20 +210,55 @@ describe('reconciliation', () => {
       throw new Error('core banking down');
     };
     for (let i = 0; i < 3; i++) await h.ctx.reconciliation.runDailyIfDue();
-    const { rows } = await h.ctx.db.query(`select status, error from recon_runs`);
-    expect(rows).toEqual([{ status: 'FAILED', error: 'core banking down' }]);
+    const count = async () => (await h.ctx.db.query(`select count(*)::int as n from recon_runs where status = 'FAILED'`)).rows[0].n;
+    expect(await count()).toBe(1);
+    expect((await h.ctx.db.query(`select error from recon_runs`)).rows[0].error).toBe('core banking down');
     expect((await h.req('GET', '/ready')).body.reconciliation).toMatchObject({ status: 'FAILED' });
+    // Tried again 30 minutes later, three attempts in all, then left to operations.
+    const age = () => h.ctx.db.query(`update recon_runs set started_at = started_at - interval '31 minutes'`);
+    await age();
+    await h.ctx.reconciliation.runDailyIfDue();
+    expect(await count()).toBe(2);
+    await age();
+    await h.ctx.reconciliation.runDailyIfDue();
+    await age();
+    await h.ctx.reconciliation.runDailyIfDue();
+    expect(await count()).toBe(3);
   });
 
-  it('reports a failed or rejected record as unverifiable, not a break, when core banking cannot say it was reversed', async () => {
+  it('a run interrupted by a stop does not block the day once it is stale', async () => {
+    h = await startHarness();
+    await h.ctx.db.query(
+      `insert into recon_runs (window_from, window_to, trigger, actor, status, started_at)
+       values ('2026-10-03T20:30:00Z', '2026-10-04T20:30:00Z', 'SCHEDULED', 'system', 'RUNNING', now() - interval '7 hours')`,
+    );
+    expect(await h.ctx.reconciliation.runDailyIfDue()).toBeDefined();
+    const { rows } = await h.ctx.db.query(`select status, error from recon_runs order by started_at`);
+    expect(rows).toEqual([{ status: 'FAILED', error: 'interrupted' }, { status: 'CLEAN', error: null }]);
+  });
+
+  it('without a listing: a rejected deal core banking booked is a break, a reversed leg is unverifiable', async () => {
     const bank = new MockCoreBank();
     bank.setReferenceRate('USDTRY', '49.15');
     (bank as unknown as { listFxTransactions?: unknown }).listFxTransactions = undefined;
     h = await startHarness({ bank });
     await day(h);
     await h.ctx.db.query(`update bank_deals set status = 'REJECTED'`);
+    await h.ctx.db.query(`update settlements set status = 'REVERSED' where leg = 'BANK_BUY'`);
     const r = await run(h);
-    expect(r.items).toEqual([expect.objectContaining({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source: 'BANK_DEAL' })]);
+    expect(r.items.map((i) => [i.severity, i.kind, i.source]).sort()).toEqual([
+      ['BREAK', 'BOOKED_BUT_NOT_SETTLED', 'BANK_DEAL'],
+      ['OPEN_ITEM', 'REVERSAL_NOT_VERIFIABLE', 'SETTLEMENT'],
+    ]);
+  });
+
+  it('does not report a leg operations just retried as stuck', async () => {
+    h = await startHarness();
+    const { fillId } = await day(h);
+    await h.ctx.db.query(`update fills set created_at = now() - interval '3 hours' where id = $1`, [fillId]);
+    await h.ctx.db.query(`update settlements set status = 'PENDING', created_at = now() - interval '3 hours', updated_at = now() where fill_id = $1`, [fillId]);
+    await h.ctx.db.query(`insert into audit_log (actor, action, payload) values ('ops', 'settlement.retry', $1)`, [JSON.stringify({ fillId, legs: ['BANK_BUY'] })]);
+    expect((await run(h)).items).toEqual([]);
   });
 
   it('refuses a second run while one is running, and a reversed range', async () => {

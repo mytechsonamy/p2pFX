@@ -39,6 +39,7 @@ interface ReferenceState {
   inflight?: Promise<void>;
   /** A failure is logged once per outage. */
   failing?: boolean;
+  offLoggedAt?: number;
 }
 
 export interface SegmentRates {
@@ -59,6 +60,8 @@ const TICK_EVERY_MS = 5000;
 const FUTURE_TOLERANCE_MS = 2000;
 /** How long a core banking reference rate is reused before it is read again. */
 const REFERENCE_TTL_MS = 60_000;
+/** An asOf this far ahead of the local clock is taken as clock skew. */
+const REFERENCE_SKEW_MS = 5 * 60_000;
 /** How long the price engine waits for the reference rate before going on with the one it has. */
 const REFERENCE_TIMEOUT_MS = 500;
 /** The jump check compares with the last accepted price only while it is this recent (else any level is accepted). */
@@ -171,7 +174,7 @@ export class PriceEngine {
       all = await this.lp.quotes(pair);
     } catch (err) {
       this.log.warn({ err, pair }, 'LP quotes failed');
-      return this.unavailable(pair, 'NO_PRICE', `no LP price for ${pair}`);
+      return this.fail(pair, seq, 'NO_PRICE', `no LP price for ${pair}`);
     }
     const quotes = all.filter((q) => !lpDisabled(c.killSwitch.disabledLps, q.lp));
     // Only sane, recent quotes: positive prices, bid below ask, not stamped in the future, within the staleness limit.
@@ -186,14 +189,14 @@ export class PriceEngine {
         return false;
       }
     });
-    if (!fresh.length) return this.unavailable(pair, 'NO_PRICE', `no live LP price for ${pair}`);
+    if (!fresh.length) return this.fail(pair, seq, 'NO_PRICE', `no live LP price for ${pair}`);
     const sanity = c.dealing.priceSanity;
     // Outliers: with three or more LPs, one whose mid is far from the median is a bad feed, not the market.
     const { kept: usable, excluded } = sanity.enabled ? dropOutliers(fresh, sanity.maxLpDeviationBps) : { kept: fresh, excluded: [] };
     if (excluded.length) this.logExcluded(pair, excluded, now);
     // No majority agrees (e.g. two LPs against two): there is no telling which side is right.
     if (excluded.length && usable.length * 2 <= fresh.length) {
-      return this.unavailable(pair, 'PRICE_SUSPECT', `${pair} LPs disagree: ${excluded.length} of ${fresh.length} are far from the median`);
+      return this.fail(pair, seq, 'PRICE_SUSPECT', `${pair} LPs disagree: ${excluded.length} of ${fresh.length} are far from the median`);
     }
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => usable.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
@@ -216,17 +219,19 @@ export class PriceEngine {
     const spreadBps = spreadInBps(agg.bid, agg.ask);
     if (agg.bid > agg.ask || spreadBps > limitBps) {
       this.log.warn({ pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), bidLp: agg.bidLp, askLp: agg.askLp, spreadBps, limitBps }, 'spread guard: no bank price');
-      return this.unavailable(pair, 'WIDE_MARKET', `${pair} spread ${spreadBps.toFixed(1)} bps is beyond the limit ${limitBps} bps`);
+      return this.fail(pair, seq, 'WIDE_MARKET', `${pair} spread ${spreadBps.toFixed(1)} bps is beyond the limit ${limitBps} bps`);
     }
     if (sanity.enabled) {
       const mid = (agg.bid + agg.ask) / 2n;
       // Against core banking's own rate: a feed that drifts away (all LPs together, or the only LP) is not quoted.
       const ref = await this.referenceFor(pair, now, sanity.referenceMaxAgeMinutes * 60_000);
+      // The read may have been awaited: a refresh that started later has decided meanwhile.
+      if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
       if (ref !== undefined) {
         const off = deviationBps(mid, ref);
         if (off > sanity.maxReferenceDeviationBps) {
           this.log.warn({ pair, mid: formatPrice(mid), reference: formatPrice(ref), deviationBps: off, limitBps: sanity.maxReferenceDeviationBps }, 'price sanity: LP price too far from the reference rate');
-          return this.unavailable(pair, 'PRICE_SUSPECT', `${pair} LP price is ${off.toFixed(1)} bps from the reference rate (limit ${sanity.maxReferenceDeviationBps} bps)`);
+          return this.fail(pair, seq, 'PRICE_SUSPECT', `${pair} LP price is ${off.toFixed(1)} bps from the reference rate (limit ${sanity.maxReferenceDeviationBps} bps)`);
         }
       }
       // Against the last accepted price: a jump is held back until the new level has held for jumpConfirmMs.
@@ -239,17 +244,16 @@ export class PriceEngine {
           if (!holding) this.pendingJump.set(pair, { mid, since: now.getTime() });
           if (!holding || now.getTime() - pending.since < sanity.jumpConfirmMs) {
             if (!holding) this.log.warn({ pair, mid: formatPrice(mid), last: formatPrice((last.bid + last.ask) / 2n), jumpBps: jump, limitBps: sanity.maxJumpBps }, 'price sanity: price jump held back');
-            return this.unavailable(pair, 'PRICE_JUMP', `${pair} LP price moved ${jump.toFixed(1)} bps (limit ${sanity.maxJumpBps} bps); waiting for it to hold`);
+            return this.fail(pair, seq, 'PRICE_JUMP', `${pair} LP price moved ${jump.toFixed(1)} bps (limit ${sanity.maxJumpBps} bps); waiting for it to hold`);
           }
           this.log.info({ pair, mid: formatPrice(mid), jumpBps: jump }, 'price sanity: jumped price held, accepted as the new level');
         }
       }
       this.pendingJump.delete(pair);
     }
-    // A slower refresh that started earlier must not replace the price of one that started later (refreshes of a
-    // pair can overlap, and the reference read is awaited in between).
-    const newer = this.latest.get(pair);
-    if (newer && (this.applied.get(pair) ?? 0) > seq) return newer;
+    // A slower refresh that started earlier must not replace the outcome of one that started later (refreshes of a
+    // pair can overlap): neither its price nor the absence of one.
+    if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
     this.applied.set(pair, seq);
     const reopened = !!this.latest.get(pair)?.offHours;
     this.latest.set(pair, agg);
@@ -297,7 +301,9 @@ export class PriceEngine {
         .then(
           (r) => {
             state.rate = r?.rate;
-            state.at = r ? (r.asOf?.getTime() ?? readAt) : undefined;
+            // A rate stamped in the future (clock skew) is aged from when it was read.
+            const asOf = r?.asOf?.getTime();
+            state.at = r ? (asOf !== undefined && asOf <= readAt + REFERENCE_SKEW_MS ? asOf : readAt) : undefined;
             state.failing = false;
           },
           (err) => {
@@ -314,7 +320,13 @@ export class PriceEngine {
       clearTimeout(timer);
     }
     if (state.rate === undefined || state.at === undefined) return undefined;
-    return now.getTime() - state.at <= maxAgeMs ? state.rate : undefined;
+    if (now.getTime() - state.at <= maxAgeMs) return state.rate;
+    // Too old to compare with: the check is off for the pair. Said once an hour, so a stale core rate is noticed.
+    if (now.getTime() - (state.offLoggedAt ?? 0) >= 3_600_000) {
+      state.offLoggedAt = now.getTime();
+      this.log.warn({ pair, referenceAt: new Date(state.at).toISOString(), maxAgeMs }, 'price sanity: reference rate too old, reference check is off for the pair');
+    }
+    return undefined;
   }
 
   private logExcluded(pair: string, excluded: LpQuote[], now: Date) {
@@ -332,6 +344,21 @@ export class PriceEngine {
   /** Whether the pair's current bank price is an off-hours one (LP market closed). */
   isOffHours(pair: string): boolean {
     return !!this.latest.get(pair)?.offHours;
+  }
+
+  /** Fails this refresh as unavailable, unless a refresh that started later has already decided the pair's state. */
+  private async fail(pair: string, seq: number, reason: PriceOffReason, message: string): Promise<Aggregate> {
+    if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
+    this.applied.set(pair, seq);
+    return this.unavailable(pair, reason, message);
+  }
+
+  /** The outcome a later refresh decided: its price, or the reason there is none. */
+  private superseded(pair: string): Aggregate {
+    const a = this.latest.get(pair);
+    if (a) return a;
+    const o = this.off.get(pair);
+    throw new ApiError(503, 'PRICE_UNAVAILABLE', `no bank price for ${pair}`, o && { reason: o.reason, ...(o.nextOpen ? { nextOpen: o.nextOpen.toISOString() } : {}) });
   }
 
   /** Drops the pair's price so nothing trades on it, tells the stream once, and fails the refresh. */

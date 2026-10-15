@@ -140,6 +140,20 @@ describe('price sanity', () => {
     expect(h.ctx.prices.cached('USDTRY')!.bid).toBe(4_916_000_000n);
   });
 
+  it('a slower refresh that started first does not bring a price back after a later one found none', async () => {
+    h = await startHarness();
+    quote([['49.14', '49.16']]);
+    await h.ctx.prices.refresh('USDTRY');
+    h.bank.getReferenceRate = () => new Promise(() => {});
+    quote([['49.15', '49.17']], 61_000);
+    const slow = h.ctx.prices.refresh('USDTRY');
+    quote([['49.00', '50.00']], 10); // the later refresh sees a wide market
+    await expect(h.ctx.prices.refresh('USDTRY')).rejects.toMatchObject({ code: 'PRICE_UNAVAILABLE' });
+    await expect(slow).rejects.toMatchObject({ code: 'PRICE_UNAVAILABLE', details: { reason: 'WIDE_MARKET' } });
+    expect(h.ctx.prices.cached('USDTRY')).toBeUndefined();
+    expect(h.ctx.prices.offState('USDTRY')).toEqual({ reason: 'WIDE_MARKET' });
+  });
+
   it('a reference rate older than referenceMaxAgeMinutes by its own time is not compared with', async () => {
     h = await startHarness();
     const ayse = await h.login('ayse');
