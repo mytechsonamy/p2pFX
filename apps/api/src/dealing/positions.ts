@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { findPair, type HedgingConfig, formatDecimal, formatPrice, parseDecimal, parsePrice, valueOf, type PairConfig } from '@p2p/shared';
+import { divRound, findPair, type HedgingConfig, formatDecimal, formatPrice, lpDisabled, parseDecimal, parsePrice, valueOf, type PairConfig } from '@p2p/shared';
 import { LiquidityError, type LiquidityAdapter } from '@p2p/core-adapter';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Db } from '../db/pool.js';
@@ -225,12 +225,17 @@ export class PositionKeeper {
     return this.committed.get(pairSymbol) ?? 0n;
   }
 
-  /** The hard inventory cap for the pair's base currency (base minor units), if one is set. */
+  /**
+   * The hard inventory cap for the pair's base currency (base minor units), if one is set. While the LP market is
+   * closed nothing can be hedged, so the cap shrinks to `dealing.offHours.positionCapPct` of it.
+   */
   maxPosition(pairSymbol: string): bigint | undefined {
     const c = this.config.get().data;
     const pair = findPair(c, pairSymbol);
     const max = pair && c.inventory.maxPosition[pair.base];
-    return pair && max ? parseDecimal(max, pair.baseDecimals) : undefined;
+    if (!pair || !max) return undefined;
+    const cap = parseDecimal(max, pair.baseDecimals);
+    return this.prices.isOffHours(pairSymbol) ? (cap * BigInt(Math.round(c.dealing.offHours.positionCapPct * 100))) / 10_000n : cap;
   }
 
   /**
@@ -444,6 +449,8 @@ export class PositionKeeper {
     if (qty <= 0n) throw badRequest('INVALID_QTY', 'quantity must be positive');
     const { hedging } = this.config.get().data.dealing;
     const first = await this.prices.current(pair.symbol);
+    // Off-hours prices have no LP behind them: the position waits for the LP market to open.
+    if (first.offHours) throw new ApiError(503, 'LP_MARKET_CLOSED', 'the LP market is closed; hedge after it opens');
     const maxClip = hedging.maxClipQty[pair.base];
     const plan = planHedge(qty, maxClip ? parseDecimal(maxClip, pair.baseDecimals) : undefined, lpsByPrice(first, side), hedging.split);
     const batchId = randomUUID();
@@ -490,12 +497,15 @@ export class PositionKeeper {
     pair: PairConfig, side: 'BUY' | 'SELL', clip: Clip, order: string[], agg: Aggregate, batchId: string, reason: string, actor: string,
   ): Promise<ReturnType<typeof hedgeView> | 'UNKNOWN' | 'LIMIT' | undefined> {
     const delta = side === 'BUY' ? clip.qty : -clip.qty;
+    const slippage = BigInt(Math.round(this.config.get().data.dealing.hedging.maxSlippageBps * 100));
     for (const lp of order) {
       const config = this.config.get().data;
-      if (config.killSwitch.disabledLps.includes(lp)) continue;
+      if (lpDisabled(config.killSwitch.disabledLps, lp)) continue;
       const quote = agg.quotes.find((q) => q.lp === lp);
       if (!quote || !this.prices.quoteFresh(quote)) continue;
-      const expected = side === 'BUY' ? quote.ask : quote.bid;
+      const expected = parsePrice(side === 'BUY' ? quote.ask : quote.bid);
+      // Worst acceptable price: the LP's price moved against the bank by at most maxSlippageBps.
+      const limit = side === 'BUY' ? expected + divRound(expected * slippage, 1_000_000n, 'UP') : expected - divRound(expected * slippage, 1_000_000n, 'UP');
       // A hedge does not start another auto-hedge decision when it commits (it is one).
       const reservation = this.tryReserve(pair.symbol, delta, { hedge: true });
       if (!reservation) return 'LIMIT';
@@ -503,23 +513,27 @@ export class PositionKeeper {
       let id: string;
       try {
         const { rows: intent } = await this.db.query(
-          `insert into hedges (pair, side, qty, rate, expected_rate, lp, lp_ref, batch_id, reason, actor, status)
-           values ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, 'PENDING') returning id`,
-          [pair.symbol, side, clip.qty, expected, lp, ref, batchId, reason, actor],
+          `insert into hedges (pair, side, qty, rate, expected_rate, limit_rate, lp, lp_ref, batch_id, reason, actor, status)
+           values ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, 'PENDING') returning id`,
+          [pair.symbol, side, clip.qty, formatPrice(expected), formatPrice(limit), lp, ref, batchId, reason, actor],
         );
         id = intent[0].id as string;
       } catch (err) {
         reservation.release();
         throw err;
       }
+      const started = Date.now();
       let exec;
       try {
-        exec = await this.lp.execute({ lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref });
+        exec = await this.lp.execute({
+          lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref, limitRate: formatPrice(limit), excludeLps: config.killSwitch.disabledLps,
+        });
       } catch (err) {
+        const latency = Date.now() - started;
         if (err instanceof LiquidityError) {
           this.log.warn({ err, lp, pair: pair.symbol }, 'LP rejected hedge clip');
           try {
-            await this.db.query(`update hedges set status = 'REJECTED' where id = $1`, [id]);
+            await this.db.query(`update hedges set status = 'REJECTED', latency_ms = $2, reject_reason = $3 where id = $1`, [id, latency, err.message.slice(0, 500)]);
             reservation.release();
           } catch (e) {
             // Not recorded as rejected: the row stays PENDING (in the position) until a lookup or operations resolve it.
@@ -529,7 +543,7 @@ export class PositionKeeper {
           continue;
         }
         this.log.error({ err, lp, pair: pair.symbol, ref }, 'hedge clip outcome unknown: not re-sent to another LP');
-        await this.db.query(`update hedges set status = 'UNKNOWN' where id = $1`, [id]).catch(() => {});
+        await this.db.query(`update hedges set status = 'UNKNOWN', latency_ms = $2 where id = $1`, [id, latency]).catch(() => {});
         reservation.commitUncertain();
         return 'UNKNOWN';
       }
@@ -545,8 +559,8 @@ export class PositionKeeper {
       }
       try {
         const { rows } = await this.db.query(
-          `update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1 returning *`,
-          [id, exec.rate, exec.tradeRef],
+          `update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3, latency_ms = $4 where id = $1 returning *`,
+          [id, exec.rate, exec.tradeRef, Date.now() - started],
         );
         reservation.commit();
         return hedgeView(rows[0], pair);
@@ -566,12 +580,12 @@ export class PositionKeeper {
    */
   async resolveOpenClips(pairSymbol?: string) {
     const { rows } = await this.db.query(
-      `select id, lp, lp_ref, created_at from hedges where status in ('PENDING', 'UNKNOWN') and lp_ref is not null and ($1::text is null or pair = $1) order by seq`,
+      `select id, pair, side, qty, lp, lp_ref, created_at from hedges where status in ('PENDING', 'UNKNOWN') and lp_ref is not null and ($1::text is null or pair = $1) order by seq`,
       [pairSymbol ?? null],
     );
     for (const r of rows) {
       try {
-        const exec = await this.lp.findExecution(r.lp, r.lp_ref);
+        const exec = await this.lp.findExecution(r.lp, r.lp_ref, this.sent(r));
         if (exec) {
           await this.db.query(`update hedges set status = 'DONE', rate = $2, lp_trade_ref = $3 where id = $1 and status in ('PENDING', 'UNKNOWN')`, [r.id, exec.rate, exec.tradeRef]);
         } else if (Date.now() - new Date(r.created_at).getTime() > UNKNOWN_ESCALATE_MS) {
@@ -594,7 +608,7 @@ export class PositionKeeper {
     if (!['PENDING', 'UNKNOWN'].includes(r.status)) throw new ApiError(409, 'NOT_OPEN', `hedge is ${r.status}`);
     let exec;
     try {
-      exec = await this.lp.findExecution(r.lp, r.lp_ref);
+      exec = await this.lp.findExecution(r.lp, r.lp_ref, this.sent(r));
     } catch (err) {
       throw new ApiError(503, 'LP_LOOKUP_FAILED', `the LP lookup failed, nothing was changed: ${(err as Error).message}`);
     }
@@ -610,6 +624,13 @@ export class PositionKeeper {
     return hedgeView(updated[0], findPair(this.config.get().data, r.pair));
   }
 
+  /** The trade a hedge row was sent to its LP as (a lookup that completes it never sends to an LP switched off now). */
+  private sent(r: Record<string, any>) {
+    const c = this.config.get().data;
+    const decimals = findPair(c, r.pair)?.baseDecimals ?? 2;
+    return { pair: r.pair as string, side: r.side as 'BUY' | 'SELL', qty: formatDecimal(BigInt(r.qty), decimals), excludeLps: c.killSwitch.disabledLps };
+  }
+
   /** Base quantity of clips sent but not confirmed by their LP yet (signed: + the bank is buying), per pair. */
   private async unconfirmed(pair: string): Promise<bigint> {
     const { rows } = await this.db.query(
@@ -617,6 +638,38 @@ export class PositionKeeper {
       [pair],
     );
     return BigInt(rows[0].q);
+  }
+
+  /**
+   * Execution quality per LP over the last `hours`: clips sent, filled, rejected, still open, how long the LP
+   * took (median and 95th percentile), and the average fill against the price the clip was sent at, in basis
+   * points (positive: worse for the bank).
+   */
+  async lpStats(hours = 24) {
+    const { rows } = await this.db.query(
+      `select lp, count(*)::int as sent,
+              count(*) filter (where status = 'DONE')::int as filled,
+              count(*) filter (where status = 'REJECTED')::int as rejected,
+              count(*) filter (where status in ('PENDING', 'UNKNOWN'))::int as open,
+              percentile_cont(0.5) within group (order by latency_ms) as p50_ms,
+              percentile_cont(0.95) within group (order by latency_ms) as p95_ms,
+              avg(case when status = 'DONE' and expected_rate > 0
+                       then (rate - expected_rate) / expected_rate * 10000 * (case side when 'BUY' then 1 else -1 end) end) as slippage_bps
+         from hedges where created_at > now() - make_interval(hours => $1::int)
+        group by lp order by sent desc`,
+      [hours],
+    );
+    const round = (v: unknown, d = 1) => (v === null || v === undefined ? null : Math.round(Number(v) * 10 ** d) / 10 ** d);
+    return rows.map((r) => ({
+      lp: r.lp as string,
+      sent: r.sent as number,
+      filled: r.filled as number,
+      rejected: r.rejected as number,
+      open: r.open as number,
+      rejectPct: r.sent ? round((100 * r.rejected) / r.sent) : null,
+      latencyMs: { p50: round(r.p50_ms, 0), p95: round(r.p95_ms, 0) },
+      slippageBps: round(r.slippage_bps, 2),
+    }));
   }
 
   async recentHedges(limit = 20) {

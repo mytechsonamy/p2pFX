@@ -55,14 +55,26 @@ interface Desk {
   dealing: {
     autoHedge: boolean;
     positionLimits: Record<string, string>;
-    hedging: { targetPct: number; maxClipQty: Record<string, string>; split: 'BEST_LP' | 'ACROSS_LPS' };
+    hedging: { targetPct: number; maxClipQty: Record<string, string>; split: 'BEST_LP' | 'ACROSS_LPS'; maxSlippageBps: number };
     margins: { default: { buyPips: number; sellPips: number }; segments: Record<string, { buyPips: number; sellPips: number }> };
   };
   pairs: PairView[];
   positions: Position[];
   deals: Deal[];
   hedges: Hedge[];
+  lpStats?: LpStat[];
   bankBook?: { enabled: boolean; botEnabled?: boolean; orders: { pair: string; side: 'BUY' | 'SELL'; source?: 'BANK_MM' | 'BOT_MM'; price: string; qty: string }[] };
+}
+
+interface LpStat {
+  lp: string;
+  sent: number;
+  filled: number;
+  rejected: number;
+  open: number;
+  rejectPct: number | null;
+  latencyMs: { p50: number | null; p95: number | null };
+  slippageBps: number | null;
 }
 
 const root = document.getElementById('dealer')!;
@@ -146,7 +158,24 @@ function render(d: Desk) {
         <table><thead><tr><th>Saat</th><th>Tür</th><th>Yön</th><th class="num">Miktar</th><th class="num">Kur</th><th>LP</th></tr></thead>
         <tbody>${hedges || '<tr><td colspan="6" class="muted">Henüz hedge yok</td></tr>'}</tbody></table></section>
     </div>
+    ${lpStatsCard(d)}
     ${bankBookCard(d)}`;
+}
+
+/** Execution quality per LP over the last 24 hours, from the hedge clips. */
+function lpStatsCard(d: Desk) {
+  const rows = (d.lpStats ?? [])
+    .map(
+      (s) => `<tr><td>${esc(s.lp)}</td><td class="num">${s.sent}</td><td class="num">${s.filled}</td>
+      <td class="num ${s.rejected ? 'neg' : ''}">${s.rejected}${s.rejectPct != null ? ` <small>(%${nf(1).format(s.rejectPct)})</small>` : ''}</td>
+      <td class="num">${s.open || ''}</td><td class="num">${s.latencyMs.p50 ?? '—'} / ${s.latencyMs.p95 ?? '—'}</td>
+      <td class="num ${(s.slippageBps ?? 0) > 0 ? 'neg' : ''}">${s.slippageBps == null ? '—' : nf(2).format(s.slippageBps)}</td></tr>`,
+    )
+    .join('');
+  return `<section class="desk-card wide"><h2>LP performansı <small>son 24 saat, hedge parçalarından</small></h2>
+    <table><thead><tr><th>LP</th><th class="num">Gönderilen</th><th class="num">Dolan</th><th class="num">Reddedilen</th><th class="num">Açık</th>
+      <th class="num">Süre ms (medyan / %95)</th><th class="num">Kayma (baz puan, + banka aleyhine)</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7" class="muted">Henüz hedge yok</td></tr>'}</tbody></table></section>`;
 }
 
 function bankBookCard(d: Desk) {
@@ -194,6 +223,7 @@ async function loadPolicy() {
   (form.elements.namedItem('autoHedge') as HTMLInputElement).checked = d.autoHedge;
   (form.elements.namedItem('targetPct') as HTMLInputElement).value = String(d.hedging.targetPct);
   (form.elements.namedItem('split') as HTMLSelectElement).value = d.hedging.split;
+  (form.elements.namedItem('maxSlippageBps') as HTMLInputElement).value = String(d.hedging.maxSlippageBps ?? 10);
   document.getElementById('per-ccy')!.innerHTML = Object.keys(d.positionLimits)
     .map(
       (c) => `<fieldset><legend>${c}</legend>
@@ -225,7 +255,7 @@ form.addEventListener('submit', async (e) => {
     ...d,
     autoHedge: f.get('autoHedge') === 'on',
     positionLimits,
-    hedging: { targetPct: Number(f.get('targetPct')), split: f.get('split'), maxClipQty },
+    hedging: { targetPct: Number(f.get('targetPct')), split: f.get('split'), maxClipQty, maxSlippageBps: Number(f.get('maxSlippageBps')) },
   };
   try {
     await opsFetch('PUT', '/config', { config: { ...current_.data, dealing }, reason: String(f.get('reason') ?? ''), expectedVersion: current_.version });

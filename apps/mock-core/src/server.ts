@@ -1,6 +1,24 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { CoreBankingError, LiquidityError, MockCoreBank, MockLiquidity, fxRequestFromWire, toWire, type LpExecutionRequest } from '@p2p/core-adapter';
+import { CoreBankingError, LiquidityError, MockCoreBank, MockLiquidity, crossFromReference, fxRequestFromWire, syntheticRoute, toWire, type LpExecutionRequest } from '@p2p/core-adapter';
 import { parseDecimal } from '@p2p/shared';
+
+/**
+ * `direct`: the simulated LPs quote every pair against TRY. `interbank`: like real interbank LPs, they quote
+ * only USDTRY and each instrument against the dollar (XAUUSD per ounce, EURUSD, USDCHF…); the API builds the
+ * other TRY pairs as synthetic crosses.
+ */
+export type LpMode = 'direct' | 'interbank';
+
+export function mockLiquidity(bank: MockCoreBank, mode: LpMode) {
+  if (mode === 'direct') return new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs() });
+  const crosses = () => bank.referencePairs().flatMap((p) => syntheticRoute(p)?.cross ?? []);
+  return new MockLiquidity({
+    // A cross follows its own reference rate when one is set (synced from a real LP), else the TRY rates.
+    anchor: (pair) =>
+      pair === 'USDTRY' ? bank.referenceRate(pair) : crosses().includes(pair) ? (bank.referenceRate(pair) ?? crossFromReference(pair, (p) => bank.referenceRate(p))) : undefined,
+    instruments: () => ['USDTRY', ...crosses()],
+  });
+}
 
 const STATUS: Record<string, number> = { INSUFFICIENT_FUNDS: 422, NOT_FOUND: 404, INVALID_REQUEST: 400, UNAVAILABLE: 503 };
 
@@ -10,11 +28,11 @@ const STATUS: Record<string, number> = { INSUFFICIENT_FUNDS: 422, NOT_FOUND: 404
  */
 export function buildMockCore(
   bank = new MockCoreBank(),
-  opts: { logger?: boolean; liquidity?: MockLiquidity } = {},
+  opts: { logger?: boolean; liquidity?: MockLiquidity; lpMode?: LpMode } = {},
 ): FastifyInstance {
   const app = Fastify({ logger: opts.logger ?? false });
   // Simulated LPs quote around the bank's reference rate.
-  const liquidity = opts.liquidity ?? new MockLiquidity({ anchor: (pair) => bank.referenceRate(pair), instruments: () => bank.referencePairs() });
+  const liquidity = opts.liquidity ?? mockLiquidity(bank, opts.lpMode ?? 'direct');
 
   app.setErrorHandler((err, _req, reply) => {
     // An LP rejection is definite (4xx); 5xx would mean the outcome is unknown.

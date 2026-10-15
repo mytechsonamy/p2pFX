@@ -29,6 +29,8 @@ export const PairConfigSchema = z.object({
    * e.g. "0.0001" (5 pips = 0.0005 TRY). Never a basis point: bps are always a fraction of the price.
    */
   pipSize: decimalString,
+  /** The bank stops quoting the pair while the LPs' best spread is wider than this, in bps of the mid (default: dealing.maxSpreadBps). */
+  maxSpreadBps: z.number().min(1).max(10_000).optional(),
   /**
    * Bank commission per side. PIPS: an absolute fee of `buy`/`sell` pips per unit of base (500 pips × 0.0001 =
    * 0.05 TRY per USD). BPS: a share of the book price (5 bps = 0.05 %). Added to the book price for buyers,
@@ -59,6 +61,8 @@ const HedgingSchema = z.object({
   maxClipQty: z.record(decimalString),
   /** BEST_LP: every clip goes to the best-priced LP. ACROSS_LPS: clips go round the LPs from best to worst price. */
   split: z.enum(['BEST_LP', 'ACROSS_LPS']),
+  /** Worst price a clip may fill at, in basis points away from the LP price it was sent at (0 = that price exactly). */
+  maxSlippageBps: z.number().min(0).max(500).default(10),
 });
 export type HedgingConfig = z.infer<typeof HedgingSchema>;
 
@@ -66,13 +70,66 @@ export const DEFAULT_HEDGING: HedgingConfig = {
   targetPct: 0,
   maxClipQty: { USD: '50000', EUR: '50000', GBP: '25000' },
   split: 'ACROSS_LPS',
+  maxSlippageBps: 10,
 };
+
+const WeekTimeSchema = z.object({ day: z.number().int().min(1).max(7), time: hhmm });
+
+/**
+ * When the LPs trade, in the LPs' own convention (FX: Sunday 17:00 to Friday 17:00 New York). Outside it LP prices are
+ * at best indicative, so the bank gives no price and says when the market opens. P2P keeps its own `tradingHours`.
+ */
+const LpMarketSchema = z.object({
+  enabled: z.boolean(),
+  timezone: z.string(),
+  weekOpen: WeekTimeSchema,
+  weekClose: WeekTimeSchema,
+  /** A daily break by instrument kind (e.g. metals 17:00–18:00 New York), local times in `timezone`. */
+  dailyBreaks: z.object({ fx: z.object({ from: hhmm, to: hhmm }).optional(), metal: z.object({ from: hhmm, to: hhmm }).optional() }),
+  /** Local dates (YYYY-MM-DD) the LP market is closed all day (e.g. 25 December, 1 January). */
+  holidays: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)),
+});
+export type LpMarketConfig = z.infer<typeof LpMarketSchema>;
+
+export const DEFAULT_LP_MARKET: LpMarketConfig = {
+  enabled: true,
+  timezone: 'America/New_York',
+  weekOpen: { day: 7, time: '17:00' },
+  weekClose: { day: 5, time: '17:00' },
+  dailyBreaks: { metal: { from: '17:00', to: '18:00' } },
+  holidays: [],
+};
+
+/**
+ * The bank's price while the LP market is closed (weekends, LP holidays): the last LP price before the close, widened
+ * on each side, with a smaller inventory cap. Nothing can be hedged until the market opens, so the bank carries that
+ * position over the gap at the opening.
+ */
+const OffHoursSchema = z.object({
+  enabled: z.boolean(),
+  /** Added to each side of the close price, in bps of its mid (on top of the segment margin). */
+  extraSpreadBps: z.number().min(0).max(5_000),
+  /** The inventory cap while closed, as a share of `inventory.maxPosition` (100 = the same cap). */
+  positionCapPct: z.number().min(0).max(100),
+  /** The close price is not used once it is older than this (e.g. after a long holiday): then there is no bank price. */
+  maxCloseAgeHours: z.number().min(1).max(24 * 14),
+});
+export type OffHoursConfig = z.infer<typeof OffHoursSchema>;
+
+export const DEFAULT_OFF_HOURS: OffHoursConfig = { enabled: true, extraSpreadBps: 50, positionCapPct: 20, maxCloseAgeHours: 72 };
 
 export const DealingSchema = z.object({
   /** How long a firm bank quote can be executed. */
   quoteTtlSeconds: z.number().int().min(1).max(120),
   /** LP quotes older than this are ignored. */
   maxStalenessMs: z.number().int().min(100),
+  /**
+   * Spread guard: while the best LP bid and ask are further apart than this (bps of the mid), or crossed, the pair has
+   * no bank price (Direct, ladder and bot stop) until the market narrows. A pair can set its own limit.
+   */
+  maxSpreadBps: z.number().min(1).max(10_000).default(100),
+  lpMarket: LpMarketSchema.default(DEFAULT_LP_MARKET),
+  offHours: OffHoursSchema.default(DEFAULT_OFF_HOURS),
   /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
   margins: z.object({ default: MarginSchema, segments: z.record(MarginSchema) }),
   /** Largest single deal per base currency. */
@@ -85,8 +142,11 @@ export const DealingSchema = z.object({
 export type DealingConfig = z.infer<typeof DealingSchema>;
 
 export const DEFAULT_DEALING: DealingConfig = {
-  quoteTtlSeconds: 10,
+  quoteTtlSeconds: 5,
   maxStalenessMs: 3000,
+  maxSpreadBps: 100,
+  lpMarket: DEFAULT_LP_MARKET,
+  offHours: DEFAULT_OFF_HOURS,
   margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
   maxDealQty: { USD: '250000', EUR: '250000', GBP: '100000' },
   positionLimits: { USD: '100000', EUR: '100000', GBP: '50000' },
@@ -181,6 +241,8 @@ export const DEFAULT_BANK_BOOK: BankBookConfig = {
 export const DEFAULT_SESSION = { ttlMinutes: 30 };
 export const DEFAULT_CHANNELS: ChannelsConfig = { bankDirect: true, bankMarketMaker: true, botMarketMaker: true };
 export const DEFAULT_KILL_SWITCH = { allTrading: false, newCustomerOrders: false, haltedPairs: [] as string[], disabledLps: [] as string[] };
+/** Whether an LP is switched off; a synthetic cross (`crossLp+fundingLp`) is off when either of its LPs is. */
+export const lpDisabled = (disabled: readonly string[], lp: string) => lp.split('+').some((l) => disabled.includes(l));
 export const DEFAULT_INVENTORY = { maxPosition: { USD: '250000', EUR: '250000', GBP: '120000' } as Record<string, string> };
 export const DEFAULT_MARKET_ORDERS = { enabled: true, maxSlippageBps: 50 };
 export const DEFAULT_SETTLEMENT = { attempts: 3, baseDelayMs: 500, dispatch: 'ASYNC' as const };
@@ -362,7 +424,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
   { key: 'limits', label: 'Emir ve günlük tutar limitleri', paths: ['limits', 'orderRateLimit'] },
   { key: 'hedging', label: 'Pozisyon limitleri ve otomatik hedge kuralı', paths: ['dealing.positionLimits', 'dealing.autoHedge', 'dealing.hedging'] },
-  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxDealQty'] },
+  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.lpMarket', 'dealing.offHours', 'dealing.maxDealQty'] },
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler (Bank MM)', paths: ['bankBook'] },

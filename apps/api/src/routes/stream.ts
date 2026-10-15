@@ -50,8 +50,10 @@ export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
       else if (e.type === 'trade' && channels.has(`trades:${e.pair}`)) send(`trades:${e.pair}`, e.trade);
       else if (e.type === 'lp' && channels.has(`bank:${e.pair}`)) {
         // Each customer sees the bank's rates for their own segment.
-        const rates = ratesView(ctx.config.get().data, e.pair, { bid: parsePrice(e.bid), ask: parsePrice(e.ask), at: e.at }, session.segment);
+        const rates = ratesView(ctx.config.get().data, e.pair, { bid: parsePrice(e.bid), ask: parsePrice(e.ask), at: e.at, offHours: e.offHours }, session.segment);
         if (rates) send(`bank:${e.pair}`, rates);
+      } else if (e.type === 'lpOff' && channels.has(`bank:${e.pair}`)) {
+        send(`bank:${e.pair}`, { pair: e.pair, unavailable: true, reason: e.reason, ...(e.nextOpen ? { nextOpen: e.nextOpen } : {}) });
       }
     };
 
@@ -75,9 +77,10 @@ export function streamRoutes(app: FastifyInstance, ctx: AppContext) {
           channels.add(ch);
           if (ch.startsWith('book:')) send(ch, ctx.exchange.depth(ch.slice(5)));
           if (ch.startsWith('bank:')) {
-            const agg = ctx.prices.cached(ch.slice(5));
+            // Only a price that may still be dealt on; otherwise the customer is told there is none.
+            const agg = ctx.prices.fresh(ch.slice(5));
             const rates = agg && ratesView(ctx.config.get().data, agg.pair, agg, session.segment);
-            if (rates) send(ch, rates);
+            send(ch, rates ?? { pair: ch.slice(5), unavailable: true, ...(ctx.prices.offState(ch.slice(5)) ?? { reason: 'NO_PRICE' }) });
           }
         } else if (msg.op === 'unsubscribe') {
           channels.delete(ch);
