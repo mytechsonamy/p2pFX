@@ -222,6 +222,11 @@ export class SaxoLiquidity implements LiquidityAdapter {
    * The order activity audit cannot be filtered by reference, so the latest activities are searched for the
    * bank's reference (the hedge lookup runs soon after the trade, well within that window).
    */
+  /** The lookup searches the last 500 order activities only: "not found" is not proof for an older trade. */
+  lookupComplete(lp: string) {
+    return lp !== this.name;
+  }
+
   async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
     if (lp !== this.name) return undefined;
     const r = await this.call<{ Data?: OrderActivity[] }>('GET', '/cs/v1/audit/orderactivities?EntryType=Last&$top=500');

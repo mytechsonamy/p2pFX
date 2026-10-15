@@ -289,6 +289,7 @@ export class DealingService {
     if (!d) throw notFound('deal not found');
     if (d.status !== 'FAILED_NEEDS_REVIEW' && d.status !== 'PENDING') throw conflict('NOT_RETRYABLE', `deal is ${d.status}`);
     await audit(this.db, actor, 'dealing.retry', { dealId });
+    await this.db.query(`update bank_deals set retried_at = now() where id = $1`, [d.id]);
     const { pair } = this.pair(d.pair);
     const settled = await this.settle(d, d.customer_ref, pair);
     return dealView(settled, pair);

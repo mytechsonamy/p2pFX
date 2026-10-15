@@ -132,6 +132,7 @@ export class PriceEngine {
   async refresh(pair: string): Promise<Aggregate> {
     const c = this.config.get().data;
     const now = this.clock();
+    const seq = ++this.refreshSeq;
     // Outside the LP market's hours LP prices are at best indicative: no bank price, and the customer is told when it opens.
     const kind = isMetal(findPair(c, pair)?.base ?? pair.slice(0, 3)) ? 'metal' : 'fx';
     if (!isLpMarketOpen(now, c.dealing.lpMarket, kind)) {
@@ -140,8 +141,13 @@ export class PriceEngine {
       const nextOpen = cached && cached > now ? cached : nextLpMarketOpen(now, c.dealing.lpMarket, kind);
       const close = c.dealing.offHours.enabled ? await this.closePrice(pair) : undefined;
       if (!close || now.getTime() - close.at.getTime() > c.dealing.offHours.maxCloseAgeHours * 3_600_000) {
+        if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
+        this.applied.set(pair, seq);
         return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} market is closed`, nextOpen);
       }
+      // The close price may have been read from the database: a later refresh may have decided meanwhile.
+      if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
+      this.applied.set(pair, seq);
       // The close price widened by extraSpreadBps of its mid on each side; the segment margin comes on top as usual.
       const widen = (((close.bid + close.ask) / 2n) * BigInt(Math.round(c.dealing.offHours.extraSpreadBps * 100))) / 1_000_000n;
       const agg: Aggregate = {
@@ -167,7 +173,6 @@ export class PriceEngine {
       });
       return agg;
     }
-    const seq = ++this.refreshSeq;
     // An LP operations switched off (kill switch) is ignored entirely.
     let all: LpQuote[];
     try {

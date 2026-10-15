@@ -23,7 +23,7 @@ an open item while it has none.
 | Settlement leg `FAILED_NEEDS_REVIEW` | Same | Booked and not reversed |
 | Bank deal `SETTLED` | Posting with key `deal:<id>` | As for a settled leg (commission 0) |
 | Bank deal `REJECTED` or `FAILED_NEEDS_REVIEW` | Same | Booked |
-| Hedge clip `DONE` | LP execution with the clip's `lp_ref` | Missing at the LP, or side, pair, quantity, trade reference or rate differ (for a synthetic two-leg hedge only the trade references and the rate are the LPs' own). A clip older than a day that the LP does not find is an open item, not a break: some LP APIs search recent activity only (Saxo: the last 500 order activities) |
+| Hedge clip `DONE` | LP execution with the clip's `lp_ref` | Missing at the LP, or side, pair, quantity, trade reference or rate differ (for a synthetic two-leg hedge only the trade references and the rate are the LPs' own). A clip the LP does not find is an open item, not a break, when the LP adapter says its search is incomplete (`lookupComplete`: Saxo searches the last 500 order activities only) |
 | Hedge clip `REJECTED` | Same | The LP shows an execution |
 
 Core banking → platform, when the adapter can list postings (`listFxTransactions`):
@@ -37,8 +37,8 @@ Hedges carry no update time, so the day before the window is checked again: a cl
 cutoff is checked once it is resolved.
 
 Records still in flight (`PENDING`, `UNKNOWN_OUTCOME`, `REVERSAL_PENDING`, open hedge clips) are not breaks. Once
-they are older than `openItemAfterMinutes` (counted from creation or the last operations retry, not from the last
-update: recovery touches a stuck record every minute)
+they are older than `openItemAfterMinutes` (counted from creation or the last operations retry, `retried_at`, not
+from the last update: recovery touches a stuck record every minute)
 they are listed as open items. A lookup that fails (core banking or an LP not answering) is an open item too, never a
 break.
 
@@ -65,8 +65,8 @@ is the half of the check that catches what the platform never saw.
   run does not hold up the scheduler's other work. The previous day's run is caught up if the service was down at
   the time (only the previous day: after a longer outage, run the missed days from operations). A failed run is
   tried again after 30 minutes, three times at most, then logged as an error. A run interrupted by a stop or a crash
-  is closed as failed after 6 hours and does not block the day; on a normal stop the service waits for a run in
-  progress.
+  is closed as failed after 6 hours and does not block the day; on a normal stop no new run starts and the service
+  waits for one in progress.
 - **On demand.** `POST /ops/reconciliation/runs { from?, to? }` (editor role; default the last 24 hours, at most 31
   days). One run at a time; a second one is refused with `409 RECONCILIATION_RUNNING`.
 - **Results.** `GET /ops/reconciliation/runs`, `GET /ops/reconciliation/runs/:id` (with the items). Status

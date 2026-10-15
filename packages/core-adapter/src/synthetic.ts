@@ -232,6 +232,11 @@ export class SyntheticLiquidity implements LiquidityAdapter {
    * A synthetic trade needs the original request (`request`) to be rebuilt: without it only direct trades
    * can be found. A cross found without its funding leg has the funding leg completed here.
    */
+  /** A synthetic LP name joins its legs' LPs (`LP-A+LP-B`): complete only if every leg's LP is. */
+  lookupComplete(lp: string) {
+    return lp.split('+').every((l) => this.inner.lookupComplete?.(l) ?? true);
+  }
+
   async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
     const legs = request ? this.legs(lp, request.pair) : undefined;
     if (!legs || !request) return this.inner.findExecution(lp, ref, undefined, options);

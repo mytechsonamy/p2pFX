@@ -220,7 +220,7 @@ export class SettlementService {
         if (r.status === 'REVERSED') {
           const round = r.retry_round + 1;
           await this.db.query(
-            `update settlements set status = 'PENDING', retry_round = $2, idempotency_key = $3, attempts = 0,
+            `update settlements set status = 'PENDING', retry_round = $2, idempotency_key = $3, attempts = 0, retried_at = now(),
                core_txn_ref = null, receipt_ref = null, reversal_ref = null, updated_at = now() where id = $1 and status = 'REVERSED'`,
             [r.id, round, SettlementService.idempotencyKey(fillId, r.leg, round)],
           );
@@ -233,7 +233,7 @@ export class SettlementService {
           throw new ApiError(503, 'OUTCOME_UNKNOWN', `core banking lookup failed for ${r.leg}, nothing was re-sent: ${(err as Error).message}`);
         }
         if (found) await this.markSettled(r.id, found.txnRef, found.receiptRef);
-        else await this.db.query(`update settlements set status = 'PENDING', attempts = 0, updated_at = now() where id = $1 and status = $2`, [r.id, r.status]);
+        else await this.db.query(`update settlements set status = 'PENDING', attempts = 0, retried_at = now(), updated_at = now() where id = $1 and status = $2`, [r.id, r.status]);
       }
       await audit(this.db, actor, 'settlement.retry', { fillId, legs: rows.map((r) => r.leg) });
       return this.run(fillId);

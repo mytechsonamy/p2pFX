@@ -42,6 +42,12 @@ export class CompositeLiquidity implements LiquidityAdapter {
     return source.execute(req);
   }
 
+  lookupComplete(lp: string) {
+    const owner = this.owner.get(lp);
+    const sources = owner ? [owner] : this.sources;
+    return sources.every((s) => s.lookupComplete?.(lp) ?? true);
+  }
+
   async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
     const source = await this.source(lp, request?.pair);
     if (source) return source.findExecution(lp, ref, request, options);

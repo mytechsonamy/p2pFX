@@ -32,3 +32,8 @@ create table recon_breaks (
   created_at timestamptz not null default now()
 );
 create index recon_breaks_run_idx on recon_breaks (run_id, severity);
+
+-- When operations last retried a settlement or a deal: an open record is aged from its creation or this, whichever is
+-- later (updated_at moves on every automatic recovery attempt).
+alter table settlements add column retried_at timestamptz;
+alter table bank_deals add column retried_at timestamptz;

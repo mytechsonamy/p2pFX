@@ -150,6 +150,16 @@ describe('reconciliation', () => {
     );
   });
 
+  it('a hedge an LP with a capped search does not find is an open item, not a break', async () => {
+    h = await startHarness();
+    await day(h);
+    const { rows } = await h.ctx.db.query(`select lp, lp_ref from hedges`);
+    lpExecutions(h).delete(`${rows[0].lp}:${rows[0].lp_ref}`);
+    (h.liquidity as unknown as { lookupComplete: (lp: string) => boolean }).lookupComplete = (lp) => lp !== rows[0].lp;
+    const r = await run(h);
+    expect(r.items).toEqual([expect.objectContaining({ severity: 'OPEN_ITEM', kind: 'HEDGE_NOT_FOUND_AT_LP' })]);
+  });
+
   it('reports a hedge whose LP execution differs in quantity or rate', async () => {
     h = await startHarness();
     await day(h);
@@ -256,9 +266,11 @@ describe('reconciliation', () => {
     h = await startHarness();
     const { fillId } = await day(h);
     await h.ctx.db.query(`update fills set created_at = now() - interval '3 hours' where id = $1`, [fillId]);
-    await h.ctx.db.query(`update settlements set status = 'PENDING', created_at = now() - interval '3 hours', updated_at = now() where fill_id = $1`, [fillId]);
-    await h.ctx.db.query(`insert into audit_log (actor, action, payload) values ('ops', 'settlement.retry', $1)`, [JSON.stringify({ fillId, legs: ['BANK_BUY'] })]);
+    await h.ctx.db.query(`update settlements set status = 'PENDING', created_at = now() - interval '3 hours', updated_at = now(), retried_at = now() where fill_id = $1`, [fillId]);
     expect((await run(h)).items).toEqual([]);
+    // Without the retry it is stuck for three hours.
+    await h.ctx.db.query(`update settlements set retried_at = null where fill_id = $1`, [fillId]);
+    expect((await run(h)).items.map((i) => i.kind)).toEqual(['OPEN_SETTLEMENT', 'OPEN_SETTLEMENT']);
   });
 
   it('refuses a second run while one is running, and a reversed range', async () => {

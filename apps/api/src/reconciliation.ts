@@ -40,8 +40,6 @@ const DAILY_RETRY_MS = 30 * 60_000;
 const MAX_DAILY_ATTEMPTS = 3;
 /** Records created before the window that are still open (or changed in it) are looked at this far back. */
 const CARRY_DAYS = 31;
-/** A DONE hedge the LP does not find is a break only this soon after it was made (LP searches can be capped). */
-const LP_SEARCH_HORIZON_MS = 24 * 3_600_000;
 const FILL_KEY = /^fill:([0-9a-f-]{36}):(BANK_BUY|BANK_SELL)(?::r(\d+))?$/;
 const DEAL_KEY = /^deal:([0-9a-f-]{36})$/;
 
@@ -93,13 +91,19 @@ export class ReconciliationService {
   }
 
   private daily?: Promise<unknown>;
+  private stopping = false;
+
+  /** Shutdown: no new daily run starts (a scheduler tick still in progress may ask for one). */
+  stop() {
+    this.stopping = true;
+  }
 
   /**
    * Scheduler: starts the daily run in the background (one at a time), so a long run does not hold up order expiry,
    * settlement recovery and the rest of the tick.
    */
   startDailyIfDue() {
-    if (this.daily) return;
+    if (this.daily || this.stopping) return;
     this.daily = this.runDailyIfDue()
       .catch((err) => this.log.error({ err }, 'daily reconciliation failed'))
       .finally(() => (this.daily = undefined));
@@ -232,9 +236,8 @@ export class ReconciliationService {
       `select s.id, s.fill_id, s.leg, s.idempotency_key, s.status, s.core_txn_ref, s.retry_round, s.created_at, s.updated_at,
               f.pair, f.qty, f.buyer_commission, f.seller_commission, f.buyer_tax, f.seller_tax, f.buyer_total, f.seller_total,
               bc.customer_ref as buyer_ref, sc.customer_ref as seller_ref, f.created_at >= $1 as in_window,
-              -- in flight since creation, or since operations last retried the fill
-              greatest(s.created_at, (select max(a.created_at) from audit_log a
-                                       where a.action = 'settlement.retry' and a.payload->>'fillId' = s.fill_id::text)) as open_since
+              -- in flight since creation, or since operations last retried it
+              greatest(s.created_at, coalesce(s.retried_at, s.created_at)) as open_since
          from settlements s
          join fills f on f.id = s.fill_id
          join orders b on b.id = f.buy_order_id join customers bc on bc.id = b.customer_id
@@ -300,8 +303,7 @@ export class ReconciliationService {
     // ---- bank deals created in the window ----
     const { rows: deals } = await this.db.query(
       `select d.*, c.customer_ref, d.created_at >= $1 as in_window,
-              greatest(d.created_at, (select max(a.created_at) from audit_log a
-                                       where a.action = 'dealing.retry' and a.payload->>'dealId' = d.id::text)) as open_since
+              greatest(d.created_at, coalesce(d.retried_at, d.created_at)) as open_since
          from bank_deals d join customers c on c.id = d.customer_id
         where (d.created_at >= $1 and d.created_at < $2)
            or (d.created_at >= $3 and d.created_at < $1 and (d.updated_at >= $1 or d.status in ('PENDING', 'FAILED_NEEDS_REVIEW')))
@@ -413,10 +415,10 @@ export class ReconciliationService {
       }
       if (h.status === 'DONE') {
         if (!exec) {
-          // Some LP APIs search recent activity only (Saxo: the last 500 order activities): an older clip they do
-          // not find is unverified, not missing.
-          const recent = now - new Date(h.created_at).getTime() <= LP_SEARCH_HORIZON_MS;
-          add({ severity: recent ? 'BREAK' : 'OPEN_ITEM', kind: recent ? 'HEDGE_MISSING_AT_LP' : 'HEDGE_NOT_FOUND_AT_LP', source: 'HEDGE', ref: h.id, details });
+          // Some LP APIs search recent activity only (Saxo: the last 500 order activities): what they do not find is
+          // unverified, not missing.
+          const complete = this.lp.lookupComplete?.(h.lp) ?? true;
+          add({ severity: complete ? 'BREAK' : 'OPEN_ITEM', kind: complete ? 'HEDGE_MISSING_AT_LP' : 'HEDGE_NOT_FOUND_AT_LP', source: 'HEDGE', ref: h.id, details });
           continue;
         }
         const diffs: string[] = [];

@@ -241,6 +241,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   const close = async () => {
     scheduler.stop();
+    reconciliation.stop();
     prices.stop();
     bankBook.stop();
     bot.stop();

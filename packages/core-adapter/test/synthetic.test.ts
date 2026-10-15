@@ -113,6 +113,15 @@ describe('synthetic crosses', () => {
     expect(inner.executionCount).toBe(2);
   });
 
+  it('says its lookups are complete only when every leg LP is', () => {
+    const { inner, lp } = setup();
+    expect(lp.lookupComplete('LP-A+LP-B')).toBe(true);
+    (inner as unknown as { lookupComplete: (l: string) => boolean }).lookupComplete = (l) => l !== 'LP-B';
+    expect(lp.lookupComplete('LP-A+LP-B')).toBe(false);
+    expect(lp.lookupComplete('LP-A+LP-C')).toBe(true);
+    expect(lp.lookupComplete('LP-B')).toBe(false);
+  });
+
   it('rejects a trade whose price moved beyond the limit, before any leg is sent', async () => {
     const { inner, lp } = setup();
     const ask = (await lp.quotes('XAUTRY')).find((q) => q.lp === 'LP-A+LP-A')!.ask;

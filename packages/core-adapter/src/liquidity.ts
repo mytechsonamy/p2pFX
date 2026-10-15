@@ -46,6 +46,11 @@ export interface LiquidityAdapter {
    * it was sent (synthetic crosses need it to rebuild a two-leg trade).
    */
   findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions): Promise<LpExecution | undefined>;
+  /**
+   * Optional: whether findExecution searches all of this LP's trades. False for an LP API that searches recent
+   * activity only, where "not found" does not mean the trade did not happen. Absent: complete.
+   */
+  lookupComplete?(lp: string): boolean;
 }
 
 export interface FindExecutionOptions {
