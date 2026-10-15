@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>p2pFX Ürün Tanıtımı</title>
+<style>
+  :root {
+    --ink: #0f172a;
+    --muted: #475569;
+    --soft: #64748b;
+    --line: #e2e8f0;
+    --bg: #ffffff;
+    --panel: #f8fafc;
+    --brand: #0b5fff;
+    --buy: #0f8a5f;
+    --sell: #d1343b;
+  }
+  @page { size: A4; margin: 16mm 16mm 18mm 16mm; }
+  @page :first { margin: 0; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 10pt/1.5 "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  main { max-width: 178mm; margin: 0 auto; }
+  h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 20pt; margin: 0 0 4mm; }
+  h2 .num { color: var(--brand); margin-right: 3mm; }
+  h3 { font-size: 12.5pt; margin: 6mm 0 2mm; break-after: avoid; }
+  p { margin: 0 0 3mm; }
+  ul, ol { margin: 0 0 3mm; padding-left: 5mm; }
+  li { margin-bottom: 1.2mm; }
+  strong { font-weight: 650; }
+  .lead { font-size: 12pt; color: var(--muted); margin-bottom: 5mm; }
+  section.chapter { break-before: page; padding-top: 2mm; }
+  .kicker { text-transform: uppercase; letter-spacing: 0.12em; font-size: 8pt; font-weight: 700; color: var(--brand); margin-bottom: 2mm; }
+
+  .cover { height: 297mm; width: 210mm; position: relative; color: #fff; overflow: hidden; break-after: page;
+    background: radial-gradient(120% 80% at 85% 10%, #2f7bff 0%, #0b5fff 35%, #0a2f86 100%); }
+  .cover .inner { z-index: 1; position: absolute; inset: 26mm 22mm; display: flex; flex-direction: column; }
+  .cover .brand { font-size: 13pt; font-weight: 700; letter-spacing: 0.02em; }
+  .cover .brand span { display: inline-block; background: #fff; color: var(--brand); border-radius: 6px; padding: 1mm 2.4mm; margin-right: 2mm; }
+  .cover h1 { font-size: 34pt; margin-top: 30mm; max-width: 160mm; }
+  .cover .sub { font-size: 14pt; opacity: 0.9; margin-top: 6mm; max-width: 140mm; line-height: 1.45; }
+  .cover .shots { position: absolute; right: -8mm; bottom: 22mm; display: flex; gap: 5mm; transform: rotate(-4deg); }
+  .cover .shots img { width: 50mm; border-radius: 7mm; box-shadow: 0 10mm 20mm rgb(0 0 0 / 0.35); }
+  .cover .meta { margin-top: 8mm; font-size: 9.5pt; opacity: 0.85; max-width: 120mm; }
+
+  .callout { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--brand); border-radius: 3mm; padding: 4mm 5mm; margin: 4mm 0; break-inside: avoid; }
+  .callout p:last-child { margin-bottom: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; }
+  .card { border: 1px solid var(--line); border-radius: 3mm; padding: 4mm; break-inside: avoid; background: #fff; }
+  .card h4 { margin: 0 0 1.5mm; font-size: 10.5pt; }
+  .card p, .card li { font-size: 9.5pt; color: var(--muted); }
+  .card p { margin: 0; }
+  .card ul { margin: 0; }
+  .card .big { font-size: 15pt; font-weight: 700; color: var(--brand); line-height: 1.1; margin-bottom: 1.5mm; }
+  table { width: 100%; border-collapse: collapse; margin: 3mm 0 4mm; font-size: 9.5pt; break-inside: avoid; }
+  th, td { text-align: left; padding: 1.8mm 2.2mm; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--panel); font-weight: 650; color: var(--muted); font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.total td { font-weight: 700; border-top: 1.5px solid var(--ink); }
+  .buy { color: var(--buy); } .sell { color: var(--sell); }
+
+  figure { margin: 4mm 0; break-inside: avoid; }
+  figure img { display: block; width: 100%; margin: 0 auto; border-radius: 2mm; border: 1px solid var(--line); }
+  figure.narrow img { width: 88%; }
+  figure.narrow figcaption { width: 88%; margin-left: auto; margin-right: auto; }
+  figcaption { font-size: 8.5pt; color: var(--soft); margin-top: 1.5mm; line-height: 1.45; }
+  figcaption b { color: var(--ink); }
+  .phones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6mm; margin: 4mm 0; break-inside: avoid; }
+  .phones figure { margin: 0; }
+  .phones img { border: 0; border-radius: 6mm; width: 76%; margin: 0 auto; }
+  .side { display: grid; grid-template-columns: 1fr 58mm; gap: 7mm; align-items: start; }
+  .side figure { margin: 0; }
+  .side figure img { border: 0; border-radius: 6mm; }
+
+  .flow { display: grid; grid-template-columns: 1fr 28mm 1fr 28mm 1fr; align-items: center; margin: 5mm 0; break-inside: avoid; }
+  .flow .node { border: 1.5px solid var(--line); border-radius: 3mm; padding: 3.5mm; text-align: center; background: #fff; }
+  .flow .node b { display: block; font-size: 11pt; }
+  .flow .node small { color: var(--soft); font-size: 8.5pt; }
+  .flow .node.bank { border-color: var(--brand); background: #eef4ff; }
+  .flow .arrow { text-align: center; font-size: 8pt; color: var(--muted); line-height: 1.3; }
+  .flow .arrow i { display: block; font-style: normal; font-size: 15pt; color: var(--brand); }
+
+  .phase { display: grid; grid-template-columns: 30mm 1fr; gap: 5mm; border-top: 1px solid var(--line); padding: 4mm 0; break-inside: avoid; }
+  .phase .tag { font-weight: 700; color: var(--brand); }
+  .phase .tag small { display: block; color: var(--soft); font-weight: 500; font-size: 8.5pt; }
+  .phase h4 { margin: 0 0 1.5mm; font-size: 11pt; }
+  .phase li { font-size: 9.5pt; }
+
+  .toc { columns: 2; column-gap: 10mm; padding: 0; list-style: none; margin: 3mm 0 0; }
+  .toc li { break-inside: avoid; padding: 1.4mm 0; border-bottom: 1px dotted var(--line); margin: 0; }
+  .toc li span { color: var(--brand); font-weight: 700; margin-right: 2mm; }
+  .foot { font-size: 8pt; color: var(--soft); margin-top: 8mm; }
+  code { font: 8.8pt/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--panel); padding: 0.3mm 1mm; border-radius: 1mm; }
+
+  @media screen {
+    body { background: #e9edf3; }
+    .cover { margin: 0 auto 10mm; }
+    main { background: #fff; padding: 16mm; max-width: 210mm; box-shadow: 0 2mm 8mm rgb(0 0 0 / 0.08); margin-bottom: 10mm; }
+    section.chapter { border-top: 1px dashed var(--line); margin-top: 10mm; padding-top: 10mm; }
+  }
+  @media screen and (max-width: 800px) {
+    .cover, main { width: 100%; }
+    .grid2, .grid3, .phones, .side { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="inner">
+    <div class="brand"><span>p2pFX</span> Bankalar için ürün tanıtımı</div>
+    <h1>Müşterileriniz kendi kurunu belirlesin, banka karşı taraf olsun</h1>
+    <p class="sub">Mobil bankacılık uygulamanızın içinde, kendi markanızla çalışan müşteriler arası döviz ve kıymetli maden pazarı.</p>
+    <div class="meta">
+      Ürün tanıtım dokümanı · Ekim 2026<br />
+      Ekran görüntüleri çalışan prototipten alınmıştır. Demo Bank ve Yıldız Bank örnek markalardır.
+    </div>
+  </div>
+  <div class="shots">
+    <img src="img/02-trade.png" alt="Al-Sat ekranı" />
+    <img src="img/06-confirm-buy.png" alt="Emir onay ekranı" />
+    <img src="img/03-board.png" alt="Tahta ekranı" />
+  </div>
+</div>
+
+<main>
+
+<section>
+  <div class="kicker">Yönetici özeti</div>
+  <h2>p2pFX nedir?</h2>
+  <p class="lead">p2pFX, bankanın mobil uygulamasına gömülen white-label bir döviz pazarıdır. Müşteri, vadesiz döviz hesabındaki parayı kendi belirlediği fiyattan satışa çıkarır; aynı bankanın başka bir müşterisi alış emri verir. Emirler eşleştiğinde banka satıcıdan dövizi alır, alıcıya satar ve her iki taraftan komisyon kazanır.</p>
+
+  <div class="grid3">
+    <div class="card"><div class="big">Risksiz gelir</div><p>Her eşleşmede alış ve satış tarafından ayrı komisyon. Banka iki işlemi aynı anda, aynı miktarla yaptığı için kur pozisyonu oluşmaz.</p></div>
+    <div class="card"><div class="big">Mevzuata uygun</div><p>Müşteriler birbirleriyle işlem yapmaz; karşı taraf her zaman bankadır. Her eşleşme bankanın mevcut döviz alım-satım kayıtları ve dekontlarıyla işlenir.</p></div>
+    <div class="card"><div class="big">Uygulama içinde</div><p>Ayrı giriş, ayrı cüzdan yok. Bankanın uygulamasında, bankanın renkleriyle açılır; müşterinin kendi vadesiz hesaplarını kullanır.</p></div>
+  </div>
+
+  <h3>Bir bakışta</h3>
+  <ul>
+    <li><strong>İki likidite kaynağı tek ekranda:</strong> müşteriler arası emir defteri (P2P) ve bankanın segment bazlı kendi kuru. Müşteri hangisi iyiyse onu seçer; emir bileti daha iyi fiyatı kendisi gösterir.</li>
+    <li><strong>Tüm iş kuralları bankanın elinde:</strong> komisyon, kambiyo vergisi, bloke politikası, emir geçerliliği, işlem saatleri, segment limitleri ve marjlar backoffice'ten, yeniden başlatma olmadan, gerekçeli ve versiyonlu olarak değiştirilir.</li>
+    <li><strong>FX masası:</strong> likidite sağlayıcı (LP) fiyatlarının birleştirilmesi, segment kurları, pozisyon, kâr/zarar ve otomatik hedge.</li>
+    <li><strong>Banka başına ayrı kurulum:</strong> her banka kendi sunucusunda veya özel bulutunda, kendi veritabanıyla çalışan izole bir kopya alır.</li>
+    <li><strong>Çalışan prototip:</strong> bu dokümandaki tüm ekranlar, tek komutla ayağa kalkan demo ortamından alınmıştır.</li>
+  </ul>
+
+  <h3>İçindekiler</h3>
+  <ol class="toc">
+    <li><span>1</span>Sorun ve fırsat</li>
+    <li><span>2</span>Nasıl çalışır</li>
+    <li><span>3</span>Müşteri deneyimi</li>
+    <li><span>4</span>Bankanın kendi kuru</li>
+    <li><span>5</span>FX masası ve hedge</li>
+    <li><span>6</span>Backoffice ve yönetişim</li>
+    <li><span>7</span>White-label ve uygulama içinde uygulama</li>
+    <li><span>8</span>Güvenlik, uyum ve entegrasyon</li>
+    <li><span>9</span>Pilot yol haritası</li>
+    <li><span>10</span>Netleştirilecek konular</li>
+  </ol>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Neden</div>
+  <h2><span class="num">1</span>Sorun ve fırsat</h2>
+  <p class="lead">Bireysel müşteri döviz alırken ya da satarken bankanın alış-satış makasını öder ve fiyatı kendisi belirleyemez. Daha iyi fiyat arayan müşteri bankanın dışına, döviz bürolarına ve kayıt dışı kanallara yönelir.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Müşterinin bugünkü durumu</h4>
+      <ul>
+        <li>Banka kurundan işlem yapar ya da hiç yapmaz; "şu fiyattan satarım" diyemez.</li>
+        <li>Fiyat bekleyen müşteri sürekli uygulamayı kontrol etmek zorundadır.</li>
+        <li>Daha iyi fiyat için şubeye, döviz bürosuna veya tanıdığa gider.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Bankanın bugünkü durumu</h4>
+      <ul>
+        <li>Müşteri akışının bir kısmı banka dışına kayar; mevduat ve ilişki zayıflar.</li>
+        <li>Banka kurundan yapılan her işlem bankaya pozisyon ve hedge maliyeti getirir.</li>
+        <li>Bankaların döviz ekranları birbirine benzer; farklılaşma alanı dardır.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>p2pFX ile</h3>
+  <table>
+    <tr><th style="width:32mm">Paydaş</th><th>Kazanım</th></tr>
+    <tr><td><strong>Müşteri</strong></td><td>Kendi fiyatını yazar, emri gün sonuna, belirli bir tarihe veya iptal edene kadar bekletir. Tahtada anlık derinliği, son işlemleri ve bankanın kendi kurunu yan yana görür. Para kendi vadesiz hesabında kalır.</td></tr>
+    <tr><td><strong>Gelir</strong></td><td>Her eşleşmede iki taraftan komisyon; banka kurundan işlemde segment marjı. P2P eşleşmede kur riski yoktur.</td></tr>
+    <tr><td><strong>Hazine / FX masası</strong></td><td>Müşteriler arası akış kendi içinde karşılanır; banka sadece kendi kurundan yaptığı işlemlerin pozisyonunu yönetir. Pozisyon limitleri ve otomatik hedge kuralları ürünle birlikte gelir.</td></tr>
+    <tr><td><strong>Dijital kanal</strong></td><td>Müşteriyi uygulamaya tekrar tekrar getiren canlı bir ekran: tahta, emir defteri, bildirimler. Bankanın markasıyla, uygulamanın içinde.</td></tr>
+    <tr><td><strong>Uyum ve operasyon</strong></td><td>Karşı taraf her zaman banka; her işlem temel bankacılıkta bankanın döviz alım/satım kaydı ve dekontuyla oluşur. Tüm parametre değişiklikleri ve operasyon işlemleri silinemez denetim izinde.</td></tr>
+  </table>
+</section>
+
+<section class="chapter">
+  <div class="kicker">İşleyiş</div>
+  <h2><span class="num">2</span>Nasıl çalışır</h2>
+  <p class="lead">Türk mevzuatında döviz alım-satımını yalnızca yetkili kuruluşlar yapabilir. Bu nedenle müşteriler birbirine döviz satmaz: emirler eşleştiğinde banka her eşleşme için iki ayrı işlem yapar.</p>
+
+  <div class="flow">
+    <div class="node"><b>Satıcı müşteri</b><small>USD satış emri</small></div>
+    <div class="arrow"><i>→</i>Banka dövizi<br />satıcıdan alır</div>
+    <div class="node bank"><b>Banka</b><small>her eşleşmede karşı taraf</small></div>
+    <div class="arrow"><i>→</i>Banka dövizi<br />alıcıya satar</div>
+    <div class="node"><b>Alıcı müşteri</b><small>USD alış emri</small></div>
+  </div>
+
+  <p>İki işlem aynı miktar ve aynı eşleşme fiyatı üzerinden yapıldığı için bankanın döviz pozisyonu sıfır kalır. Banka eşleşme fiyatına alıcı tarafında komisyon ekler, satıcı tarafında komisyon düşer. Kambiyo vergisi bankanın döviz satışında, yani alıcıdan tahsil edilip vergi hesabına aktarılır; satıcıdan vergi alınmaz.</p>
+
+  <h3>Fiyat, komisyon ve kambiyo vergisi</h3>
+  <ul>
+    <li><strong>Kitap fiyatı:</strong> müşterinin yazdığı, emir defterinde görünen ve eşleşmede kullanılan fiyat (komisyonsuz).</li>
+    <li><strong>Banka komisyonu:</strong> parite ve taraf bazında "pip" cinsinden tanımlanır (istenirse fiyatın oranı olarak baz puan). USD/TRY için 1 pip = 0,0001 TL (ayarlanabilir); varsayılan 500 pip, yani döviz başına 0,05 TL.</li>
+    <li><strong>Kambiyo vergisi:</strong> taraf bazında oran olarak tanımlanır; matrah komisyon dahil tutar ya da kitap fiyatı olabilir. Kıymetli madenler için ayrı oran tutulur. Prototipte alıcıdan binde 2, satıcıdan 0 kullanılmıştır.</li>
+  </ul>
+
+  <p>Demo ortamında yapılan gerçek bir işlem: Ayşe 1.000 USD'yi 49,15'ten satışa çıkarıyor, Mehmet aynı fiyattan alıyor.</p>
+  <table>
+    <tr><th></th><th class="r">Alıcı (Mehmet)</th><th class="r">Satıcı (Ayşe)</th></tr>
+    <tr><td>Kitap fiyatı</td><td class="r">49,1500</td><td class="r">49,1500</td></tr>
+    <tr><td>Banka komisyonu (500 pip)</td><td class="r">+ 0,0500</td><td class="r">− 0,0500</td></tr>
+    <tr><td>Uygulanan kur</td><td class="r"><strong>49,2000</strong></td><td class="r"><strong>49,1000</strong></td></tr>
+    <tr><td>Komisyon dahil tutar</td><td class="r">49.200,00 TL</td><td class="r">49.100,00 TL</td></tr>
+    <tr><td>Kambiyo vergisi (binde 2, alıcıdan)</td><td class="r">+ 98,40 TL</td><td class="r">yok</td></tr>
+    <tr class="total"><td>Hesaptan çekilen / hesaba geçen</td><td class="r sell">49.298,40 TL çekilir</td><td class="r buy">49.100,00 TL geçer</td></tr>
+    <tr><td>Döviz</td><td class="r">+ 1.000 USD</td><td class="r">− 1.000 USD</td></tr>
+  </table>
+  <div class="callout"><p><strong>Bankanın bu eşleşmeden geliri:</strong> 1.000 × (0,05 + 0,05) = <strong>100,00 TL</strong> komisyon. Kambiyo vergisi yalnızca alıcıdan tahsil edilir (98,40 TL). Bankanın USD pozisyonu: +1.000 alış, −1.000 satış, net sıfır.</p></div>
+
+  <h3>Emir kuralları</h3>
+  <table>
+    <tr><th style="width:32mm">Kural</th><th>Açıklama</th></tr>
+    <tr><td>Emir tipi</td><td>Limit emir: belirli miktarı belirli fiyattan al veya sat. Parçalı gerçekleşme desteklenir.</td></tr>
+    <tr><td>Eşleştirme</td><td>Fiyat-zaman önceliği. İşlem, bekleyen emrin fiyatından gerçekleşir; daha yüksek fiyat yazan alıcı daha iyi fiyattan alabilir. Komisyon ve vergi gerçekleşen fiyat üzerinden yeniden hesaplanır.</td></tr>
+    <tr><td>Geçerlilik</td><td><strong>Gün sonu</strong>, <strong>tarihe kadar</strong> veya <strong>iptal edilene kadar</strong>. Banka hangilerinin açık olacağını ve azami süreyi (varsayılan 30 gün) belirler. Süresi dolan emir otomatik iptal edilir, blokesi kalkar.</td></tr>
+    <tr><td>Fiyat bandı</td><td>Referans kurdan ±%N uzaktaki emirler reddedilir (parite bazında, varsayılan %3).</td></tr>
+    <tr><td>Limitler</td><td>Segment bazında tek emir ve günlük toplam tutar; müşteri başına emir hızı sınırı.</td></tr>
+    <tr><td>İşlem saatleri</td><td>Günler, açılış/kapanış ve tatiller banka ayarıdır. Kapalıyken gelen emir reddedilir ya da açılışa kadar sıraya alınır.</td></tr>
+    <tr><td>Kendisiyle eşleşme</td><td>Bir müşterinin alış emri kendi satış emriyle eşleşmez.</td></tr>
+  </table>
+
+  <h3>Bakiye blokesi: bankanın tercihi</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>Bloke (<code>block</code>)</h4>
+      <p>Emir girildiği anda temel bankacılıkta bloke konur: satışta döviz miktarı, alışta en kötü durumdaki toplam TL (komisyon ve vergi dahil). Her gerçekleşmede bloke küçülür, iptal veya süre dolumunda kalkar. Eşleşen her emrin parası garantidir.</p>
+    </div>
+    <div class="card">
+      <h4>Bloke yok (<code>no_block</code>)</h4>
+      <p>Emir girişinde yalnızca bakiye kontrol edilir. Eşleşme anında iki tarafa bloke konmaya çalışılır; bakiyesi yetmeyen emir "yetersiz bakiye" ile iptal edilir, müşteriye bildirim gider, karşı emir defterdeki bir sonraki emirle eşleşmeye devam eder.</p>
+    </div>
+  </div>
+  <p style="margin-top:3mm">Her iki modda da emir, giriş kontrolünden geçmeden emir defterinde görünmez.</p>
+
+  <h3>Bir eşleşmenin hesaplara işlenmesi</h3>
+  <p>Her eşleşme, müşterilerin kendi vadesiz hesaplarında iki banka döviz işlemi olarak kaydedilir: önce banka satıcıdan dövizi alır, sonra alıcıya satar. Komisyon bankanın komisyon gelir hesabına, vergi vergi hesabına gider. Her adım tekrarlanabilirlik anahtarıyla (idempotency) yürür. Temel bankacılık geç cevap verirse işlem "başarısız" sayılmaz, önce sorgulanır; aynı kayıt iki kez atılmaz. Tamamlanamayan eşleşme hiçbir hesaba yarım kayıt bırakmadan operasyon kuyruğuna düşer ve backoffice'ten tekrar denenir.</p>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Müşteri</div>
+  <h2><span class="num">3</span>Müşteri deneyimi</h2>
+  <p class="lead">Müşteri bankasının uygulamasında "Döviz Pazarı"na dokunur; ayrı giriş yapmaz. Beş sekme vardır: Al-Sat, Tahta, Emirlerim, İşlemlerim, Hesaplarım. Açık her parite (döviz ile gram altın, gümüş ve platin) üstte sekme olarak görünür.</p>
+
+  <figure>
+    <img src="img/01-host.png" alt="Demo banka uygulaması" />
+    <figcaption><b>Demo ortamı.</b> Aynı bankanın uygulamasında iki müşteri yan yana: birinde verilen emir diğerinin emir defterinde anında görünür. Üstteki kart referans kuru ve tahtadaki en iyi alış/satışı, altındaki kart bankanın müşterinin segmentine özel canlı kurunu gösterir.</figcaption>
+  </figure>
+
+  <h3>Tahta: piyasayı görmek</h3>
+  <div class="phones">
+    <figure><img src="img/02-trade.png" alt="" /><figcaption><b>Al-Sat.</b> Referans kur, en iyi fiyatlar, banka kuru ve canlı emir defteri. Bir fiyata dokunmak emir formunu doldurur.</figcaption></figure>
+    <figure><img src="img/03-board.png" alt="" /><figcaption><b>Tahta.</b> Son işlem, günlük değişim, açılış/en yüksek/en düşük, hacim ve derinlik merdiveni.</figcaption></figure>
+    <figure><img src="img/03b-board-depth.png" alt="" /><figcaption><b>Derinlik grafiği ve son işlemler.</b> Müşteri kimliği gösterilmez; işlemler anonimdir.</figcaption></figure>
+  </div>
+
+  <h3>Emir vermek: şeffaf onay ekranı</h3>
+  <p>Müşteri miktar, fiyat ve geçerlilik seçer. Emir bileti, onaydan önce komisyonu, uygulanacak kuru, kambiyo vergisini ve hesaba geçecek ya da hesaptan çekilecek net tutarı açıkça gösterir. Onay ekranı bankanın karşı taraf olduğunu, bloke kuralını ve parçalı gerçekleşmeyi müşteriye tek tek söyler.</p>
+  <div class="phones">
+    <figure><img src="img/04-ticket-sell.png" alt="" /><figcaption><b>Satış emri.</b> 1.000 USD, 49,15 TL, gün sonuna kadar. İzin verilen fiyat aralığı ve kullanılabilir bakiye formda.</figcaption></figure>
+    <figure><img src="img/05-confirm-sell.png" alt="" /><figcaption><b>Satış onayı.</b> 49,15 − 0,05 = 49,10; satışta kambiyo vergisi yok, hesaba 49.100,00 TL geçer.</figcaption></figure>
+    <figure><img src="img/06-confirm-buy.png" alt="" /><figcaption><b>Alış onayı.</b> 49,15 + 0,05 = 49,20; 50 TL komisyon, 98,40 TL vergi, toplam 49.298,40 TL.</figcaption></figure>
+  </div>
+
+  <h3>İşlem sonrası: dekont ve hesaplar</h3>
+  <div class="phones">
+    <figure><img src="img/07-fills.png" alt="" /><figcaption><b>İşlemlerim.</b> Her gerçekleşmenin kuru, komisyonu, vergisi ve hesaba aktarılma durumu.</figcaption></figure>
+    <figure><img src="img/08-receipt.png" alt="" /><figcaption><b>Dekont.</b> Temel bankacılığın ürettiği döviz alış dekontu, dekont numarası ve referansıyla.</figcaption></figure>
+    <figure><img src="img/10-accounts.png" alt="" /><figcaption><b>Hesaplarım.</b> Müşterinin kendi vadesiz TL ve döviz hesapları: bakiye, bloke ve kullanılabilir tutar. Ayrı cüzdan yoktur.</figcaption></figure>
+  </div>
+  <p>Eşleşme gerçekleştiğinde iki müşterinin ekranı da anında güncellenir ve bildirim gösterilir; banka isterse aynı bildirimi kendi push kanalından da gönderir. Bekleyen emirler Emirlerim sekmesinden izlenir, güncellenir ve iptal edilir.</p>
+
+  <h3>Emri güncellemek</h3>
+  <p>Müşteri bekleyen emrini iptal edip yeniden girmeden, fiyatını ve miktarını Emirlerim'deki <strong>Güncelle</strong> ile değiştirir. Panel güncellemeyi piyasayla birlikte gösterir: referans kur, tahtadaki en iyi alış ve satış, bankanın kuru ve emrin kendi kademesi işaretli emir defteri. Bir kademeye dokunmak fiyatı doldurur.</p>
+  <ul>
+    <li><strong>Sıra:</strong> yalnızca miktar düşürülürse emir sıradaki yerini korur; fiyat değişirse ya da miktar artarsa o fiyattaki sıranın sonuna geçer ve karşı emirlerle hemen eşleşebilir.</li>
+    <li><strong>Fiyatlama:</strong> güncellenen emir bankanın o anki komisyon ve vergi oranlarıyla fiyatlanır; panel kalan miktar için yeni dökümü gösterir. Fiyat bandı, emir ve günlük limitler yeniden kontrol edilir.</li>
+    <li><strong>Bloke:</strong> alış fiyatı yükselirse bloke önce artırılır; bakiye yetmezse güncelleme reddedilir ve emir olduğu gibi kalır. Küçülen emirde fazla bloke iade edilir.</li>
+  </ul>
+  <div class="phones">
+    <figure><img src="img/12-orders.png" alt="" /><figcaption><b>Emirlerim.</b> Açık emrin yanında Güncelle ve İptal.</figcaption></figure>
+    <figure><img src="img/13-amend.png" alt="" /><figcaption><b>Piyasa ve emriniz.</b> Referans kur, en iyi fiyatlar, banka kuru; emrin kademesi işaretli.</figcaption></figure>
+    <figure><img src="img/13b-amend-detail.png" alt="" /><figcaption><b>Yeni fiyat.</b> Piyasaya yaklaşma uyarısı, sıra bilgisi ve güncel döküm.</figcaption></figure>
+  </div>
+</section>
+
+<section class="chapter">
+  <div class="kicker">İkinci likidite kaynağı</div>
+  <h2><span class="num">4</span>Bankanın kendi kuru</h2>
+  <p class="lead">Emir defterinin üstünde bankanın kendi kuru durur: likidite sağlayıcılarından gelen en iyi fiyat ve müşterinin segmentine özel marj. Karşı emir beklemek istemeyen müşteri bankayla anında işlem yapar.</p>
+
+  <div class="side">
+    <div>
+      <ul>
+        <li><strong>Segment bazlı fiyat:</strong> aynı anda bireysel müşteri (örnekte 1000 pip marj) ile premium müşteri (400 pip) farklı kur görür; LP fiyatı oynadıkça kur canlı değişir.</li>
+        <li><strong>Kesin fiyat:</strong> müşteri miktar girip "Fiyat al" der; vergi ve toplamla birlikte 10 saniye geçerli kesin fiyat alır. Geri sayım biterse yeniden fiyat ister.</li>
+        <li><strong>Anında işlem:</strong> onaylanınca tek bir döviz işlemi yapılır, dekont anında oluşur; işlem İşlemlerim'de "Banka" etiketiyle görünür.</li>
+        <li><strong>Daha iyi fiyat uyarısı:</strong> müşteri emir girerken bankanın kuru P2P fiyatından iyiyse bilet bunu söyler.</li>
+        <li><strong>Komisyon yok, marj var:</strong> bankayla işlemde ayrıca P2P komisyonu alınmaz; kazanç segment marjıdır. Kambiyo vergisi normal uygulanır.</li>
+      </ul>
+      <div class="callout"><p><strong>Tahtada banka emirleri:</strong> banka isterse emir defterine kendi hesabından kademeli emirler de koyar (örneğin banka kurunun %0,02 uzağından başlayan 5.000, 10.000 ve 20.000 USD). Kademe fiyatları komisyon düşülerek girilir; böylece müşteri komisyonla birlikte banka kurundan daha iyi bir fiyat bulamaz. Alınan kademe yeniden dolar ve işlem bankanın pozisyonuna yazılır.</p></div>
+    </div>
+    <figure><img src="img/09-bank-quote.png" alt="" /><figcaption><b>Bankayla işlem.</b> 1.000 USD için 10 saniye geçerli kesin fiyat, vergi ve toplam tutar.</figcaption></figure>
+  </div>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Banka içi</div>
+  <h2><span class="num">5</span>FX masası ve hedge</h2>
+  <p class="lead">Bankanın kendi kurundan yaptığı işlemler pozisyon yaratır; P2P eşleşmeler yaratmaz. FX masası ekranı bu pozisyonu, fiyat kaynaklarını ve hedge işlemlerini tek yerde gösterir ve saniyede bir yenilenir.</p>
+
+  <figure class="narrow">
+    <img src="img/21-dealer-prices.png" alt="" />
+    <figcaption><b>LP fiyatları ve segment kurları.</b> Her parite için üç LP'nin alış/satış fiyatı, en iyi fiyat (sarı) ve bu fiyattan türetilen, müşterilere yayınlanan segment kurları.</figcaption>
+  </figure>
+  <figure class="narrow">
+    <img src="img/22-dealer-positions.png" alt="" />
+    <figcaption><b>Pozisyonlar, müşteri işlemleri ve LP hedge işlemleri.</b> Döviz bazında pozisyon, ortalama maliyet, gerçekleşmemiş ve gerçekleşen kâr/zarar, marj geliri ve limit kullanımı. "Kapat" pozisyonu LP'lerle kapatır.</figcaption>
+  </figure>
+
+  <h3>Otomatik hedge kuralı</h3>
+  <ul>
+    <li><strong>Pozisyon limiti:</strong> döviz bazında tanımlanır. Bir işlem pozisyonu limitin ötesine taşırsa otomatik hedge devreye girer.</li>
+    <li><strong>Hedef seviye:</strong> hedge pozisyonu limitin belirli bir yüzdesine indirir (0 = sıfırla). Örnek: limit 100.000, hedef %50 ise 130.000 kısa pozisyon 80.000'lik alışla 50.000'e iner.</li>
+    <li><strong>Parça büyüklüğü ve dağıtım:</strong> büyük hedge, en büyük LP bileti boyutunda parçalara bölünür. Parçalar LP'lere en iyi fiyattan başlayarak sırayla ya da hepsi en iyi LP'ye gönderilir. Reddeden LP'nin parçası bir sonrakine gider; hiçbir LP'nin almadığı tutar açık pozisyon olarak görünür.</li>
+    <li><strong>Belirsiz sonuç:</strong> zaman aşımına uğrayan LP işlemi başarısız sayılmaz; referansıyla sorgulanır, başka LP'ye ya da yeni anahtarla tekrar gönderilmez.</li>
+  </ul>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Yönetişim</div>
+  <h2><span class="num">6</span>Backoffice ve yönetişim</h2>
+  <p class="lead">Platformdaki her iş parametresi bankanın elindedir; kodda sabit iş değeri yoktur. Değerler veritabanında versiyonlu tutulur ve değişiklik yeniden başlatma gerekmeden, o anda bütün sunuculara ve bağlı müşteri uygulamalarına yayılır.</p>
+
+  <figure>
+    <img src="img/30-bo-overview.png" alt="" />
+    <figcaption><b>Genel bakış.</b> Prototipin getirdiği varsayılanlar (vergi oranı, işlem saatleri, komisyon, segment marjları vb.) yetkili bir kullanıcı onaylayana ya da değiştirene kadar "banka onayı bekleyen" listesinde durur.</figcaption>
+  </figure>
+
+  <table>
+    <tr><th style="width:44mm">Bölüm</th><th>Neler yönetilir</th></tr>
+    <tr><td>Pariteler ve komisyon</td><td>LP'lerin fiyat verdiği tüm kurlar; tek tıkla parite ekleme (işleme kapalı gelir), işleme açma/kapatma; alıcı/satıcı komisyonu, pip değeri, fiyat adımı, en küçük emir, fiyat bandı</td></tr>
+    <tr><td>Kambiyo vergisi</td><td>Döviz ve kıymetli madenler için ayrı alıcı/satıcı oranları, matrah</td></tr>
+    <tr><td>Emir kuralları</td><td>Bloke politikası, yuvarlama, geçerlilik seçenekleri ve üst sınırı, emir hızı</td></tr>
+    <tr><td>İşlem saatleri ve limitler</td><td>Günler, saatler, tatiller; segment bazında tek emir ve günlük tutar, segment ekleme/kaldırma</td></tr>
+    <tr><td>Banka satırı, pozisyon ve hedge</td><td>Kotasyon süresi, LP fiyat tazeliği, tek işlem üst sınırı, segment marjları, pozisyon limitleri, otomatik hedge</td></tr>
+    <tr><td>Banka emirleri (tahta)</td><td>Bankanın tahtadaki kademeleri: uzaklık, kademe aralığı, tutarlar, yeniden fiyatlama eşiği</td></tr>
+    <tr><td>Marka</td><td>Banka ve ürün adı, renkler, köşe yuvarlaklığı</td></tr>
+  </table>
+
+  <div class="grid2">
+    <figure><img src="img/31-bo-pairs.png" alt="" /><figcaption><b>Pariteler.</b> 11 parite işleme açık; LP'nin fiyat verdiği diğer kurlar "Parite ekle" ile tanımlanır.</figcaption></figure>
+    <figure><img src="img/32-bo-tax.png" alt="" /><figcaption><b>Kambiyo vergisi.</b> Döviz ve kıymetli maden oranları ayrı; matrah seçilebilir.</figcaption></figure>
+    <figure><img src="img/35-bo-dealing.png" alt="" /><figcaption><b>Banka satırı fiyatlama.</b> Kotasyon süresi, LP fiyat tazeliği, tek işlem üst sınırları ve segment marjları.</figcaption></figure>
+    <figure><img src="img/33-bo-orders.png" alt="" /><figcaption><b>Emir kuralları.</b> Bloke politikası, yuvarlama, geçerlilik seçenekleri ve emir hızı.</figcaption></figure>
+  </div>
+
+  <h3>Denetlenebilir değişiklik akışı</h3>
+  <ol>
+    <li>Editör değeri değiştirir; değişen alanlar işaretlenir.</li>
+    <li>"Değişiklikleri gözden geçir": sistem yapılandırmayı doğrular ve önce/sonra farkını gösterir.</li>
+    <li>Gerekçe zorunludur. Kaydedilen değişiklik yeni bir versiyon olur; kim, ne zaman, neden ve neyi değiştirdi silinemez denetim izine yazılır.</li>
+    <li>Herhangi bir eski versiyona tek tıkla dönülebilir; dönüş de yeni bir versiyondur.</li>
+  </ol>
+  <p>Müşterinin onayladığı emir, onayladığı komisyon ve vergiyle işler: her emir hangi yapılandırma versiyonuyla girildiğini saklar.</p>
+
+  <div class="grid2">
+    <figure><img src="img/37-bo-history.png" alt="" /><figcaption><b>Değişiklik geçmişi.</b> Her versiyonun farkı ve "Bu versiyona dön".</figcaption></figure>
+    <figure><img src="img/38-bo-audit.png" alt="" /><figcaption><b>Denetim izi.</b> Girişler, parametre değişiklikleri, banka işlemleri, hedge ve settlement olayları (demo ortamındaki hata senaryoları dahil).</figcaption></figure>
+  </div>
+
+  <h3>Roller</h3>
+  <table>
+    <tr><th style="width:32mm">Rol</th><th>Yetki</th></tr>
+    <tr><td>İzleyici</td><td>Her şeyi görür, değiştiremez</td></tr>
+    <tr><td>Editör</td><td>Parametre değiştirir, onaylar, settlement tekrar dener, manuel hedge yapar</td></tr>
+    <tr><td>Yönetici</td><td>Editör yetkilerine ek olarak kullanıcı ekler, rol değiştirir, pasifleştirir, şifre sıfırlar</td></tr>
+  </table>
+  <p>Canlı ortamda backoffice girişinin yerini bankanın tek oturum açma (SSO) altyapısı alır.</p>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Gömme</div>
+  <h2><span class="num">7</span>White-label ve uygulama içinde uygulama</h2>
+  <p class="lead">p2pFX, bankanın mobil uygulamasında bir WebView içinde açılan web uygulamasıdır. Banka uygulaması hangi teknolojiyle yazılmış olursa olsun (iOS, Android, React Native) ince bir köprü katmanıyla entegre olur.</p>
+
+  <figure class="narrow">
+    <img src="img/11-brand-yildiz.png" alt="" />
+    <figcaption><b>Aynı yazılım, başka banka.</b> Demo ortamında marka "Yıldız Bank" seçildiğinde ürün adı, renkler ve banka kuru başlığı değişir; kod aynıdır. Her banka kendi kurulumunu ve kendi marka ayarlarını alır.</figcaption>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Markalama</h4>
+      <p>Banka ve ürün adı, logo, renkler, köşe yuvarlaklığı, yazı tipi, dil (varsayılan Türkçe) ve tüm ekran metinleri banka ayarıyla değiştirilebilir. Tema ayarları CSS değişkenlerine dönüşür; aynı derleme her bankanın uygulamasında yerli görünür.</p>
+    </div>
+    <div class="card">
+      <h4>Köprü protokolü</h4>
+      <p>Banka uygulaması ile gömülü uygulama arasında tanımlı mesajlar vardır: <code>init</code>, <code>refreshToken</code> (banka → p2pFX); <code>ready</code>, <code>close</code>, <code>tokenExpired</code>, <code>openBankScreen</code>, <code>analyticsEvent</code> (p2pFX → banka). Örneğin döviz hesabı olmayan müşteri tek dokunuşla bankanın hesap açma ekranına yönlendirilir.</p>
+    </div>
+  </div>
+
+  <h3>Giriş ve erişim güvenliği</h3>
+  <ol>
+    <li>Müşteri bankanın uygulamasında zaten oturum açmıştır; p2pFX için ayrı şifre yoktur.</li>
+    <li>Banka backend'i bu müşteri için kendi anahtarıyla imzalı (RS256), en fazla 60 saniye geçerli, tek kullanımlık bir açılış token'ı üretir. Token müşteri referansını, segmentini ve dilini taşır.</li>
+    <li>Banka uygulaması token'ı köprü üzerinden verir; p2pFX imzayı doğrular ve 30 dakikalık bir oturuma çevirir. Oturum yalnızca bellekte tutulur.</li>
+    <li>Uygulama tarayıcıda bir linkten açılırsa ("yalnızca bankanızın mobil uygulaması içinden açılabilir" der) ya da izin verilmeyen bir sayfa tarafından çerçevelenirse çalışmaz; sunucu <code>frame-ancestors</code> politikasıyla tarayıcının da reddetmesini sağlar. Banka imzalı token olmadan API hiçbir isteğe cevap vermez.</li>
+  </ol>
+  <p>Müşteri kimliği ve KYC bankada kalır. p2pFX'e yalnızca müşteri referansı ve segment gelir.</p>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Mimari</div>
+  <h2><span class="num">8</span>Güvenlik, uyum ve entegrasyon</h2>
+
+  <h3 style="margin-top:2mm">Kurulum modeli</h3>
+  <p>Tek kiracılı mimari: her banka kendi kurulumunu ve kendi veritabanını alır. Kurulum bankanın kendi veri merkezinde veya özel bulutunda, bankanın mevcut WAF, yük dengeleyici ve ağ katmanının arkasında çalışır.</p>
+
+  <h3>Güvenlik ve uyum özellikleri</h3>
+  <ul>
+    <li>Her eşleşme, dekontlarıyla birlikte bankanın iki döviz işlemi olarak kaydedilir; raporlama bankanın mevcut döviz süreçlerinden akar.</li>
+    <li>Emir girişinde ve her hesap kaydında tekrarlanabilirlik anahtarı: ağ hatası aynı işlemi iki kez yaptırmaz.</li>
+    <li>Belirsiz sonuçların güvenli yönetimi: temel bankacılık veya LP zaman aşımında işlem sorgulanır, sonuç netleşene kadar "inceleniyor" durumunda kalır.</li>
+    <li>Silinemez denetim izi ve versiyonlu yapılandırma; her gerçekleşme kullanılan yapılandırma versiyonunu saklar.</li>
+    <li>Emir hızı sınırı, kendisiyle eşleşme önleme, fiyat bandı, segment limitleri.</li>
+    <li>Para hesaplarında kayan nokta kullanılmaz: tutarlar kuruş, kurlar 8 haneli sabit noktalı tamsayı olarak tutulur.</li>
+    <li>Backoffice şifreleri scrypt ile saklanır; backoffice oturumu müşteri oturumundan ayrı anahtarla imzalanır; pasifleştirilen kullanıcının oturumu hemen düşer.</li>
+  </ul>
+
+  <h3>Bankanın entegre edeceği noktalar</h3>
+  <table>
+    <tr><th style="width:46mm">Arayüz</th><th>İşlevler</th></tr>
+    <tr><td>Temel bankacılık adaptörü</td><td>Müşteri hesap ve bakiyeleri; bloke koyma, değiştirme, kaldırma; döviz alış/satış kaydı ve dekont; referans kur; işlem sorgulama (belirsiz sonuç için); isteğe bağlı bildirim</td></tr>
+    <tr><td>Açılış token'ı</td><td>Banka backend'inin oturum açmış müşteri için imzalı token üretmesi (müşteri referansı, segment, dil)</td></tr>
+    <tr><td>Mobil uygulama köprüsü</td><td>iOS, Android veya React Native'de WebView açılışı ve köprü mesajları</td></tr>
+    <tr><td>Likidite sağlayıcıları</td><td>Bankanın LP'leri veya mevcut fiyat modülü, aynı adaptör arkasında (banka kuru ve hedge için)</td></tr>
+    <tr><td>Backoffice kimlik doğrulama</td><td>Bankanın SSO'su</td></tr>
+    <tr><td>Raporlama</td><td>Operasyon API'leri; banka isterse kendi veri ambarına aktarım</td></tr>
+  </table>
+
+  <h3>Teknoloji</h3>
+  <p>Uçtan uca TypeScript: sunucu Node.js ve Fastify, veritabanı PostgreSQL, müşteri arayüzü React. Eşleştirme motoru her parite için tek iş parçacıklı ve deterministiktir; denetlenmesi kolaydır ve bir bankanın bireysel müşteri hacmi için yeterlidir. Okuma ve canlı yayın için ek sunucular eklenebilir; veritabanı başına tek eşleştirme örneği çalışır. Sağlık uçları veritabanı, olay akışı, eşleştirme, LP fiyat tazeliği ve operasyon kuyruğunun durumunu raporlar.</p>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Sonraki adım</div>
+  <h2><span class="num">9</span>Pilot yol haritası</h2>
+  <p class="lead">Önerilen yol: önce bankanın kendi ortamında demo, ardından çalışan entegrasyonlarla kapalı bir müşteri grubu, sonra kademeli açılış. Süreler bankanın entegrasyon hazırlığına göre birlikte belirlenir.</p>
+
+  <div class="phase">
+    <div class="tag">Aşama 0<small>Keşif</small></div>
+    <div>
+      <h4>Demo ve parametre çalıştayı</h4>
+      <ul>
+        <li>Demo ortamının banka ekiplerine (dijital, hazine, operasyon, uyum, BT güvenliği) gösterilmesi.</li>
+        <li>Komisyon, kambiyo vergisi uygulaması, bloke politikası, işlem saatleri, segmentler ve limitler için banka kararları.</li>
+        <li>Pilot paritelerinin seçimi (öneri: USD/TRY, EUR/TRY ve gram altın).</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="tag">Aşama 1<small>Entegrasyon</small></div>
+    <div>
+      <h4>Bankanın test ortamında kurulum</h4>
+      <ul>
+        <li>Temel bankacılık adaptörünün bankanın servislerine bağlanması; bloke, döviz kaydı ve dekont akışlarının test edilmesi.</li>
+        <li>Açılış token'ı ve mobil uygulama köprüsü; marka ayarları.</li>
+        <li>Backoffice için SSO; banka kuru açılacaksa LP veya fiyat modülü bağlantısı.</li>
+        <li>Güvenlik testleri ve uyum incelemesi.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="tag">Aşama 2<small>Kapalı pilot</small></div>
+    <div>
+      <h4>Personel ve davetli müşteriler</h4>
+      <ul>
+        <li>Canlı ortamda, düşük limitlerle, seçili segmentte sınırlı bir müşteri grubu.</li>
+        <li>Operasyon kuyruğu, mutabakat ve dekontların günlük takibi.</li>
+        <li>İzlenecek göstergeler: eşleşme oranı, emirlerin gerçekleşme süresi, komisyon geliri, banka kuru ile P2P kullanım oranı, operasyon kuyruğuna düşen işlem sayısı, müşteri geri bildirimi.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="tag">Aşama 3<small>Yaygınlaştırma</small></div>
+    <div>
+      <h4>Kademeli açılış</h4>
+      <ul>
+        <li>Segmentlerin ve paritelerin kademeli açılması; limitlerin pilot verisine göre ayarlanması.</li>
+        <li>Bankanın kendi kuru ve tahtadaki banka emirlerinin açılması; pozisyon limitleri ve otomatik hedge.</li>
+        <li>İhtiyaca göre: fiyat alarmı, bankanın veri ambarına raporlama, ek pariteler.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="chapter">
+  <div class="kicker">Birlikte karar</div>
+  <h2><span class="num">10</span>Netleştirilecek konular</h2>
+  <p>Platform tüm oran ve kuralları ayar olarak tutar. Aşağıdaki konular her bankanın uyum, vergi ve hazine ekipleriyle netleştirilir.</p>
+  <table>
+    <tr><th>Konu</th><th>Prototipteki varsayım</th></tr>
+    <tr><td>Kambiyo vergisi oranı, satıcı tarafının vergilendirilmesi ve matrah</td><td>Alıcıdan binde 2, satıcıdan alınmaz; komisyon dahil tutar üzerinden</td></tr>
+    <tr><td>Komisyon seviyesi</td><td>Taraf başına 500 pip (USD başına 0,05 TL)</td></tr>
+    <tr><td>Bakiye blokesi</td><td>Emir girişinde bloke</td></tr>
+    <tr><td>İşlem saatleri ve tatiller</td><td>7/24</td></tr>
+    <tr><td>Segment marjları (banka kuru)</td><td>Bireysel 1000 pip, premium 400 pip</td></tr>
+    <tr><td>Dekont formatı ve raporlama</td><td>Temel bankacılığın döviz alış/satış dekontu</td></tr>
+    <tr><td>Canlı LP bağlantıları ve pozisyonun hazine sistemiyle mutabakatı</td><td>Simüle edilmiş üç LP; pozisyon platform veritabanından hesaplanır</td></tr>
+    <tr><td>Native SDK'lar</td><td>Köprü protokolü tanımlı; demo uygulama köprüyü simüle eder, native SDK'lar iskelet halindedir</td></tr>
+  </table>
+
+  <div class="callout">
+    <p><strong>Demo:</strong> Ürün tek komutla ayağa kalkar. İki müşteriyle canlı eşleşme, bankanın kendi kuru, FX masası ve backoffice yaklaşık on dakikalık bir sunumda gösterilir; senaryolu demo bloke kapalı modu ve temel bankacılık hatası durumunu da canlı gösterir.</p>
+  </div>
+
+  <p class="foot">Bu dokümandaki ekran görüntüleri 8 Ekim 2026'da p2pFX prototipinin demo ortamından alınmıştır. Kurlar, tutarlar ve pozisyonlar demo verisidir. "Demo Bank" ve "Yıldız Bank" örnek markalardır.</p>
+</section>
+
+</main>
+</body>
+</html>

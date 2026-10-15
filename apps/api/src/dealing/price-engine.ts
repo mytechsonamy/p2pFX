@@ -78,8 +78,17 @@ export class PriceEngine {
   private readonly lastTick = new Map<string, number>();
   /** Pairs announced as without a bank price, so 'lpOff' goes out once per outage. */
   private readonly off = new Map<string, { reason: PriceOffReason; nextOpen?: Date }>();
-  /** The last LP price per pair (raw, before any widening): the close price the bank quotes from while closed. */
-  private readonly lastLp = new Map<string, { bid: bigint; ask: bigint; at: Date }>();
+  /**
+   * The last LP price per pair (raw, before any widening) and the LPs behind it: the close price the bank quotes from
+   * while closed. A close read back from the price history after a restart has no LPs.
+   */
+  private readonly lastLp = new Map<string, { bid: bigint; ask: bigint; at: Date; lps?: string[] }>();
+  /**
+   * Pairs whose next live LP price is a reopening: the LP market was seen closed (whether or not an off-hours price was
+   * quoted). Cleared only by a live price, so a first refresh after the open that fails (spread guard, no price) does
+   * not lose the reopening.
+   */
+  private readonly awaitingOpen = new Set<string>();
   private readonly reopenListeners: ((pair: string) => void)[] = [];
   /** Core banking reference rates, read at most once a minute per pair. */
   private readonly reference = new Map<string, ReferenceState>();
@@ -136,6 +145,7 @@ export class PriceEngine {
     // Outside the LP market's hours LP prices are at best indicative: no bank price, and the customer is told when it opens.
     const kind = isMetal(findPair(c, pair)?.base ?? pair.slice(0, 3)) ? 'metal' : 'fx';
     if (!isLpMarketOpen(now, c.dealing.lpMarket, kind)) {
+      this.awaitingOpen.add(pair);
       const known = this.off.get(pair);
       const cached = this.latest.get(pair)?.offHours?.nextOpen ?? (known?.reason === 'MARKET_CLOSED' ? known.nextOpen : undefined);
       const nextOpen = cached && cached > now ? cached : nextLpMarketOpen(now, c.dealing.lpMarket, kind);
@@ -148,6 +158,10 @@ export class PriceEngine {
       // The close price may have been read from the database: a later refresh may have decided meanwhile.
       if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
       this.applied.set(pair, seq);
+      // A close set by an LP operations has switched off since (kill switch) is not quoted from.
+      if (close.lps?.some((lp) => lpDisabled(c.killSwitch.disabledLps, lp))) {
+        return this.unavailable(pair, 'MARKET_CLOSED', `the ${pair} close came from an LP that is switched off`, nextOpen);
+      }
       // The close price widened by extraSpreadBps of its mid on each side; the segment margin comes on top as usual.
       const widen = (((close.bid + close.ask) / 2n) * BigInt(Math.round(c.dealing.offHours.extraSpreadBps * 100))) / 1_000_000n;
       const agg: Aggregate = {
@@ -260,9 +274,10 @@ export class PriceEngine {
     // pair can overlap): neither its price nor the absence of one.
     if ((this.applied.get(pair) ?? 0) > seq) return this.superseded(pair);
     this.applied.set(pair, seq);
-    const reopened = !!this.latest.get(pair)?.offHours;
+    // The first live price after a close: the position can be hedged again.
+    const reopened = this.awaitingOpen.delete(pair);
     this.latest.set(pair, agg);
-    this.lastLp.set(pair, { bid: agg.bid, ask: agg.ask, at: sourceAt });
+    this.lastLp.set(pair, { bid: agg.bid, ask: agg.ask, at: sourceAt, lps: [agg.bidLp, agg.askLp] });
     if (reopened) for (const fn of this.reopenListeners) fn(pair);
     this.off.delete(pair);
     await this.events.publish({ type: 'lp', pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), at: now.toISOString() });
@@ -277,7 +292,7 @@ export class PriceEngine {
    * The last raw LP price before the close: from memory, or after a restart the last sampled tick (ticks hold only raw
    * LP prices, never off-hours ones).
    */
-  private async closePrice(pair: string) {
+  private async closePrice(pair: string): Promise<{ bid: bigint; ask: bigint; at: Date; lps?: string[] } | undefined> {
     const known = this.lastLp.get(pair);
     if (known) return known;
     const { rows } = await this.db.query('select bid, ask, at from price_ticks where pair = $1 order by at desc limit 1', [pair]);

@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p2pFX Banka Sunumu</title>
+<link rel="stylesheet" href="deck.css">
+</head>
+<body>
+
+<!-- 1 Kapak -->
+<section class="slide dark">
+  <div class="brandmark"><span>p2p</span>FX</div>
+  <h1>Müşterileriniz kendi kurunu belirlesin, banka karşı taraf olsun</h1>
+  <p class="sub">Mobil bankacılık uygulamanızın içinde, kendi markanızla çalışan müşteriler arası döviz ve kıymetli maden pazarı.</p>
+  <div class="hero">
+    <img src="../img/02-trade.png" alt="">
+    <img src="../img/05-confirm-sell.png" alt="">
+  </div>
+  <div class="meta">Banka sunumu · Ekim 2026<br>Ekran görüntüleri çalışan prototipten alınmıştır. Demo Bank ve Yıldız Bank örnek markalardır.</div>
+</section>
+
+<!-- 2 Sorun -->
+<section class="slide">
+  <div class="kicker">Sorun</div>
+  <h2>Müşteri bankanın makasını öder, fiyatı belirleyemez ve daha iyi fiyat için bankanın dışına çıkar</h2>
+  <div class="body">
+    <div class="col card tint">
+      <h3>Müşterinin bugünkü durumu</h3>
+      <ul>
+        <li>Banka kurundan işlem yapar ya da hiç yapmaz; "şu fiyattan satarım" diyemez.</li>
+        <li>Fiyat bekleyen müşteri uygulamayı sürekli kontrol etmek zorundadır.</li>
+        <li>Daha iyi fiyat için şubeye, döviz bürosuna veya tanıdığa gider.</li>
+      </ul>
+    </div>
+    <div class="col card tint">
+      <h3>Bankanın bugünkü durumu</h3>
+      <ul>
+        <li>Müşteri akışının bir kısmı banka dışına kayar; mevduat ve ilişki zayıflar.</li>
+        <li>Banka kurundan yapılan her işlem pozisyon ve hedge maliyeti getirir.</li>
+        <li>Bankaların döviz ekranları birbirine benzer; farklılaşma alanı dardır.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout" style="margin-top:22px"><b>p2pFX ile:</b> müşteri kendi fiyatını yazar ve emrini bekletir; banka akışı içeride tutar, iki taraftan komisyon kazanır ve bu eşleşmelerde kur riski almaz.</div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>2</span></div>
+</section>
+
+<!-- 3 Çözüm -->
+<section class="slide">
+  <div class="kicker">Çözüm</div>
+  <h2>Bankanın uygulamasına gömülen, white-label bir döviz pazarı</h2>
+  <p class="lead">Müşteri vadesiz döviz hesabındaki parayı kendi fiyatından satışa çıkarır, aynı bankanın başka bir müşterisi alır. Eşleşmede banka satıcıdan alır, alıcıya satar.</p>
+  <div class="body" style="gap:30px">
+    <div class="cards" style="flex:0 0 400px; gap:12px; align-content:start">
+      <div class="card accent" style="padding:12px 18px"><h3>Kur riski olmadan gelir</h3><p>Her eşleşmede alış ve satış tarafından ayrı komisyon. Banka iki işlemi aynı miktar ve fiyatla yapar; pozisyon oluşmaz.</p></div>
+      <div class="card accent" style="padding:12px 18px"><h3>Mevzuata uygun yapı</h3><p>Müşteriler birbiriyle işlem yapmaz; karşı taraf her zaman bankadır, kayıt ve dekont bankanın mevcut süreciyle.</p></div>
+      <div class="card accent" style="padding:12px 18px"><h3>Uygulamanın içinde</h3><p>Ayrı giriş, ayrı cüzdan yok; bankanın renkleriyle, müşterinin kendi vadesiz hesaplarıyla.</p></div>
+    </div>
+    <figure class="col"><img class="shot crop" src="../img/01-host.png" style="width:100%; height:350px" alt=""><figcaption><b>Çalışan prototip.</b> Birinin emri diğerinin defterinde anında görünür.</figcaption></figure>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>3</span></div>
+</section>
+
+<!-- 4 Nasıl çalışır -->
+<section class="slide">
+  <div class="kicker">İşleyiş</div>
+  <h2>Her eşleşme, bankanın iki ayrı döviz işlemidir</h2>
+  <p class="lead">Türk mevzuatında döviz alım-satımını yalnızca yetkili kuruluşlar yapabilir. Bu yüzden müşteriler birbirine döviz satmaz; banka her eşleşmenin iki tarafında da karşı taraftır.</p>
+  <div style="margin-top:44px" class="flow">
+    <div class="node"><b>Satıcı müşteri</b><span>USD satış emri</span></div>
+    <div class="arrow"><i>→</i>Banka dövizi<br>satıcıdan alır</div>
+    <div class="node bank"><b>Banka</b><span>her eşleşmede karşı taraf</span></div>
+    <div class="arrow"><i>→</i>Banka dövizi<br>alıcıya satar</div>
+    <div class="node"><b>Alıcı müşteri</b><span>USD alış emri</span></div>
+  </div>
+  <div class="cards c3" style="margin-top:44px">
+    <div class="card tint"><h3>Pozisyon sıfır</h3><p>İki işlem aynı miktar ve aynı eşleşme fiyatıyla yapılır: +1.000 alış, −1.000 satış.</p></div>
+    <div class="card tint"><h3>Komisyon iki taraftan</h3><p>Alıcıda kura eklenir, satıcıda düşülür. Parite ve taraf bazında pip cinsinden ayarlanır.</p></div>
+    <div class="card tint"><h3>Vergi ve dekont</h3><p>Kambiyo vergisi bankanın döviz satışında, yani alıcıdan alınır; satışta vergi yok. Dekont temel bankacılıkta oluşur.</p></div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>4</span></div>
+</section>
+
+<!-- 5 Gerçek işlem -->
+<section class="slide">
+  <div class="kicker">Gerçek bir işlem</div>
+  <h2>Ayşe 1.000 USD'yi 49,15'ten satıyor, Mehmet aynı fiyattan alıyor</h2>
+  <div class="body">
+    <div class="col" style="flex:1.25">
+      <table>
+        <tr><th></th><th class="r">Alıcı (Mehmet)</th><th class="r">Satıcı (Ayşe)</th></tr>
+        <tr><td>Kitap fiyatı</td><td class="r">49,1500</td><td class="r">49,1500</td></tr>
+        <tr><td>Banka komisyonu (500 pip)</td><td class="r buy">+ 0,0500</td><td class="r sell">− 0,0500</td></tr>
+        <tr><td>Uygulanan kur</td><td class="r">49,2000</td><td class="r">49,1000</td></tr>
+        <tr><td>Komisyon dahil tutar</td><td class="r">49.200,00 TL</td><td class="r">49.100,00 TL</td></tr>
+        <tr><td>Kambiyo vergisi (binde 2, alıcıdan)</td><td class="r">+ 98,40 TL</td><td class="r muted">yok</td></tr>
+        <tr class="total"><td>Hesaptan / hesaba</td><td class="r">49.298,40 TL çekilir</td><td class="r">49.100,00 TL geçer</td></tr>
+      </table>
+      <div class="callout" style="margin-top:22px"><b>Bankanın geliri:</b> 1.000 × (0,05 + 0,05) = <b>100,00 TL</b> komisyon. USD pozisyonu net sıfır. 98,40 TL kambiyo vergisi alıcıdan tahsil edilip vergi hesabına aktarılır.</div>
+    </div>
+    <div class="phones" style="gap:18px">
+      <figure style="width:200px"><img src="../img/05-confirm-sell.png" style="width:200px" alt=""><figcaption><b>Satış onayı.</b> Satışta vergi yok, net tutar onaydan önce görünür.</figcaption></figure>
+      <figure style="width:200px"><img src="../img/06-confirm-buy.png" style="width:200px" alt=""><figcaption><b>Alış onayı.</b> Komisyon, vergi, toplam.</figcaption></figure>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>5</span></div>
+</section>
+
+<!-- 6 Müşteri deneyimi: tahta -->
+<section class="slide">
+  <div class="kicker">Müşteri deneyimi</div>
+  <h2>Piyasayı görmek: canlı emir defteri, tahta ve derinlik</h2>
+  <div class="body" style="gap:30px">
+    <div class="col" style="flex:0 0 340px">
+      <ul>
+        <li>Beş sekme: <b>Al-Sat, Tahta, Emirlerim, İşlemlerim, Hesaplarım</b>.</li>
+        <li>Döviz ile gram altın, gümüş ve platin pariteleri üstte sekme olarak.</li>
+        <li>Referans kur, en iyi alış/satış ve bankanın segmente özel kuru yan yana.</li>
+        <li>Bir fiyata dokunmak emir formunu doldurur.</li>
+        <li>Son işlemler anonimdir; müşteri kimliği gösterilmez.</li>
+      </ul>
+    </div>
+    <div class="phones" style="flex:1">
+      <figure style="width:215px"><img src="../img/02-trade.png" style="width:215px" alt=""><figcaption><b>Al-Sat</b></figcaption></figure>
+      <figure style="width:215px"><img src="../img/03-board.png" style="width:215px" alt=""><figcaption><b>Tahta</b></figcaption></figure>
+      <figure style="width:215px"><img src="../img/03b-board-depth.png" style="width:215px" alt=""><figcaption><b>Derinlik grafiği</b></figcaption></figure>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>6</span></div>
+</section>
+
+<!-- 7 Emirden dekonta -->
+<section class="slide">
+  <div class="kicker">Müşteri deneyimi</div>
+  <h2>Emirden dekonta: şeffaf, kendi hesabında</h2>
+  <div class="body" style="gap:30px">
+    <div class="col" style="flex:0 0 340px">
+      <ul>
+        <li>Limit emir, parçalı gerçekleşme, <b>gün sonu / tarihe kadar / iptal edilene kadar</b> geçerlilik.</li>
+        <li>İzin verilen fiyat aralığı ve kullanılabilir bakiye formda.</li>
+        <li>Eşleşmede iki ekran da anında güncellenir, bildirim gider.</li>
+        <li>Dekont temel bankacılıktan, dekont numarası ve referansıyla.</li>
+        <li>Ayrı cüzdan yok: bakiye, bloke ve kullanılabilir tutar müşterinin vadesiz hesaplarında.</li>
+      </ul>
+    </div>
+    <div class="phones" style="flex:1">
+      <figure style="width:215px"><img src="../img/04-ticket-sell.png" style="width:215px" alt=""><figcaption><b>Emir bileti</b></figcaption></figure>
+      <figure style="width:215px"><img src="../img/08-receipt.png" style="width:215px" alt=""><figcaption><b>Dekont</b></figcaption></figure>
+      <figure style="width:215px"><img src="../img/10-accounts.png" style="width:215px" alt=""><figcaption><b>Hesaplarım</b></figcaption></figure>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>7</span></div>
+</section>
+
+<!-- 7b Emri güncellemek -->
+<section class="slide">
+  <div class="kicker">Müşteri deneyimi</div>
+  <h2>Emri güncellemek: tahtayı görerek fiyat ve miktar değiştirme</h2>
+  <div class="body" style="gap:30px">
+    <div class="col" style="flex:0 0 340px">
+      <ul>
+        <li>Emirlerim'de açık emrin yanında <b>Güncelle</b>: iptal edip yeniden girmeye gerek yok.</li>
+        <li>Panelde referans kur, en iyi alış/satış, bankanın kuru ve emrin kendi kademesi işaretli emir defteri.</li>
+        <li>Fiyatı piyasaya yaklaştırma ya da uzaklaştırma etkisi ve sıradaki yerin korunup korunmadığı açıkça yazar.</li>
+        <li>Yalnızca miktar düşerse sıra korunur; fiyat değişirse emir sıranın sonuna geçer ve hemen eşleşebilir.</li>
+        <li>Güncel komisyon ve vergiyle yeni döküm; bloke otomatik ayarlanır.</li>
+      </ul>
+    </div>
+    <div class="phones" style="flex:1">
+      <figure style="width:215px"><img src="../img/12-orders.png" style="width:215px" alt=""><figcaption><b>Emirlerim</b></figcaption></figure>
+      <figure style="width:215px"><img src="../img/13-amend.png" style="width:215px" alt=""><figcaption><b>Piyasa ve emriniz</b></figcaption></figure>
+      <figure style="width:215px"><img src="../img/13b-amend-detail.png" style="width:215px" alt=""><figcaption><b>Yeni fiyat ve döküm</b></figcaption></figure>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>8</span></div>
+</section>
+
+<!-- 8 Bankanın kendi kuru -->
+<section class="slide">
+  <div class="kicker">İkinci likidite kaynağı</div>
+  <h2>Karşı emir beklemeyen müşteri bankanın kuruyla anında işlem yapar</h2>
+  <div class="body" style="gap:30px">
+    <div class="col">
+      <div class="cards c2" style="gap:16px">
+        <div class="card tint"><h3>Segment bazlı fiyat</h3><p>LP'lerden gelen en iyi fiyat + segment marjı. Bireysel ve premium müşteri aynı anda farklı kur görür.</p></div>
+        <div class="card tint"><h3>10 saniyelik kesin fiyat</h3><p>Miktar girilir, vergi ve toplamla kesin fiyat alınır; geri sayım biterse yeniden istenir.</p></div>
+        <div class="card tint"><h3>Daha iyi fiyat uyarısı</h3><p>Banka kuru P2P fiyatından iyiyse emir bileti bunu müşteriye söyler.</p></div>
+        <div class="card tint"><h3>Tahtada banka emirleri</h3><p>Banka isterse emir defterine kendi hesabından kademeli emirler koyar; likidite ilk günden hazırdır.</p></div>
+      </div>
+    </div>
+    <div class="phones" style="flex:0 0 auto">
+      <figure style="width:215px"><img src="../img/09-bank-quote.png" style="width:215px" alt=""><figcaption><b>Bankayla işlem.</b> Kesin fiyat.</figcaption></figure>
+      <figure style="width:215px"><img src="../img/09b-bank-done.png" style="width:215px" alt=""><figcaption><b>Anında gerçekleşme.</b></figcaption></figure>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>9</span></div>
+</section>
+
+<!-- 9 FX masası -->
+<section class="slide night">
+  <div class="kicker">Banka içi</div>
+  <h2>FX masası: LP fiyatları, segment kurları, pozisyon ve otomatik hedge</h2>
+  <p class="lead">P2P eşleşmeler pozisyon yaratmaz; yalnızca banka kurundan yapılan işlemler yaratır ve hepsi tek ekranda yönetilir.</p>
+  <div style="margin-top:24px; display:flex; gap:18px">
+    <img class="shot" src="../img/21-dealer-prices.png" style="width:50%; height:300px; object-fit:cover; object-position:left top" alt="">
+    <img class="shot" src="../img/22-dealer-positions.png" style="width:50%; height:300px; object-fit:cover; object-position:left top" alt="">
+  </div>
+  <div class="cards c3" style="margin-top:22px; gap:16px">
+    <div style="font-size:15px"><b style="color:#fff">LP fiyatları ve segment kurları</b><br><span style="color:#94a3b8">Üç LP, en iyi fiyat ve müşterilere yayınlanan segment kurları; saniyede bir yenilenir.</span></div>
+    <div style="font-size:15px"><b style="color:#fff">Pozisyon ve kâr/zarar</b><br><span style="color:#94a3b8">Döviz bazında pozisyon, ortalama maliyet, gerçekleşen/gerçekleşmemiş K/Z, limit kullanımı.</span></div>
+    <div style="font-size:15px"><b style="color:#fff">Otomatik hedge</b><br><span style="color:#94a3b8">Limit aşılınca LP'lere parça parça; zaman aşımında işlem önce sorgulanır, tekrar gönderilmez.</span></div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>10</span></div>
+</section>
+
+<!-- 10 Backoffice -->
+<section class="slide">
+  <div class="kicker">Yönetişim</div>
+  <h2>Tüm iş kuralları bankanın elinde, kodda sabit iş değeri yok</h2>
+  <div class="body" style="gap:34px">
+    <div class="col" style="flex:0 0 400px">
+      <table class="small">
+        <tr><th>Bölüm</th><th>Neler yönetilir</th></tr>
+        <tr><td><b>Pariteler</b></td><td>İşleme açma/kapatma, komisyon, fiyat adımı, fiyat bandı</td></tr>
+        <tr><td><b>Vergi</b></td><td>Döviz ve kıymetli maden oranları, matrah</td></tr>
+        <tr><td><b>Emir kuralları</b></td><td>Bloke politikası, geçerlilik, emir hızı</td></tr>
+        <tr><td><b>Saat ve limit</b></td><td>Günler, tatiller; segment bazlı tutar limitleri</td></tr>
+        <tr><td><b>Banka kuru</b></td><td>Marjlar, kotasyon süresi, pozisyon ve hedge</td></tr>
+        <tr><td><b>Marka</b></td><td>Banka ve ürün adı, renkler</td></tr>
+      </table>
+      <p class="tiny" style="margin-top:12px">Değişiklikler yeniden başlatma olmadan tüm sunuculara ve açık müşteri ekranlarına yayılır.</p>
+    </div>
+    <div class="col"><img class="shot crop" src="../img/31-bo-pairs.png" style="width:100%; height:420px" alt=""><figcaption><b>Pariteler ve komisyon.</b> 11 parite işleme açık; LP'nin fiyat verdiği diğerleri tek tıkla eklenir.</figcaption></div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>11</span></div>
+</section>
+
+<!-- 11 Denetim -->
+<section class="slide">
+  <div class="kicker">Yönetişim</div>
+  <h2>Her değişiklik gerekçeli, versiyonlu ve geri alınabilir</h2>
+  <div class="body" style="gap:34px">
+    <div class="col"><img class="shot crop" src="../img/37-bo-history.png" style="width:100%; height:420px" alt=""><figcaption><b>Değişiklik geçmişi.</b> Her versiyonun önce/sonra farkı ve "Bu versiyona dön".</figcaption></div>
+    <div class="col" style="flex:0 0 400px">
+      <div class="num">1</div><p style="margin-top:-6px">Editör değeri değiştirir; sistem doğrular ve <b>önce/sonra farkını</b> gösterir.</p>
+      <div class="num">2</div><p style="margin-top:-6px"><b>Gerekçe zorunlu.</b> Kim, ne zaman, neden, neyi değiştirdi silinemez denetim izine yazılır.</p>
+      <div class="num">3</div><p style="margin-top:-6px">Eski versiyona tek tıkla dönülür; her emir girildiği versiyonun komisyon ve vergisiyle işler.</p>
+      <table class="small" style="margin-top:10px">
+        <tr><th>Rol</th><th>Yetki</th></tr>
+        <tr><td>İzleyici</td><td>Görür, değiştiremez</td></tr>
+        <tr><td>Editör</td><td>Parametre, onay, tekrar deneme, hedge</td></tr>
+        <tr><td>Yönetici</td><td>Ek olarak kullanıcı yönetimi</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>12</span></div>
+</section>
+
+<!-- 12 White label -->
+<section class="slide">
+  <div class="kicker">White-label</div>
+  <h2>Aynı yazılım, sizin markanız</h2>
+  <div class="body" style="gap:28px">
+    <figure class="col"><img class="shot" src="../img/01-host.png" style="width:100%" alt=""><figcaption><b>Demo Bank.</b> İki müşteri yan yana; birinin emri diğerinin defterinde anında görünür.</figcaption></figure>
+    <figure class="col"><img class="shot" src="../img/11-brand-yildiz.png" style="width:100%" alt=""><figcaption><b>Yıldız Bank.</b> Ürün adı, renkler ve banka kuru başlığı değişir; kod aynıdır.</figcaption></figure>
+  </div>
+  <p class="small muted" style="margin-top:14px">iOS, Android veya React Native uygulamada WebView + ince köprü katmanı. Döviz hesabı olmayan müşteri tek dokunuşla bankanın hesap açma ekranına yönlenir.</p>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>13</span></div>
+</section>
+
+<!-- 13 Güvenlik ve entegrasyon -->
+<section class="slide">
+  <div class="kicker">Güvenlik ve entegrasyon</div>
+  <h2>Bankanın kendi ortamında, bankanın kurallarıyla</h2>
+  <div class="body">
+    <div class="col">
+      <h3>Güvenlik ve uyum</h3>
+      <ul class="small">
+        <li><b>Tek kiracılı kurulum:</b> her banka kendi veri merkezinde veya özel bulutunda, kendi veritabanıyla.</li>
+        <li><b>Ayrı şifre yok:</b> banka imzalı (RS256), 60 sn geçerli, tek kullanımlık açılış token'ı. KYC bankada kalır.</li>
+        <li>Uygulama banka uygulaması dışında açılmaz; izinsiz çerçeveleme tarayıcı tarafından reddedilir.</li>
+        <li>Her kayıtta tekrarlanabilirlik anahtarı; zaman aşımında işlem sorgulanır, iki kez atılmaz.</li>
+        <li>Tutarlar kuruş, kurlar sabit noktalı tamsayı; kayan nokta yok.</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h3>Bankanın entegre edeceği noktalar</h3>
+      <table class="small">
+        <tr><td><b>Temel bankacılık</b></td><td>Hesap, bakiye, bloke, döviz kaydı, dekont, işlem sorgulama</td></tr>
+        <tr><td><b>Açılış token'ı</b></td><td>Müşteri referansı, segment, dil</td></tr>
+        <tr><td><b>Mobil köprü</b></td><td>WebView açılışı ve köprü mesajları</td></tr>
+        <tr><td><b>LP / fiyat modülü</b></td><td>Banka kuru ve hedge için</td></tr>
+        <tr><td><b>SSO</b></td><td>Backoffice kimlik doğrulama</td></tr>
+        <tr><td><b>Raporlama</b></td><td>Operasyon API'leri, veri ambarı aktarımı</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>14</span></div>
+</section>
+
+<!-- 14 Pilot -->
+<section class="slide">
+  <div class="kicker">Sonraki adım</div>
+  <h2>Pilot yol haritası</h2>
+  <p class="lead">Önce bankanın ortamında demo, sonra kapalı müşteri grubu, ardından kademeli açılış. Süreler entegrasyon hazırlığına göre birlikte belirlenir.</p>
+  <div class="phase" style="margin-top:40px">
+    <div><div class="bar"></div><div class="tag">Aşama 0</div><h3>Keşif</h3><ul>
+      <li>Dijital, hazine, operasyon, uyum ve BT güvenliğine demo</li>
+      <li>Komisyon, vergi, bloke, saat, segment ve limit kararları</li>
+      <li>Pilot pariteleri: USD/TRY, EUR/TRY, gram altın</li></ul></div>
+    <div><div class="bar"></div><div class="tag">Aşama 1</div><h3>Entegrasyon</h3><ul>
+      <li>Temel bankacılık adaptörü; bloke, kayıt, dekont testleri</li>
+      <li>Açılış token'ı, mobil köprü, marka</li>
+      <li>SSO, LP bağlantısı, güvenlik testleri</li></ul></div>
+    <div><div class="bar"></div><div class="tag">Aşama 2</div><h3>Kapalı pilot</h3><ul>
+      <li>Personel ve davetli müşteriler, düşük limitler</li>
+      <li>Operasyon kuyruğu ve mutabakatın günlük takibi</li>
+      <li>Eşleşme oranı, gelir, banka kuru / P2P oranı</li></ul></div>
+    <div><div class="bar"></div><div class="tag">Aşama 3</div><h3>Yaygınlaştırma</h3><ul>
+      <li>Segment ve paritelerin kademeli açılması</li>
+      <li>Banka kuru, tahtada banka emirleri, otomatik hedge</li>
+      <li>Fiyat alarmı, veri ambarı raporlaması</li></ul></div>
+  </div>
+  <div class="foot"><span class="logo"><b>p2p</b>FX</span><span>15</span></div>
+</section>
+
+<!-- 15 Kapanış -->
+<section class="slide dark">
+  <div class="brandmark"><span>p2p</span>FX</div>
+  <h1 style="margin-top:70px; max-width:900px">Canlı demo: on dakikada uçtan uca</h1>
+  <p class="sub" style="max-width:820px">İki müşteriyle canlı eşleşme, bankanın kendi kuru, FX masası ve backoffice. Senaryolu demo, bloke kapalı modu ve temel bankacılık hatası durumunu da canlı gösterir.</p>
+  <div style="margin-top:44px; display:grid; grid-template-columns: repeat(3, 1fr); gap:20px; max-width:1000px">
+    <div style="background:rgb(255 255 255 / .1); border-radius:14px; padding:20px"><b style="font-size:19px">Birlikte karar verilecekler</b><p style="font-size:15px; opacity:.85; margin:8px 0 0">Vergi uygulaması ve matrah, komisyon seviyesi, bloke politikası, işlem saatleri, segment marjları</p></div>
+    <div style="background:rgb(255 255 255 / .1); border-radius:14px; padding:20px"><b style="font-size:19px">Prototip varsayımları</b><p style="font-size:15px; opacity:.85; margin:8px 0 0">Alıcıdan binde 2 vergi (satışta yok), 500 pip komisyon, emir girişinde bloke, 7/24; hepsi backoffice ayarı</p></div>
+    <div style="background:rgb(255 255 255 / .1); border-radius:14px; padding:20px"><b style="font-size:19px">İlk adım</b><p style="font-size:15px; opacity:.85; margin:8px 0 0">Banka ekipleriyle demo ve parametre çalıştayı</p></div>
+  </div>
+  <div class="meta">Ekran görüntüleri 8 Ekim 2026'da prototipin demo ortamından alınmıştır. Kurlar, tutarlar ve pozisyonlar demo verisidir.</div>
+</section>
+
+</body>
+</html>

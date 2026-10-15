@@ -62,6 +62,8 @@ export class Api {
   quote = (q: { pair: string; side: Side; qty: string; price?: string; type?: OrderType }) => this.request<QuoteBreakdown>('POST', '/v1/orders/quote', q);
   orders = () => this.request<Order[]>('GET', '/v1/orders?limit=200');
   cancel = (id: string) => this.request<Order>('DELETE', `/v1/orders/${id}`);
+  /** New limit price and total quantity of an open order (absolute values: a repeat changes nothing). */
+  amend = (id: string, change: { price: string; qty: string }) => this.request<Order>('PATCH', `/v1/orders/${id}`, change);
   fills = () => this.request<Fill[]>('GET', '/v1/fills?limit=200');
   receipt = (fillId: string) => this.request<Receipt>('GET', `/v1/fills/${fillId}/receipt`);
   bankRates = (pair: string) => this.request<BankRates>('GET', `/v1/bank/rates/${pair}`);

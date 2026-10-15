@@ -1,5 +1,6 @@
 import { PRICE_SCALE, divRound, formatDecimal, formatPrice, parseDecimal, parsePrice } from '@p2p/shared';
 import {
+  beyondLimit,
   LiquidityError,
   LiquidityOutcomeUnknownError,
   type FindExecutionOptions,
@@ -84,8 +85,9 @@ const dec8 = (v: string) => parseDecimal(v, 8);
  *
  * Trading a synthetic quote is two LP trades: the cross first, then the dollars it bought or sold against
  * the quote currency. Each leg carries the clip's reference with /1 or /2, so both are idempotent and can be
- * looked up. If the cross traded and the funding leg was rejected by every LP, the outcome is reported as
- * unknown: the lookup (`findExecution`) completes the funding leg before it reports the trade.
+ * looked up. Once the cross has traded the outcome is never a rejection: if no LP took the funding leg, or a
+ * lookup of it failed, the outcome is reported as unknown and the lookup (`findExecution`) completes the funding
+ * leg before it reports the trade.
  */
 export class SyntheticLiquidity implements LiquidityAdapter {
   constructor(
@@ -93,6 +95,14 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     /** Currencies the bank's pairs are quoted in; the dollar crosses behind them are not offered as pairs. */
     private readonly quoteCurrencies: readonly string[] = ['TRY'],
   ) {}
+
+  /**
+   * Every LP that ever quoted a funding pair, and the LPs a funding leg was sent to (per reference): a lookup searches
+   * them even when they do not quote right now. In memory only: after a restart, an LP that took a funding leg and
+   * no longer quotes is not searched (the clip stays unknown until operations check it with that LP).
+   */
+  private readonly fundingLps = new Map<string, Set<string>>();
+  private readonly sentTo = new Map<string, Set<string>>();
 
   private route(pair: string) {
     const r = syntheticRoute(pair);
@@ -152,16 +162,21 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     const qty = dec8(req.qty);
     if (qty <= 0n) throw new LiquidityError('quantity must be positive');
     const traded = await this.inner.findExecution(crossLp, legRef(req.ref, 1));
-    if (traded) return this.complete(req, legs, traded);
+    if (traded) {
+      try {
+        return await this.complete(req, legs, traded, true);
+      } catch (err) {
+        throw asUnknown(err, `${route.cross} traded (${traded.tradeRef})`);
+      }
+    }
     // The limit is checked against the combination's current price: the legs themselves go without one, so
     // a cross that traded is never left without its funding leg because of a price move.
     if (req.limitRate) {
       const now = (await this.syntheticQuotes(route)).find((q) => q.lp === req.lp);
       if (!now) throw new LiquidityError(`${req.lp} does not quote ${req.pair}`);
-      const rate = parsePrice(req.side === 'BUY' ? now.ask : now.bid);
-      const limit = parsePrice(req.limitRate);
-      if (req.side === 'BUY' ? rate > limit : rate < limit) {
-        throw new LiquidityError(`${req.lp} price moved: ${formatPrice(rate)} is beyond the limit ${req.limitRate}`);
+      const rate = req.side === 'BUY' ? now.ask : now.bid;
+      if (beyondLimit(req.side, rate, req.limitRate)) {
+        throw new LiquidityError(`${req.lp} price moved: ${rate} is beyond the limit ${req.limitRate}`);
       }
     }
     let crossQty: bigint;
@@ -181,31 +196,63 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     if (crossQty <= 0n) throw new LiquidityError(`${req.qty} is below the smallest ${route.cross} trade`);
     // The cross: a rejection here means nothing traded.
     const cross = await this.inner.execute({ lp: crossLp, pair: route.cross, side: crossSide, qty: formatDecimal(crossQty, 8, 0), ref: legRef(req.ref, 1) });
-    return this.complete(req, legs, cross);
+    // From here on the cross has traded: whatever happens, the outcome is never a rejection.
+    try {
+      return await this.complete(req, legs, cross, false);
+    } catch (err) {
+      throw asUnknown(err, `${route.cross} traded (${cross.tradeRef})`);
+    }
   }
 
-  /** The funding leg for a traded cross: looked up first everywhere it may have gone, then sent. */
-  private async complete(req: LpExecutionRequest, legs: { route: SyntheticRoute; fundingLp: string }, cross: LpExecution, lookupOnly = false): Promise<LpExecution> {
+  /**
+   * The funding leg for a traded cross. `lookup`: the leg may have been sent before, so it is looked up first everywhere
+   * it may have gone (the funding LP, every LP that quoted the funding pair, every LP it was sent to); a lookup that
+   * fails makes the outcome unknown, nothing is sent then. Fresh from `execute`, the leg was never sent and goes
+   * straight out. It is sent to the funding LP first, then to the others by price, never to an LP switched off.
+   * `lookupOnly` (reconciliation): a leg not found is reported as unknown, never sent.
+   */
+  private async complete(
+    req: LpExecutionRequest,
+    legs: { route: SyntheticRoute; fundingLp: string },
+    cross: LpExecution,
+    lookup: boolean,
+    lookupOnly = false,
+  ): Promise<LpExecution> {
     const { route, fundingLp } = legs;
     const usd = route.inverted ? dec8(cross.qty) : qtyOf(divRound(dec8(cross.qty) * parsePrice(cross.rate), PRICE_SCALE, 'HALF_UP'), 2);
     const ref = legRef(req.ref, 2);
-    const others = await this.inner
+    const quoting = await this.inner
       .quotes(route.funding)
       .then((qs) => [...qs].sort((a, b) => (req.side === 'BUY' ? cmp(a.ask, b.ask) : cmp(b.bid, a.bid))).map((q) => q.lp))
       .catch(() => [] as string[]);
-    const candidates = [fundingLp, ...others.filter((lp) => lp !== fundingLp)];
+    const known = this.fundingLps.get(route.funding) ?? new Set<string>();
+    for (const lp of quoting) known.add(lp);
+    this.fundingLps.set(route.funding, known);
+    const sent = this.sentTo.get(ref) ?? new Set<string>();
+    this.sentTo.set(ref, sent);
+
     let funding: LpExecution | undefined;
-    for (const lp of candidates) {
-      funding = await this.inner.findExecution(lp, ref);
-      if (funding) break;
+    if (lookup) {
+      const searched = new Set([fundingLp, ...sent, ...known]);
+      for (const lp of searched) {
+        try {
+          funding = await this.inner.findExecution(lp, ref);
+        } catch (err) {
+          throw new LiquidityOutcomeUnknownError(`${route.funding} leg lookup at ${lp} failed: ${(err as Error).message}`);
+        }
+        if (funding) break;
+      }
     }
     if (!funding && lookupOnly) {
       throw new LiquidityOutcomeUnknownError(
-        `${route.cross} traded (${cross.tradeRef}) but its ${route.funding} leg was not found at ${candidates.join(', ')}; not completed (lookup only)`,
+        `${route.cross} traded (${cross.tradeRef}) but its ${route.funding} leg was not found; not completed (lookup only)`,
       );
     }
+    const excluded = new Set(req.excludeLps ?? []);
+    const candidates = [fundingLp, ...quoting.filter((lp) => lp !== fundingLp)].filter((lp) => !excluded.has(lp));
     for (const lp of candidates) {
       if (funding) break;
+      sent.add(lp);
       try {
         funding = await this.inner.execute({ lp, pair: route.funding, side: req.side, qty: formatDecimal(usd, 8, 0), ref });
       } catch (err) {
@@ -217,6 +264,7 @@ export class SyntheticLiquidity implements LiquidityAdapter {
         `${route.cross} traded (${cross.tradeRef}) but no LP took the ${route.funding} leg; it is retried on lookup`,
       );
     }
+    this.sentTo.delete(ref);
     // Quote currency per bank unit: the dollars' value in the quote currency over the quantity asked for.
     const quoteValue = dec8(funding.qty) * parsePrice(funding.rate);
     const rate = divRound(quoteValue, dec8(req.qty), 'HALF_UP');
@@ -228,22 +276,29 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     };
   }
 
-  /**
-   * A synthetic trade needs the original request (`request`) to be rebuilt: without it only direct trades
-   * can be found. A cross found without its funding leg has the funding leg completed here.
-   */
   /** A synthetic LP name joins its legs' LPs (`LP-A+LP-B`): complete only if every leg's LP is. */
   lookupComplete(lp: string) {
     return lp.split('+').every((l) => this.inner.lookupComplete?.(l) ?? true);
   }
+
+  /**
+   * A synthetic trade needs the original request (`request`) to be rebuilt: without it only direct trades
+   * can be found. A cross found without its funding leg has the funding leg completed here (unless `lookupOnly`).
+   */
 
   async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
     const legs = request ? this.legs(lp, request.pair) : undefined;
     if (!legs || !request) return this.inner.findExecution(lp, ref, undefined, options);
     const cross = await this.inner.findExecution(legs.crossLp, legRef(ref, 1), undefined, options);
     if (!cross) return undefined;
-    return this.complete({ ...request, lp, ref }, legs, cross, options?.lookupOnly);
+    return this.complete({ ...request, lp, ref }, legs, cross, true, options?.lookupOnly);
   }
+}
+
+/** After the cross traded, any failure is an unknown outcome (never a rejection that would send the clip elsewhere). */
+function asUnknown(err: unknown, context: string): Error {
+  if (err instanceof LiquidityOutcomeUnknownError) return err;
+  return new LiquidityOutcomeUnknownError(`${context}; the funding leg failed: ${(err as Error)?.message ?? String(err)}`);
 }
 
 const cmp = (a: string, b: string) => {

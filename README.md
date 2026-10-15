@@ -121,6 +121,7 @@ Customer (session bearer token from `POST /v1/session`):
 | `POST /v1/orders/quote` | full breakdown for the confirmation screen |
 | `POST /v1/orders` | place an order (`Idempotency-Key` header required) |
 | `GET /v1/orders`, `GET /v1/orders/:id`, `DELETE /v1/orders/:id` | list, read, cancel |
+| `PATCH /v1/orders/:id` | change a live or queued limit order: `{ price, qty }` (new total quantity). Lowering only the quantity keeps time priority; any other change goes to the back of the queue and matches at once. Priced at the current configuration; a block-mode hold grows first or the change is refused |
 | `GET /v1/fills`, `GET /v1/fills/:id/receipt` | fills from the customer's side, dekont |
 | `GET /v1/bank/rates/:pair` | the bank's buy/sell rate for the customer's segment (LP price + segment margin) |
 | `POST /v1/bank/quotes`, `POST /v1/bank/deals` | firm quote with expiry, then instant deal with the bank |

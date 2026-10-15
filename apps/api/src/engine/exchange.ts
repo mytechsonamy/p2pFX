@@ -1,6 +1,6 @@
 import { formatDecimal, formatPrice, parsePrice, findPair, isMarketOpen, type Side } from '@p2p/shared';
 import { OrderBook, matchIncoming, type BookOrder, type MatchCandidate, type MatchDecision } from '@p2p/matching';
-import { fromSnapshot, pricingParams, priceSide, toSnapshot, withoutCommission } from '@p2p/pricing';
+import { fromSnapshot, pricingParams, priceSide, toSnapshot, withoutCommission, type PricingSnapshot } from '@p2p/pricing';
 import { CoreBankingError, type CoreBankingAdapter } from '@p2p/core-adapter';
 import { hostname } from 'node:os';
 import type { FastifyBaseLogger } from 'fastify';
@@ -48,6 +48,23 @@ class PairWorker {
     return next;
   }
 }
+
+/** A customer's change to their order, validated by order entry. */
+export interface OrderAmendment {
+  /** New limit price (PRICE_SCALE units). */
+  price: bigint;
+  /** New total quantity (filled + remaining), base minor units. */
+  qty: bigint;
+  /** Pricing of the configuration in force now: the customer confirmed it with the change. */
+  pricing: PricingSnapshot;
+  configVersion: number;
+  /** New qty × price, quote minor units. */
+  notional: bigint;
+  /** Re-checks the customer's daily limit inside the transaction that changes the order. */
+  reserve: (client: pg.PoolClient, current: OrderRow) => Promise<void>;
+}
+
+const unprocessableQty = (message: string) => new ApiError(422, 'INVALID_QTY', message);
 
 export interface MatchSummary {
   fills: string[];
@@ -246,6 +263,100 @@ export class Exchange {
       w.resting.delete(orderId);
       const updated = await this.closeOrder(current, reason === 'EXPIRED' ? 'EXPIRED' : 'CANCELLED', reason);
       await this.publishBook(w);
+      return updated;
+    });
+  }
+
+  /**
+   * Changes a customer's live or queued limit order (price and/or total quantity) in one sequencer step, so the order is
+   * never out of the book without its replacement. Keeping the price and lowering the quantity keeps time priority;
+   * any other change takes a new sequence number and is matched again at once, like a new arrival.
+   *
+   * A block-mode hold that must grow is grown first: if core banking refuses, nothing changes. The new pricing (the
+   * configuration in force now) and the daily limit are written in the transaction that changes the order.
+   */
+  async amend(orderId: string, change: OrderAmendment): Promise<OrderRow> {
+    if (!this.active) throw new ApiError(503, 'MATCHING_UNAVAILABLE', 'matching is not running on this instance');
+    const row = await loadOrder(this.db, orderId);
+    if (!row) throw new ApiError(404, 'NOT_FOUND', 'order not found');
+    const w = this.worker(row.pair);
+    return w.run(async () => {
+      this.assertLeader();
+      const current = (await loadOrder(this.db, orderId))!;
+      if (!['OPEN', 'PARTIAL', 'QUEUED'].includes(current.status)) throw new ApiError(409, 'ORDER_NOT_AMENDABLE', `order is ${current.status}`);
+      const oldPrice = parsePrice(current.book_price);
+      if (oldPrice === change.price && current.qty === change.qty) return current;
+      if (change.qty <= current.filled_qty) {
+        throw unprocessableQty(`quantity must be more than the ${formatDecimal(current.filled_qty, current.pricing.baseDecimals)} already filled`);
+      }
+      const keepPriority = change.price === oldPrice && change.qty <= current.qty;
+      const amended: OrderRow = { ...current, book_price: formatPrice(change.price, 8), qty: change.qty, pricing: change.pricing };
+
+      // Block mode: the hold must cover the amended remainder (and fills still owed) before the order changes.
+      let grown: { holdId: string; back: bigint } | undefined;
+      if (current.hold_id) {
+        if (await this.inDoubt(current)) {
+          throw new ApiError(409, 'AMEND_UNAVAILABLE', 'a trade of this order is still being confirmed; try again shortly');
+        }
+        const before = await this.holdTarget(current);
+        const after = await this.holdTarget(amended);
+        if (after > before) {
+          try {
+            await this.core.adjustHold(current.hold_id, after);
+          } catch (err) {
+            if (err instanceof CoreBankingError && err.code === 'INSUFFICIENT_FUNDS') {
+              throw new ApiError(422, 'INSUFFICIENT_BALANCE', 'insufficient balance for the amended order');
+            }
+            // The hold may or may not have grown: a hold task puts it back to what the unchanged order needs.
+            await this.holdTask(current.hold_id, 'ADJUST', before, err);
+            throw new ApiError(503, 'CORE_UNAVAILABLE', 'core banking unavailable');
+          }
+          await this.supersede(current.hold_id, 'ADJUST');
+          grown = { holdId: current.hold_id, back: before };
+        }
+      }
+
+      try {
+        await tx(this.db, async (client) => {
+          await this.fence(client);
+          await change.reserve(client, current);
+          const res = await client.query(
+            `update orders set book_price = $2, qty = $3, pricing = $4, config_version = $5, notional = $6, amended_at = now(), updated_at = now(),
+                seq = case when $7 then seq else nextval(pg_get_serial_sequence('orders', 'seq')) end
+              where id = $1 and status in ('OPEN', 'PARTIAL', 'QUEUED') and filled_qty = $8`,
+            [orderId, formatPrice(change.price, 8), change.qty, change.pricing, change.configVersion, change.notional, keepPriority, current.filled_qty],
+          );
+          if (res.rowCount !== 1) throw new ApiError(409, 'ORDER_CHANGED', 'the order changed meanwhile; review it and try again');
+          await appendEvent(client, {
+            type: 'OrderAmended', aggregateType: 'order', aggregateId: orderId, pair: current.pair, correlationId: current.idempotency_key,
+            configVersion: change.configVersion,
+            payload: {
+              from: { price: formatPrice(oldPrice), qty: current.qty.toString() },
+              to: { price: formatPrice(change.price), qty: change.qty.toString() },
+              keepPriority,
+            },
+          });
+        });
+      } catch (err) {
+        if (grown) await this.adjustHold(grown.holdId, grown.back);
+        throw err;
+      }
+
+      w.book.remove(orderId);
+      w.resting.delete(orderId);
+      let updated = (await loadOrder(this.db, orderId))!;
+      if (LIVE_STATUSES.includes(updated.status)) {
+        if (keepPriority) this.rest(w, updated);
+        else await this.process(w, orderId, false);
+        updated = (await loadOrder(this.db, orderId))!;
+      }
+      // A smaller order gives back what its hold no longer needs (fills above already kept it in step).
+      if (updated.hold_id && !grown) await this.maintainHold(updated);
+      await audit(this.db, updated.customer_ref, 'order.amended', {
+        orderId, from: { price: formatPrice(oldPrice), qty: current.qty.toString() }, to: { price: formatPrice(change.price), qty: change.qty.toString() }, keepPriority,
+      });
+      await this.publishBook(w);
+      await this.publishOrder(updated).catch((err) => this.log.warn({ err }, 'order publish failed'));
       return updated;
     });
   }

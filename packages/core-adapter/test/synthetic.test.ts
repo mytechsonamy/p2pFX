@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatPrice } from '@p2p/shared';
 import {
+  beyondLimit,
   LiquidityError,
   LiquidityOutcomeUnknownError,
   MockLiquidity,
@@ -131,5 +132,74 @@ describe('synthetic crosses', () => {
     expect(inner.executionCount).toBe(2);
     // A direct trade beyond its limit is rejected by the LP itself.
     await expect(lp.execute({ lp: 'LP-A', pair: 'USDTRY', side: 'SELL', qty: '10', ref: 'l3', limitRate: '50' })).rejects.toBeInstanceOf(LiquidityError);
+  });
+
+  it('never reports a rejection once the cross traded, even when the funding lookup fails', async () => {
+    const { inner, lp } = setup();
+    const findExecution = inner.findExecution.bind(inner);
+    inner.findExecution = async (l, ref) => {
+      if (ref.endsWith('/2')) throw new LiquidityError('lookup failed: 429');
+      return findExecution(l, ref);
+    };
+    // The cross traded on an earlier attempt; the retry looks the funding leg up and the lookup fails.
+    await inner.execute({ lp: 'LP-A', pair: 'XAUUSD', side: 'BUY', qty: '0.322', ref: 'u1/1' });
+    const err = await lp.execute({ lp: 'LP-A+LP-A', pair: 'XAUTRY', side: 'BUY', qty: '10', ref: 'u1' }).catch((e) => e);
+    expect(err).toBeInstanceOf(LiquidityOutcomeUnknownError);
+    expect(inner.executionCount).toBe(1);
+    // Any other failure after the cross is unknown too.
+    const execute = inner.execute.bind(inner);
+    inner.execute = async (r) => {
+      if (r.pair === 'USDTRY') throw new TypeError('boom');
+      return execute(r);
+    };
+    await expect(lp.execute({ lp: 'LP-A+LP-A', pair: 'XAUTRY', side: 'BUY', qty: '10', ref: 'u2' })).rejects.toBeInstanceOf(LiquidityOutcomeUnknownError);
+  });
+
+  it('never sends the funding leg to an LP the bank switched off', async () => {
+    const { inner, lp } = setup();
+    inner.rejecting.add('LP-B');
+    await lp.execute({ lp: 'LP-A+LP-B', pair: 'XAUTRY', side: 'SELL', qty: '50', ref: 'k1', excludeLps: ['LP-A'] });
+    expect(await inner.findExecution('LP-A', 'k1/2')).toBeUndefined();
+    expect(await inner.findExecution('LP-C', 'k1/2')).toMatchObject({ pair: 'USDTRY' });
+  });
+
+  it('looks the funding leg up at an LP it was sent to even when that LP no longer quotes', async () => {
+    const { inner, lp } = setup();
+    const req = { pair: 'XAUTRY', side: 'BUY' as const, qty: '10' };
+    // Only LP-B takes the funding leg, and its answer is lost.
+    const execute = inner.execute.bind(inner);
+    inner.execute = async (r) => {
+      if (r.pair === 'USDTRY' && r.lp !== 'LP-B') throw new LiquidityError('rejected');
+      return execute(r);
+    };
+    inner.losingResponses.add('LP-B');
+    await expect(lp.execute({ ...req, lp: 'LP-A+LP-C', ref: 'x1' })).rejects.toBeInstanceOf(LiquidityOutcomeUnknownError);
+    inner.losingResponses.clear();
+    inner.execute = execute;
+    const before = inner.executionCount;
+    // LP-B stops quoting USDTRY; the lookup still finds its funding leg instead of sending it again elsewhere.
+    const quotes = inner.quotes.bind(inner);
+    inner.quotes = async (pair) => (await quotes(pair)).filter((q) => !(pair === 'USDTRY' && q.lp === 'LP-B'));
+    expect(await lp.findExecution('LP-A+LP-C', 'x1', req)).toMatchObject({ ref: 'x1', tradeRef: expect.stringContaining('LP-B') });
+    expect(inner.executionCount).toBe(before);
+  });
+
+  it('sends a fresh funding leg without looking it up first', async () => {
+    const { inner, lp } = setup();
+    let lookups = 0;
+    const findExecution = inner.findExecution.bind(inner);
+    inner.findExecution = async (l, ref) => {
+      if (ref.endsWith('/2')) lookups++;
+      return findExecution(l, ref);
+    };
+    await lp.execute({ lp: 'LP-A+LP-B', pair: 'XAUTRY', side: 'BUY', qty: '10', ref: 'f1' });
+    expect(lookups).toBe(0);
+  });
+
+  it('compares limits exactly', () => {
+    expect(beyondLimit('BUY', '49.15000001', '49.15')).toBe(true);
+    expect(beyondLimit('BUY', '49.15', '49.15')).toBe(false);
+    expect(beyondLimit('SELL', '49.14999999', '49.15')).toBe(true);
+    expect(beyondLimit('SELL', '0.30000000', '0.3')).toBe(false);
   });
 });
