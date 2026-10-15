@@ -104,6 +104,9 @@ describe('synthetic crosses', () => {
     expect(await lp.findExecution('LP-A+LP-B', 'nope', req)).toBeUndefined();
     inner.execute = execute;
     inner.rejecting.clear();
+    // A lookup-only caller (reconciliation) never completes the trade: it is told the outcome is open.
+    await expect(lp.findExecution('LP-A+LP-B', 'h4', req, { lookupOnly: true })).rejects.toBeInstanceOf(LiquidityOutcomeUnknownError);
+    expect(inner.executionCount).toBe(1);
     const found = await lp.findExecution('LP-A+LP-B', 'h4', req);
     expect(found).toMatchObject({ lp: 'LP-A+LP-B', pair: 'XAUTRY', qty: '10', ref: 'h4' });
     expect(await lp.findExecution('LP-A+LP-B', 'h4', req)).toEqual(found);

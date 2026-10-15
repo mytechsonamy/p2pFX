@@ -2,6 +2,7 @@ import { PRICE_SCALE, divRound, formatDecimal, formatPrice, parseDecimal, parseP
 import {
   LiquidityError,
   LiquidityOutcomeUnknownError,
+  type FindExecutionOptions,
   type LiquidityAdapter,
   type LpExecution,
   type LpExecutionRequest,
@@ -184,7 +185,7 @@ export class SyntheticLiquidity implements LiquidityAdapter {
   }
 
   /** The funding leg for a traded cross: looked up first everywhere it may have gone, then sent. */
-  private async complete(req: LpExecutionRequest, legs: { route: SyntheticRoute; fundingLp: string }, cross: LpExecution): Promise<LpExecution> {
+  private async complete(req: LpExecutionRequest, legs: { route: SyntheticRoute; fundingLp: string }, cross: LpExecution, lookupOnly = false): Promise<LpExecution> {
     const { route, fundingLp } = legs;
     const usd = route.inverted ? dec8(cross.qty) : qtyOf(divRound(dec8(cross.qty) * parsePrice(cross.rate), PRICE_SCALE, 'HALF_UP'), 2);
     const ref = legRef(req.ref, 2);
@@ -197,6 +198,11 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     for (const lp of candidates) {
       funding = await this.inner.findExecution(lp, ref);
       if (funding) break;
+    }
+    if (!funding && lookupOnly) {
+      throw new LiquidityOutcomeUnknownError(
+        `${route.cross} traded (${cross.tradeRef}) but its ${route.funding} leg was not found at ${candidates.join(', ')}; not completed (lookup only)`,
+      );
     }
     for (const lp of candidates) {
       if (funding) break;
@@ -226,12 +232,12 @@ export class SyntheticLiquidity implements LiquidityAdapter {
    * A synthetic trade needs the original request (`request`) to be rebuilt: without it only direct trades
    * can be found. A cross found without its funding leg has the funding leg completed here.
    */
-  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
+  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
     const legs = request ? this.legs(lp, request.pair) : undefined;
-    if (!legs || !request) return this.inner.findExecution(lp, ref);
-    const cross = await this.inner.findExecution(legs.crossLp, legRef(ref, 1));
+    if (!legs || !request) return this.inner.findExecution(lp, ref, undefined, options);
+    const cross = await this.inner.findExecution(legs.crossLp, legRef(ref, 1), undefined, options);
     if (!cross) return undefined;
-    return this.complete({ ...request, lp, ref }, legs, cross);
+    return this.complete({ ...request, lp, ref }, legs, cross, options?.lookupOnly);
   }
 }
 

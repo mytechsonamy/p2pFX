@@ -1,4 +1,4 @@
-import { LiquidityError, type LiquidityAdapter, type LpExecution, type LpExecutionRequest, type LpQuote } from './liquidity.js';
+import { LiquidityError, type FindExecutionOptions, type LiquidityAdapter, type LpExecution, type LpExecutionRequest, type LpQuote } from './liquidity.js';
 
 /**
  * Several LP connections as one (a bank's own price module next to a direct Saxo or IBKR connection): pairs
@@ -42,14 +42,14 @@ export class CompositeLiquidity implements LiquidityAdapter {
     return source.execute(req);
   }
 
-  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
+  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
     const source = await this.source(lp, request?.pair);
-    if (source) return source.findExecution(lp, ref, request);
+    if (source) return source.findExecution(lp, ref, request, options);
     // Unknown LP name and nothing to learn it from: ask every source. "Not found" only if every source answered.
     let failure: unknown;
     for (const s of this.sources) {
       try {
-        const found = await s.findExecution(lp, ref, request);
+        const found = await s.findExecution(lp, ref, request, options);
         if (found) return found;
       } catch (err) {
         failure = err;

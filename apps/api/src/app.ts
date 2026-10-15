@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
-import type { CoreBankingAdapter, LiquidityAdapter } from '@p2p/core-adapter';
+import { CoreBankingError, type CoreBankingAdapter, type LiquidityAdapter } from '@p2p/core-adapter';
 import { formatPrice, parsePrice, type BankConfig } from '@p2p/shared';
 import { createPool, type Db } from './db/pool.js';
 import { migrate } from './db/migrate.js';
@@ -122,8 +122,15 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   await auth.bootstrapAdmin(opts.opsAdminPassword);
   const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log, async (pair) => {
-    const r = await opts.core.getReferenceRate(pair);
-    return parsePrice(r.rate);
+    try {
+      const r = await opts.core.getReferenceRate(pair);
+      const asOf = r.asOf ? new Date(r.asOf) : undefined;
+      return { rate: parsePrice(r.rate), asOf: asOf && !isNaN(asOf.getTime()) ? asOf : undefined };
+    } catch (err) {
+      // A pair core banking has no reference rate for (a synthetic cross) is not an error: the check is skipped.
+      if (err instanceof CoreBankingError && err.code === 'NOT_FOUND') return undefined;
+      throw err;
+    }
   });
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
   // What the bank took on while the LP market was closed is hedged as soon as it opens.

@@ -131,6 +131,11 @@ const PriceSanitySchema = z.object({
   maxLpDeviationBps: z.number().min(1).max(10_000),
   /** The aggregate mid may be at most this far from the core banking reference rate (bps); beyond it, no bank price. */
   maxReferenceDeviationBps: z.number().min(1).max(10_000),
+  /**
+   * A reference rate older than this (by its own asOf) is not compared with. A core that publishes a daily board rate
+   * rather than a live one thereby switches the reference check off instead of halting pricing on an intraday move.
+   */
+  referenceMaxAgeMinutes: z.number().int().min(1).max(7 * 24 * 60).default(15),
   /** A move of the aggregate mid larger than this (bps) from the last accepted price is held back until it is confirmed. */
   maxJumpBps: z.number().min(1).max(10_000),
   /** How long a jumped price must hold (within maxJumpBps of itself) before it is accepted as the new level. */
@@ -142,6 +147,7 @@ export const DEFAULT_PRICE_SANITY: PriceSanityConfig = {
   enabled: true,
   maxLpDeviationBps: 50,
   maxReferenceDeviationBps: 300,
+  referenceMaxAgeMinutes: 15,
   maxJumpBps: 100,
   jumpConfirmMs: 3000,
 };

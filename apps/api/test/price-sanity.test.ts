@@ -84,14 +84,79 @@ describe('price sanity', () => {
     expect(h.ctx.prices.offState('USDTRY')).toBeUndefined();
   });
 
-  it('quotes as before when core banking has no reference rate for the pair', async () => {
+  it('quotes as before when core banking has no reference rate for the pair, asking at most once a minute', async () => {
     h = await startHarness();
     const ayse = await h.login('ayse');
     const core = h.bank as unknown as { rates: Map<string, unknown> };
     core.rates.delete('USDTRY');
-    quote([['51.14', '51.16']]);
+    let calls = 0;
+    const read = h.bank.getReferenceRate.bind(h.bank);
+    h.bank.getReferenceRate = async (pair: string) => {
+      if (pair === 'USDTRY') calls++;
+      return read(pair);
+    };
+    quote([['51.14', '51.16']], 61_000);
     // No reference: the drift check is skipped (and the order entry price band refuses customer orders anyway).
     expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).status).toBe(200);
+    for (let i = 0; i < 5; i++) {
+      quote([['51.14', '51.16']], 1500);
+      await h.ctx.prices.refresh('USDTRY');
+    }
+    expect(calls).toBe(1);
+  });
+
+  it('keeps quoting on the last reference rate while core banking fails, and does not wait on it every refresh', async () => {
+    h = await startHarness();
+    const ayse = await h.login('ayse');
+    quote([['49.14', '49.16']]);
+    expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).status).toBe(200);
+    let calls = 0;
+    h.bank.getReferenceRate = () => {
+      calls++;
+      return new Promise(() => {}); // hangs
+    };
+    quote([['49.14', '49.16']], 61_000);
+    const started = Date.now();
+    for (let i = 0; i < 4; i++) {
+      quote([['49.14', '49.16']], 1500);
+      await h.ctx.prices.refresh('USDTRY');
+    }
+    // One read in flight, waited on once (500 ms at most), not on every refresh.
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it('a slower refresh that started first does not overwrite the price of a later one', async () => {
+    h = await startHarness();
+    quote([['49.14', '49.16']]);
+    await h.ctx.prices.refresh('USDTRY');
+    h.bank.getReferenceRate = () => new Promise(() => {}); // the next read hangs: its refresh waits 500 ms
+    quote([['49.15', '49.17']], 61_000);
+    const slow = h.ctx.prices.refresh('USDTRY'); // starts the read and waits
+    quote([['49.16', '49.18']], 10);
+    await h.ctx.prices.refresh('USDTRY'); // started later, does not wait
+    expect(h.ctx.prices.cached('USDTRY')!.bid).toBe(4_916_000_000n);
+    await slow;
+    expect(h.ctx.prices.cached('USDTRY')!.bid).toBe(4_916_000_000n);
+  });
+
+  it('a reference rate older than referenceMaxAgeMinutes by its own time is not compared with', async () => {
+    h = await startHarness();
+    const ayse = await h.login('ayse');
+    // A daily board rate from yesterday, far from today's market.
+    (h.bank as unknown as { rates: Map<string, unknown> }).rates.set('USDTRY', { pair: 'USDTRY', rate: '47.00', asOf: new Date(h.clock.now.getTime() - 24 * 3_600_000).toISOString() });
+    quote([['49.14', '49.16']], 61_000);
+    expect((await h.req('GET', '/v1/bank/rates/USDTRY', ayse)).status).toBe(200);
+  });
+
+  it('gives no price, not an error, when the LPs split into two camps', async () => {
+    h = await startHarness();
+    const ayse = await h.login('ayse');
+    quote([['49.14', '49.16'], ['49.79', '49.81'], ['49.13', '49.17'], ['49.80', '49.82']]);
+    const r = await h.req('GET', '/v1/bank/rates/USDTRY', ayse);
+    expect(r.status).toBe(503);
+    expect(r.body.details).toEqual({ reason: 'PRICE_SUSPECT' });
+    expect(h.ctx.prices.offState('USDTRY')).toEqual({ reason: 'PRICE_SUSPECT' });
   });
 
   it('holds back a sudden jump and accepts the new level once it has held for jumpConfirmMs', async () => {

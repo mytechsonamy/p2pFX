@@ -40,13 +40,20 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
   - With three or more fresh LPs, an LP whose mid is more than `maxLpDeviationBps` (default 50) from the median mid
     is left out of that refresh's aggregate. The pair keeps its price from the other LPs; the dealer screen lists
     the LP under `excludedLps`. With one or two LPs nothing is dropped: there is no majority, and the spread guard
-    and the reference check cover that case.
-  - The aggregate mid is compared with the core banking reference rate (read at most once a minute, 500 ms
-    timeout, ignored once older than 10 minutes). Further than `maxReferenceDeviationBps` (default 300) and the
-    pair has no bank price, with `reason = PRICE_SUSPECT`. No reference rate: the check is skipped.
+    and the reference check cover that case. When the LPs split into camps and no majority agrees (two against
+    two), the pair has no bank price with `reason = PRICE_SUSPECT`.
+  - The aggregate mid is compared with the core banking reference rate. Further than `maxReferenceDeviationBps`
+    (default 300) and the pair has no bank price, with `reason = PRICE_SUSPECT`. The rate is read at most once a
+    minute per pair, failures included; only the refresh that starts a read waits for it, at most 500 ms; the last
+    good rate is used while core banking is down. A rate older than `referenceMaxAgeMinutes` (default 15) by its own
+    `asOf` is not compared with, so a core that publishes a daily board rate switches the check off rather than
+    halting pricing on an intraday move. No reference rate for a pair (a synthetic cross): the check is skipped.
   - A move of the aggregate mid larger than `maxJumpBps` (default 100) from the last accepted price is held back
     with `reason = PRICE_JUMP` until the new level has held for `jumpConfirmMs` (default 3,000). A spike that
-    comes back is dropped without a gap in the old level. A last price older than a minute is not compared.
+    comes back is dropped without a gap in the old level. The new level must hold through consecutive prices: any
+    other outage in between starts the confirmation over. A last price older than a minute is not compared. A market
+    trending faster than `maxJumpBps` per `jumpConfirmMs` keeps the pair dark for up to a minute; tune both to the
+    pair's volatility.
 - **LP market hours.** `dealing.lpMarket` follows the LPs' own week (FX: Sunday 17:00 to Friday 17:00 New York,
   daylight saving included), a daily break per instrument kind (metals 17:00–18:00 New York) and holiday dates.
   Outside it the pair has no bank price, with `reason = MARKET_CLOSED` and `nextOpen`, and the app says when the
@@ -143,7 +150,7 @@ and side:
 "dealing": {
   "quoteTtlSeconds": 5,
   "maxSpreadBps": 100,
-  "priceSanity": { "enabled": true, "maxLpDeviationBps": 50, "maxReferenceDeviationBps": 300, "maxJumpBps": 100, "jumpConfirmMs": 3000 },
+  "priceSanity": { "enabled": true, "maxLpDeviationBps": 50, "maxReferenceDeviationBps": 300, "referenceMaxAgeMinutes": 15, "maxJumpBps": 100, "jumpConfirmMs": 3000 },
   "lpMarket": { "enabled": true, "timezone": "America/New_York", "weekOpen": { "day": 7, "time": "17:00" }, "weekClose": { "day": 5, "time": "17:00" }, "dailyBreaks": { "metal": { "from": "17:00", "to": "18:00" } }, "holidays": [] },
   "offHours": { "enabled": true, "extraSpreadBps": 50, "positionCapPct": 20, "maxCloseAgeHours": 72 },
   "maxStalenessMs": 3000,

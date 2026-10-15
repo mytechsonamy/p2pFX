@@ -45,7 +45,15 @@ export interface LiquidityAdapter {
    * The execution with this reference at the LP, or undefined if the LP has none. `request` is the trade as
    * it was sent (synthetic crosses need it to rebuild a two-leg trade).
    */
-  findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>): Promise<LpExecution | undefined>;
+  findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions): Promise<LpExecution | undefined>;
+}
+
+export interface FindExecutionOptions {
+  /**
+   * Only look: never complete a trade while looking it up. Recovery lookups may finish a two-leg synthetic trade
+   * whose second leg is missing; a reconciliation must not trade, so it reports such a trade as unresolved instead.
+   */
+  lookupOnly?: boolean;
 }
 
 export class LiquidityError extends Error {

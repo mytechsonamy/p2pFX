@@ -73,7 +73,7 @@ export class Scheduler {
     // The in-memory position is reloaded (a fill whose settlement failed comes out of it again).
     await this.positions.load().catch((err) => this.log.error({ err }, 'reloading positions failed'));
     // The daily reconciliation, once its time has passed (it records its own failures).
-    await this.reconciliation?.runDailyIfDue().catch((err) => this.log.error({ err }, 'daily reconciliation failed'));
+    this.reconciliation?.startDailyIfDue();
     return { expired: due.length, released };
   }
 }

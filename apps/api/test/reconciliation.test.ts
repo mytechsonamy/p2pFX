@@ -69,7 +69,24 @@ describe('reconciliation', () => {
     expect(r.items).toEqual([expect.objectContaining({ severity: 'BREAK', kind: 'UNKNOWN_IN_PLATFORM', source: 'CORE' })]);
   });
 
-  it('reports an earlier retry round of a leg still booked next to the current one (double posting)', async () => {
+  it('reports an earlier retry round of a leg still booked next to the current one (double posting), once', async () => {
+    h = await startHarness();
+    const { fillId } = await day(h);
+    // As after a retry: the leg now carries round 1's key and core booked it; round 0 should have been reversed but was not.
+    const sell = coreTxns(h).get(`fill:${fillId}:BANK_SELL`)!.request;
+    const r1 = `fill:${fillId}:BANK_SELL:r1`;
+    const posted = await h.bank.postFxTransaction({ ...sell, holdIds: [], idempotencyKey: r1 });
+    await h.ctx.db.query(`update settlements set idempotency_key = $1, retry_round = 1, core_txn_ref = $2 where fill_id = $3 and leg = 'BANK_SELL'`, [r1, posted.txnRef, fillId]);
+    const r = await run(h);
+    expect(r.items).toEqual([
+      expect.objectContaining({ kind: 'DUPLICATE_POSTING', source: 'SETTLEMENT', details: expect.objectContaining({ earlierKey: `fill:${fillId}:BANK_SELL` }) }),
+    ]);
+    // Reversed as it should be: nothing to report.
+    coreTxns(h).get(`fill:${fillId}:BANK_SELL`)!.reversed = true;
+    expect((await run(h)).items).toEqual([]);
+  });
+
+  it('reports a core banking posting under a round the platform never issued', async () => {
     h = await startHarness();
     const { fillId } = await day(h);
     const sell = coreTxns(h).get(`fill:${fillId}:BANK_SELL`)!.request;
@@ -78,6 +95,16 @@ describe('reconciliation', () => {
     expect(r.items).toEqual([
       expect.objectContaining({ kind: 'DUPLICATE_POSTING', source: 'CORE', details: expect.objectContaining({ currentKey: `fill:${fillId}:BANK_SELL` }) }),
     ]);
+  });
+
+  it('checks a fill created before the window whose settlement finished in it', async () => {
+    h = await startHarness();
+    const { fillId } = await day(h);
+    await h.ctx.db.query(`update fills set created_at = now() - interval '5 hours' where id = $1`, [fillId]);
+    await h.ctx.db.query(`update settlements set created_at = now() - interval '5 hours', updated_at = now() where fill_id = $1`, [fillId]);
+    coreTxns(h).get(`fill:${fillId}:BANK_BUY`)!.request.tax += 1n;
+    const r = await run(h); // the window starts an hour ago
+    expect(r.items).toEqual([expect.objectContaining({ kind: 'AMOUNT_MISMATCH', details: expect.objectContaining({ leg: 'BANK_BUY' }) })]);
   });
 
   it('reports a leg whose amounts differ in core banking, and one core banking does not have', async () => {
@@ -137,11 +164,11 @@ describe('reconciliation', () => {
   it('lists records still in flight past the grace time as open items, not breaks', async () => {
     h = await startHarness();
     await day(h);
-    await h.ctx.db.query(`update settlements set status = 'UNKNOWN_OUTCOME', updated_at = now() - interval '2 hours' where leg = 'BANK_SELL'`);
+    // Stuck for two hours although recovery touched it a moment ago (updated_at), next to a leg created just now.
+    await h.ctx.db.query(`update settlements set status = 'UNKNOWN_OUTCOME', created_at = now() - interval '2 hours', updated_at = now() where leg = 'BANK_SELL'`);
     await h.ctx.db.query(`update settlements set status = 'PENDING', updated_at = now() where leg = 'BANK_BUY'`);
     const r = await run(h);
     expect(r.status).toBe('OPEN_ITEMS');
-    // The leg stuck for two hours is reported; the one updated a moment ago is still in flight.
     expect(r.items).toEqual([expect.objectContaining({ severity: 'OPEN_ITEM', kind: 'OPEN_SETTLEMENT', details: expect.objectContaining({ leg: 'BANK_SELL' }) })]);
   });
 
@@ -169,11 +196,34 @@ describe('reconciliation', () => {
     // After 23:30 today: today's run.
     h.clock.now = new Date('2026-10-05T20:31:00Z');
     await h.ctx.scheduler.tick();
+    await h.ctx.reconciliation.idle();
     expect((await runs()).map((r) => r.window_to)).toEqual([new Date('2026-10-04T20:30:00Z'), new Date('2026-10-05T20:30:00Z')]);
     // Switched off: nothing more.
     await h.setConfig((c) => ({ ...c, reconciliation: { ...c.reconciliation, enabled: false } }));
     h.clock.now = new Date('2026-10-06T20:31:00Z');
     expect(await h.ctx.reconciliation.runDailyIfDue()).toBeUndefined();
+  });
+
+  it('does not retry a failed daily run on every tick', async () => {
+    h = await startHarness();
+    (h.bank as unknown as { listFxTransactions: () => Promise<never> }).listFxTransactions = async () => {
+      throw new Error('core banking down');
+    };
+    for (let i = 0; i < 3; i++) await h.ctx.reconciliation.runDailyIfDue();
+    const { rows } = await h.ctx.db.query(`select status, error from recon_runs`);
+    expect(rows).toEqual([{ status: 'FAILED', error: 'core banking down' }]);
+    expect((await h.req('GET', '/ready')).body.reconciliation).toMatchObject({ status: 'FAILED' });
+  });
+
+  it('reports a failed or rejected record as unverifiable, not a break, when core banking cannot say it was reversed', async () => {
+    const bank = new MockCoreBank();
+    bank.setReferenceRate('USDTRY', '49.15');
+    (bank as unknown as { listFxTransactions?: unknown }).listFxTransactions = undefined;
+    h = await startHarness({ bank });
+    await day(h);
+    await h.ctx.db.query(`update bank_deals set status = 'REJECTED'`);
+    const r = await run(h);
+    expect(r.items).toEqual([expect.objectContaining({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source: 'BANK_DEAL' })]);
   });
 
   it('refuses a second run while one is running, and a reversed range', async () => {

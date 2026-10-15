@@ -27,8 +27,19 @@ export interface Aggregate {
   excludedLps?: string[];
 }
 
-/** Reads the core banking reference rate of a pair (PRICE_SCALE units), or undefined when it has none. */
-export type ReferenceRateSource = (pair: string) => Promise<bigint | undefined>;
+/** Reads the core banking reference rate of a pair (PRICE_SCALE units) and its time, or undefined when it has none. */
+export type ReferenceRateSource = (pair: string) => Promise<{ rate: bigint; asOf?: Date } | undefined>;
+
+interface ReferenceState {
+  rate?: bigint;
+  /** The rate's own time (asOf), else when it was read. */
+  at?: number;
+  /** No new read before this (one read per REFERENCE_TTL_MS, failures included). */
+  nextTryAt: number;
+  inflight?: Promise<void>;
+  /** A failure is logged once per outage. */
+  failing?: boolean;
+}
 
 export interface SegmentRates {
   /** The customer buys from the bank at this rate. */
@@ -48,8 +59,6 @@ const TICK_EVERY_MS = 5000;
 const FUTURE_TOLERANCE_MS = 2000;
 /** How long a core banking reference rate is reused before it is read again. */
 const REFERENCE_TTL_MS = 60_000;
-/** A reference rate older than this is not used for the sanity check (core banking unreachable for long). */
-const REFERENCE_MAX_AGE_MS = 10 * 60_000;
 /** How long the price engine waits for the reference rate before going on with the one it has. */
 const REFERENCE_TIMEOUT_MS = 500;
 /** The jump check compares with the last accepted price only while it is this recent (else any level is accepted). */
@@ -70,10 +79,13 @@ export class PriceEngine {
   private readonly lastLp = new Map<string, { bid: bigint; ask: bigint; at: Date }>();
   private readonly reopenListeners: ((pair: string) => void)[] = [];
   /** Core banking reference rates, read at most once a minute per pair. */
-  private readonly reference = new Map<string, { rate: bigint | undefined; at: number }>();
+  private readonly reference = new Map<string, ReferenceState>();
   /** A price that jumped past maxJumpBps, waiting to hold for jumpConfirmMs before it becomes the new level. */
   private readonly pendingJump = new Map<string, { mid: bigint; since: number }>();
   private readonly excludeLogged = new Map<string, number>();
+  /** Refreshes are numbered as they start; the number of the last one whose price was taken, per pair. */
+  private refreshSeq = 0;
+  private readonly applied = new Map<string, number>();
   private timer?: NodeJS.Timeout;
 
   constructor(
@@ -152,6 +164,7 @@ export class PriceEngine {
       });
       return agg;
     }
+    const seq = ++this.refreshSeq;
     // An LP operations switched off (kill switch) is ignored entirely.
     let all: LpQuote[];
     try {
@@ -178,6 +191,10 @@ export class PriceEngine {
     // Outliers: with three or more LPs, one whose mid is far from the median is a bad feed, not the market.
     const { kept: usable, excluded } = sanity.enabled ? dropOutliers(fresh, sanity.maxLpDeviationBps) : { kept: fresh, excluded: [] };
     if (excluded.length) this.logExcluded(pair, excluded, now);
+    // No majority agrees (e.g. two LPs against two): there is no telling which side is right.
+    if (excluded.length && usable.length * 2 <= fresh.length) {
+      return this.unavailable(pair, 'PRICE_SUSPECT', `${pair} LPs disagree: ${excluded.length} of ${fresh.length} are far from the median`);
+    }
     const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => usable.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
     const askQ = best((a, b) => parsePrice(a.ask) <= parsePrice(b.ask));
@@ -204,7 +221,7 @@ export class PriceEngine {
     if (sanity.enabled) {
       const mid = (agg.bid + agg.ask) / 2n;
       // Against core banking's own rate: a feed that drifts away (all LPs together, or the only LP) is not quoted.
-      const ref = await this.referenceFor(pair, now);
+      const ref = await this.referenceFor(pair, now, sanity.referenceMaxAgeMinutes * 60_000);
       if (ref !== undefined) {
         const off = deviationBps(mid, ref);
         if (off > sanity.maxReferenceDeviationBps) {
@@ -229,6 +246,11 @@ export class PriceEngine {
       }
       this.pendingJump.delete(pair);
     }
+    // A slower refresh that started earlier must not replace the price of one that started later (refreshes of a
+    // pair can overlap, and the reference read is awaited in between).
+    const newer = this.latest.get(pair);
+    if (newer && (this.applied.get(pair) ?? 0) > seq) return newer;
+    this.applied.set(pair, seq);
     const reopened = !!this.latest.get(pair)?.offHours;
     this.latest.set(pair, agg);
     this.lastLp.set(pair, { bid: agg.bid, ask: agg.ask, at: sourceAt });
@@ -257,26 +279,42 @@ export class PriceEngine {
   }
 
   /**
-   * The core banking reference rate for the sanity check: read at most once a minute, never waited on for more than
-   * REFERENCE_TIMEOUT_MS, and dropped once it is older than REFERENCE_MAX_AGE_MS. Undefined skips the check.
+   * The core banking reference rate for the sanity check. Read at most once per REFERENCE_TTL_MS per pair (a failure
+   * waits as long as a success), one read in flight per pair, waited on for at most REFERENCE_TIMEOUT_MS and only by
+   * the refresh that started it; the last good rate is kept through failures. Undefined (no rate, or older than maxAgeMs by its own time) skips the check.
    */
-  private async referenceFor(pair: string, now: Date): Promise<bigint | undefined> {
+  private async referenceFor(pair: string, now: Date, maxAgeMs: number): Promise<bigint | undefined> {
     if (!this.referenceRate) return undefined;
-    const known = this.reference.get(pair);
-    if (!known || now.getTime() - known.at >= REFERENCE_TTL_MS) {
-      let timer: NodeJS.Timeout | undefined;
-      const timeout = new Promise<'timeout'>((resolve) => (timer = setTimeout(() => resolve('timeout'), REFERENCE_TIMEOUT_MS)));
-      try {
-        const rate = await Promise.race([this.referenceRate(pair), timeout]);
-        if (rate !== 'timeout') this.reference.set(pair, { rate, at: now.getTime() });
-      } catch (err) {
-        this.log.warn({ err, pair }, 'price sanity: reference rate not available');
-      } finally {
-        clearTimeout(timer);
-      }
+    let st = this.reference.get(pair);
+    if (!st) this.reference.set(pair, (st = { nextTryAt: 0 }));
+    const state = st;
+    let started = false;
+    if (now.getTime() >= state.nextTryAt && !state.inflight) {
+      started = true;
+      state.nextTryAt = now.getTime() + REFERENCE_TTL_MS;
+      const readAt = now.getTime();
+      state.inflight = this.referenceRate(pair)
+        .then(
+          (r) => {
+            state.rate = r?.rate;
+            state.at = r ? (r.asOf?.getTime() ?? readAt) : undefined;
+            state.failing = false;
+          },
+          (err) => {
+            if (!state.failing) this.log.warn({ err, pair }, 'price sanity: reference rate not available; the last one is used while it is recent');
+            state.failing = true;
+          },
+        )
+        .finally(() => (state.inflight = undefined));
     }
-    const r = this.reference.get(pair);
-    return r && now.getTime() - r.at <= REFERENCE_MAX_AGE_MS ? r.rate : undefined;
+    // Only the refresh that started the read waits for it (briefly); the others go on with the rate they have.
+    if (started && state.inflight) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([state.inflight, new Promise<void>((resolve) => (timer = setTimeout(resolve, REFERENCE_TIMEOUT_MS)))]);
+      clearTimeout(timer);
+    }
+    if (state.rate === undefined || state.at === undefined) return undefined;
+    return now.getTime() - state.at <= maxAgeMs ? state.rate : undefined;
   }
 
   private logExcluded(pair: string, excluded: LpQuote[], now: Date) {
@@ -299,6 +337,8 @@ export class PriceEngine {
   /** Drops the pair's price so nothing trades on it, tells the stream once, and fails the refresh. */
   private async unavailable(pair: string, reason: PriceOffReason, message: string, nextOpen?: Date): Promise<never> {
     this.latest.delete(pair);
+    // A jump waiting for confirmation must hold through consecutive prices: any other outage starts it over.
+    if (reason !== 'PRICE_JUMP') this.pendingJump.delete(pair);
     const known = this.off.get(pair);
     if (known?.reason !== reason || known.nextOpen?.getTime() !== nextOpen?.getTime()) {
       this.off.set(pair, { reason, nextOpen });

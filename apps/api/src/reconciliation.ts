@@ -5,6 +5,7 @@ import type { Db } from './db/pool.js';
 import type { ConfigService } from './config-service.js';
 import { audit } from './audit.js';
 import { ApiError } from './errors.js';
+import { SettlementService } from './settlement.js';
 
 /**
  * Reconciliation: the platform's records against core banking and the LPs, for a time window.
@@ -32,8 +33,13 @@ export interface ReconBreak {
 
 export type ReconStatus = 'RUNNING' | 'CLEAN' | 'OPEN_ITEMS' | 'BREAKS' | 'FAILED';
 
-/** A run left RUNNING longer than this was interrupted (process stopped) and is closed as FAILED. */
-const STALE_RUN_MS = 60 * 60_000;
+/** A run left RUNNING longer than this (database time) was interrupted (process stopped) and is closed as FAILED. */
+const STALE_RUN_HOURS = 6;
+/** A scheduled run that failed is tried again after this long, at most MAX_DAILY_ATTEMPTS times per day. */
+const DAILY_RETRY_MS = 30 * 60_000;
+const MAX_DAILY_ATTEMPTS = 3;
+/** Records created before the window that are still open (or changed in it) are looked at this far back. */
+const CARRY_DAYS = 31;
 const FILL_KEY = /^fill:([0-9a-f-]{36}):(BANK_BUY|BANK_SELL)(?::r(\d+))?$/;
 const DEAL_KEY = /^deal:([0-9a-f-]{36})$/;
 
@@ -66,19 +72,47 @@ export class ReconciliationService {
     let due = at(now);
     if (now < due) due = at(new Date(now.getTime() - 24 * 3_600_000));
     if (now < due) return undefined;
-    const { rows } = await this.db.query(`select 1 from recon_runs where trigger = 'SCHEDULED' and window_to = $1 and status <> 'FAILED' limit 1`, [due]);
-    if (rows.length) return undefined;
+    const { rows } = await this.db.query(
+      `select status, started_at from recon_runs where trigger = 'SCHEDULED' and window_to = $1 order by started_at desc`,
+      [due],
+    );
+    if (rows.some((r) => r.status !== 'FAILED')) return undefined;
+    // A failed run is tried again later, a few times, not on every scheduler tick.
+    if (rows.length >= MAX_DAILY_ATTEMPTS) return undefined;
+    if (rows.length && Date.now() - new Date(rows[0].started_at).getTime() < DAILY_RETRY_MS) return undefined;
     const from = new Date(due.getTime() - c.reconciliation.lookbackHours * 3_600_000);
     const run = await this.run(from, due, 'SCHEDULED', 'system');
+    if (run.status === 'FAILED' && rows.length + 1 >= MAX_DAILY_ATTEMPTS) {
+      this.log.error({ windowTo: due, attempts: rows.length + 1 }, 'daily reconciliation failed every attempt; run it from operations');
+    }
     return run.id;
+  }
+
+  private daily?: Promise<unknown>;
+
+  /**
+   * Scheduler: starts the daily run in the background (one at a time), so a long run does not hold up order expiry,
+   * settlement recovery and the rest of the tick.
+   */
+  startDailyIfDue() {
+    if (this.daily) return;
+    this.daily = this.runDailyIfDue()
+      .catch((err) => this.log.error({ err }, 'daily reconciliation failed'))
+      .finally(() => (this.daily = undefined));
+  }
+
+  /** Resolves when no background daily run is in progress (tests, shutdown). */
+  async idle() {
+    await this.daily;
   }
 
   /** Runs a reconciliation of [from, to) and returns the run with its breaks. */
   async run(from: Date, to: Date, trigger: 'SCHEDULED' | 'MANUAL', actor: string) {
     if (!(from < to)) throw new ApiError(400, 'INVALID_RANGE', 'from must be before to');
     await this.db.query(
-      `update recon_runs set status = 'FAILED', error = 'interrupted', finished_at = now() where status = 'RUNNING' and started_at < $1`,
-      [new Date(Date.now() - STALE_RUN_MS)],
+      `update recon_runs set status = 'FAILED', error = 'interrupted', finished_at = now()
+        where status = 'RUNNING' and started_at < now() - make_interval(hours => $1)`,
+      [STALE_RUN_HOURS],
     );
     let id: string;
     try {
@@ -94,22 +128,31 @@ export class ReconciliationService {
     try {
       const { breaks, summary, coreListing } = await this.check(from, to);
       const status: ReconStatus = breaks.some((b) => b.severity === 'BREAK') ? 'BREAKS' : breaks.length ? 'OPEN_ITEMS' : 'CLEAN';
-      for (const b of breaks) {
-        await this.db.query(`insert into recon_breaks (run_id, severity, kind, source, ref, details) values ($1, $2, $3, $4, $5, $6)`, [
+      // The items and the result are written together: a run is either finished with all its items or failed.
+      const client = await this.db.connect();
+      try {
+        await client.query('begin');
+        for (let i = 0; i < breaks.length; i += 500) {
+          const chunk = breaks.slice(i, i + 500);
+          const values = chunk.map((_, j) => `($1, $${j * 5 + 2}, $${j * 5 + 3}, $${j * 5 + 4}, $${j * 5 + 5}, $${j * 5 + 6})`).join(', ');
+          await client.query(
+            `insert into recon_breaks (run_id, severity, kind, source, ref, details) values ${values}`,
+            [id, ...chunk.flatMap((b) => [b.severity, b.kind, b.source, b.ref, JSON.stringify(b.details, replacer)])],
+          );
+        }
+        await client.query(`update recon_runs set status = $2, core_listing = $3, summary = $4, finished_at = now() where id = $1`, [
           id,
-          b.severity,
-          b.kind,
-          b.source,
-          b.ref,
-          JSON.stringify(b.details, replacer),
+          status,
+          coreListing,
+          JSON.stringify(summary, replacer),
         ]);
+        await client.query('commit');
+      } catch (err) {
+        await client.query('rollback').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
       }
-      await this.db.query(`update recon_runs set status = $2, core_listing = $3, summary = $4, finished_at = now() where id = $1`, [
-        id,
-        status,
-        coreListing,
-        JSON.stringify(summary, replacer),
-      ]);
       await audit(this.db, actor, 'reconciliation.run', { runId: id, trigger, from, to, status, breaks: summary.breaks, openItems: summary.openItems });
       if (status === 'BREAKS') this.log.error({ runId: id, breaks: summary.breaks, byKind: summary.byKind }, 'reconciliation found breaks');
       else if (status === 'OPEN_ITEMS') this.log.warn({ runId: id, openItems: summary.openItems }, 'reconciliation found open items');
@@ -171,18 +214,25 @@ export class ReconciliationService {
       return { txnRef: found.txnRef, receiptRef: found.receiptRef };
     };
 
-    // ---- settlement legs of fills created in the window ----
+    const carryFrom = new Date(from.getTime() - CARRY_DAYS * 24 * 3_600_000);
+    /** Core postings already reported as a duplicate (found from both sides). */
+    const duplicates = new Set<string>();
+
+    // ---- settlement legs: of fills created in the window, and older ones still open or changed in the window ----
+    // (a leg in flight at the previous cutoff is checked once it has an outcome, and reported while it has none)
     const { rows: legs } = await this.db.query(
       `select s.id, s.fill_id, s.leg, s.idempotency_key, s.status, s.core_txn_ref, s.retry_round, s.created_at, s.updated_at,
               f.pair, f.qty, f.buyer_commission, f.seller_commission, f.buyer_tax, f.seller_tax, f.buyer_total, f.seller_total,
-              bc.customer_ref as buyer_ref, sc.customer_ref as seller_ref
+              bc.customer_ref as buyer_ref, sc.customer_ref as seller_ref, f.created_at >= $1 as in_window
          from settlements s
          join fills f on f.id = s.fill_id
          join orders b on b.id = f.buy_order_id join customers bc on bc.id = b.customer_id
          join orders o on o.id = f.sell_order_id join customers sc on sc.id = o.customer_id
-        where f.created_at >= $1 and f.created_at < $2
+        where (f.created_at >= $1 and f.created_at < $2)
+           or (f.created_at >= $3 and f.created_at < $1
+               and (s.updated_at >= $1 or s.status in ('PENDING', 'UNKNOWN_OUTCOME', 'REVERSAL_PENDING', 'FAILED_NEEDS_REVIEW')))
         order by f.seq, s.leg`,
-      [from, to],
+      [from, to, carryFrom],
     );
     const totals = new Map<string, { platformBought: bigint; platformSold: bigint; coreBought: bigint; coreSold: bigint }>();
     const total = (ccy: string) => {
@@ -204,23 +254,45 @@ export class ReconciliationService {
       };
       const ref = s.id as string;
       const base_ = { fillId: s.fill_id, leg: s.leg, idempotencyKey: s.idempotency_key, platformStatus: s.status };
-      if (s.status === 'SETTLED') {
+      if (s.status === 'SETTLED' && s.in_window) {
         if (s.leg === 'BANK_BUY') total(base).platformBought += expected.qty;
         else total(base).platformSold += expected.qty;
       }
       await this.checkPosting(add, 'SETTLEMENT', ref, s.status, s.core_txn_ref, expected, base_, lookup, {
         open: ['PENDING', 'UNKNOWN_OUTCOME', 'REVERSAL_PENDING'].includes(s.status),
-        stale: now - new Date(s.updated_at ?? s.created_at).getTime() > openAfterMs,
+        // Measured from creation: the scheduler touches updated_at of a stuck leg on every recovery attempt.
+        stale: now - new Date(s.created_at).getTime() > openAfterMs,
         mustNotBeBooked: s.status === 'FAILED_NEEDS_REVIEW',
         mustBeReversed: s.status === 'REVERSED',
       });
+      // Earlier retry rounds of the leg (a new round's key is issued only after the previous posting was reversed):
+      // one still booked means the customer was booked twice.
+      for (let round = 0; round < Number(s.retry_round ?? 0); round++) {
+        const key = SettlementService.idempotencyKey(s.fill_id, s.leg, round);
+        let core;
+        try {
+          core = await lookup(key);
+        } catch (err) {
+          add({ severity: 'OPEN_ITEM', kind: 'CORE_LOOKUP_FAILED', source: 'SETTLEMENT', ref, details: { ...base_, earlierKey: key, error: (err as Error).message } });
+          continue;
+        }
+        if (!core || core.reversed === true) continue;
+        if (core.reversed === false) {
+          duplicates.add(core.txnRef);
+          add({ severity: 'BREAK', kind: 'DUPLICATE_POSTING', source: 'SETTLEMENT', ref, details: { ...base_, earlierKey: key, txnRef: core.txnRef, note: 'an earlier retry round of this leg is still booked' } });
+        } else {
+          add({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source: 'SETTLEMENT', ref, details: { ...base_, earlierKey: key, txnRef: core.txnRef } });
+        }
+      }
     }
 
     // ---- bank deals created in the window ----
     const { rows: deals } = await this.db.query(
-      `select d.*, c.customer_ref from bank_deals d join customers c on c.id = d.customer_id
-        where d.created_at >= $1 and d.created_at < $2 order by d.seq`,
-      [from, to],
+      `select d.*, c.customer_ref, d.created_at >= $1 as in_window from bank_deals d join customers c on c.id = d.customer_id
+        where (d.created_at >= $1 and d.created_at < $2)
+           or (d.created_at >= $3 and d.created_at < $1 and (d.updated_at >= $1 or d.status in ('PENDING', 'FAILED_NEEDS_REVIEW')))
+        order by d.seq`,
+      [from, to, carryFrom],
     );
     for (const d of deals) {
       const base = findPair(c, d.pair)?.base ?? String(d.pair).slice(0, 3);
@@ -234,13 +306,13 @@ export class ReconciliationService {
         tax: BigInt(d.tax),
         currency: base,
       };
-      if (d.status === 'SETTLED') {
+      if (d.status === 'SETTLED' && d.in_window) {
         if (leg === 'BANK_BUY') total(base).platformBought += expected.qty;
         else total(base).platformSold += expected.qty;
       }
       await this.checkPosting(add, 'BANK_DEAL', d.id, d.status, d.core_txn_ref, expected, { dealId: d.id, idempotencyKey: `deal:${d.id}`, platformStatus: d.status }, lookup, {
         open: d.status === 'PENDING',
-        stale: now - new Date(d.updated_at ?? d.created_at).getTime() > openAfterMs,
+        stale: now - new Date(d.created_at).getTime() > openAfterMs,
         mustNotBeBooked: d.status === 'REJECTED' || d.status === 'FAILED_NEEDS_REVIEW',
         mustBeReversed: false,
         key: `deal:${d.id}`,
@@ -252,6 +324,7 @@ export class ReconciliationService {
       const fillIds = new Set<string>();
       const dealIds = new Set<string>();
       for (const r of coreRecords) {
+        if (r.idempotencyKey.startsWith('reverse:')) continue;
         const f = FILL_KEY.exec(r.idempotencyKey);
         if (f) fillIds.add(f[1]);
         const d = DEAL_KEY.exec(r.idempotencyKey);
@@ -273,6 +346,9 @@ export class ReconciliationService {
         for (const r of rows) knownDeals.add(r.id);
       }
       for (const r of coreRecords) {
+        // A reversal posting of a key the platform issued (if core banking lists those separately).
+        if (r.idempotencyKey.startsWith('reverse:')) continue;
+        if (duplicates.has(r.txnRef)) continue;
         const record = { txnRef: r.txnRef, idempotencyKey: r.idempotencyKey, reference: r.reference, leg: r.leg, customerRef: r.customerRef, currency: r.currency, qty: r.qty, customerAmount: r.customerAmount, postedAt: r.postedAt, reversed: r.reversed };
         const f = FILL_KEY.exec(r.idempotencyKey);
         const d = DEAL_KEY.exec(r.idempotencyKey);
@@ -292,7 +368,12 @@ export class ReconciliationService {
     }
 
     // ---- hedges created in the window, against the LPs ----
-    const { rows: hedges } = await this.db.query(`select * from hedges where created_at >= $1 and created_at < $2 order by seq`, [from, to]);
+    const { rows: hedges } = await this.db.query(
+      `select * from hedges
+        where (created_at >= $1 and created_at < $2) or (created_at >= $3 and created_at < $1 and status in ('PENDING', 'UNKNOWN'))
+        order by seq`,
+      [from, to, carryFrom],
+    );
     for (const h of hedges) {
       const decimals = findPair(c, h.pair)?.baseDecimals ?? 2;
       const sent = { pair: h.pair as string, side: h.side as 'BUY' | 'SELL', qty: formatDecimal(BigInt(h.qty), decimals) };
@@ -308,7 +389,8 @@ export class ReconciliationService {
       }
       let exec;
       try {
-        exec = await this.lp.findExecution(h.lp, h.lp_ref, sent);
+        // Lookup only: a two-leg synthetic hedge missing its second leg is reported, never completed from here.
+        exec = await this.lp.findExecution(h.lp, h.lp_ref, sent, { lookupOnly: true });
       } catch (err) {
         add({ severity: 'OPEN_ITEM', kind: 'LP_LOOKUP_FAILED', source: 'HEDGE', ref: h.id, details: { ...details, error: (err as Error).message } });
         continue;
@@ -368,12 +450,16 @@ export class ReconciliationService {
       return;
     }
     const coreView = core && { txnRef: core.txnRef, reversed: core.reversed, postedAt: core.postedAt };
+    // Without a core listing, whether a posting is reversed is not known: that is reported as unverifiable.
     if (rules.mustNotBeBooked) {
-      if (core && core.reversed !== true) add({ severity: 'BREAK', kind: 'BOOKED_BUT_NOT_SETTLED', source, ref, details: { ...details, core: coreView } });
+      if (core?.reversed === false) add({ severity: 'BREAK', kind: 'BOOKED_BUT_NOT_SETTLED', source, ref, details: { ...details, core: coreView } });
+      else if (core && core.reversed === undefined) add({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source, ref, details: { ...details, core: coreView } });
       return;
     }
     if (rules.mustBeReversed) {
-      if (core && core.reversed === false) add({ severity: 'BREAK', kind: 'NOT_REVERSED_IN_CORE', source, ref, details: { ...details, core: coreView } });
+      if (!core) add({ severity: 'BREAK', kind: 'MISSING_IN_CORE', source, ref, details: { ...details, note: 'the platform reversed this leg but core banking has no posting under its key' } });
+      else if (core.reversed === false) add({ severity: 'BREAK', kind: 'NOT_REVERSED_IN_CORE', source, ref, details: { ...details, core: coreView } });
+      else if (core.reversed === undefined) add({ severity: 'OPEN_ITEM', kind: 'REVERSAL_NOT_VERIFIABLE', source, ref, details: { ...details, core: coreView } });
       return;
     }
     if (status !== 'SETTLED') return;
