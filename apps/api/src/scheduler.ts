@@ -7,6 +7,7 @@ import { audit } from './audit.js';
 import type { SettlementService } from './settlement.js';
 import type { DealingService } from './dealing/dealing.js';
 import type { PositionKeeper } from './dealing/positions.js';
+import type { ReconciliationService } from './reconciliation.js';
 
 /** A settlement leg still PENDING this long after its last update was interrupted and is resumed. */
 const STUCK_SETTLEMENT_MS = 60_000;
@@ -28,6 +29,7 @@ export class Scheduler {
     private readonly config: ConfigService,
     private readonly clock: () => Date,
     private readonly log: FastifyBaseLogger,
+    private readonly reconciliation?: ReconciliationService,
   ) {}
 
   start(intervalMs: number) {
@@ -70,6 +72,8 @@ export class Scheduler {
     await this.positions.resolveOpenClips().catch((err) => this.log.error({ err }, 'resolving open hedge clips failed'));
     // The in-memory position is reloaded (a fill whose settlement failed comes out of it again).
     await this.positions.load().catch((err) => this.log.error({ err }, 'reloading positions failed'));
+    // The daily reconciliation, once its time has passed (it records its own failures).
+    this.reconciliation?.startDailyIfDue();
     return { expired: due.length, released };
   }
 }

@@ -105,10 +105,22 @@ describe('synthetic crosses', () => {
     expect(await lp.findExecution('LP-A+LP-B', 'nope', req)).toBeUndefined();
     inner.execute = execute;
     inner.rejecting.clear();
+    // A lookup-only caller (reconciliation) never completes the trade: it is told the outcome is open.
+    await expect(lp.findExecution('LP-A+LP-B', 'h4', req, { lookupOnly: true })).rejects.toBeInstanceOf(LiquidityOutcomeUnknownError);
+    expect(inner.executionCount).toBe(1);
     const found = await lp.findExecution('LP-A+LP-B', 'h4', req);
     expect(found).toMatchObject({ lp: 'LP-A+LP-B', pair: 'XAUTRY', qty: '10', ref: 'h4' });
     expect(await lp.findExecution('LP-A+LP-B', 'h4', req)).toEqual(found);
     expect(inner.executionCount).toBe(2);
+  });
+
+  it('says its lookups are complete only when every leg LP is', () => {
+    const { inner, lp } = setup();
+    expect(lp.lookupComplete('LP-A+LP-B')).toBe(true);
+    (inner as unknown as { lookupComplete: (l: string) => boolean }).lookupComplete = (l) => l !== 'LP-B';
+    expect(lp.lookupComplete('LP-A+LP-B')).toBe(false);
+    expect(lp.lookupComplete('LP-A+LP-C')).toBe(true);
+    expect(lp.lookupComplete('LP-B')).toBe(false);
   });
 
   it('rejects a trade whose price moved beyond the limit, before any leg is sent', async () => {

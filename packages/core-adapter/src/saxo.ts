@@ -240,10 +240,19 @@ export class SaxoLiquidity implements LiquidityAdapter {
   }
 
   /**
+   * Saxo's lookup reads the order activity audit, which may not keep every older order: "not found" is not proof
+   * that an old trade never happened, so a reconciliation reports it as unresolved rather than missing.
+   */
+  lookupComplete(lp: string) {
+    return lp !== this.name;
+  }
+
+  /**
    * The fill for the bank's reference. An order this process placed is read by its order id. Otherwise the order
    * activity audit (which cannot be filtered by reference) is searched page by page; "not found" is only answered
    * once every page was read; a search that hits the page cap fails instead, so the trade stays open.
    */
+
   async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
     if (lp !== this.name) return undefined;
     const known = this.orderIds.get(ref);

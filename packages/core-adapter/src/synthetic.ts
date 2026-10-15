@@ -3,6 +3,7 @@ import {
   beyondLimit,
   LiquidityError,
   LiquidityOutcomeUnknownError,
+  type FindExecutionOptions,
   type LiquidityAdapter,
   type LpExecution,
   type LpExecutionRequest,
@@ -208,12 +209,14 @@ export class SyntheticLiquidity implements LiquidityAdapter {
    * it may have gone (the funding LP, every LP that quoted the funding pair, every LP it was sent to); a lookup that
    * fails makes the outcome unknown, nothing is sent then. Fresh from `execute`, the leg was never sent and goes
    * straight out. It is sent to the funding LP first, then to the others by price, never to an LP switched off.
+   * `lookupOnly` (reconciliation): a leg not found is reported as unknown, never sent.
    */
   private async complete(
     req: LpExecutionRequest,
     legs: { route: SyntheticRoute; fundingLp: string },
     cross: LpExecution,
     lookup: boolean,
+    lookupOnly = false,
   ): Promise<LpExecution> {
     const { route, fundingLp } = legs;
     const usd = route.inverted ? dec8(cross.qty) : qtyOf(divRound(dec8(cross.qty) * parsePrice(cross.rate), PRICE_SCALE, 'HALF_UP'), 2);
@@ -239,6 +242,11 @@ export class SyntheticLiquidity implements LiquidityAdapter {
         }
         if (funding) break;
       }
+    }
+    if (!funding && lookupOnly) {
+      throw new LiquidityOutcomeUnknownError(
+        `${route.cross} traded (${cross.tradeRef}) but its ${route.funding} leg was not found; not completed (lookup only)`,
+      );
     }
     const excluded = new Set(req.excludeLps ?? []);
     const candidates = [fundingLp, ...quoting.filter((lp) => lp !== fundingLp)].filter((lp) => !excluded.has(lp));
@@ -268,16 +276,22 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     };
   }
 
+  /** A synthetic LP name joins its legs' LPs (`LP-A+LP-B`): complete only if every leg's LP is. */
+  lookupComplete(lp: string) {
+    return lp.split('+').every((l) => this.inner.lookupComplete?.(l) ?? true);
+  }
+
   /**
    * A synthetic trade needs the original request (`request`) to be rebuilt: without it only direct trades
-   * can be found. A cross found without its funding leg has the funding leg completed here.
+   * can be found. A cross found without its funding leg has the funding leg completed here (unless `lookupOnly`).
    */
-  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
+
+  async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
     const legs = request ? this.legs(lp, request.pair) : undefined;
-    if (!legs || !request) return this.inner.findExecution(lp, ref);
-    const cross = await this.inner.findExecution(legs.crossLp, legRef(ref, 1));
+    if (!legs || !request) return this.inner.findExecution(lp, ref, undefined, options);
+    const cross = await this.inner.findExecution(legs.crossLp, legRef(ref, 1), undefined, options);
     if (!cross) return undefined;
-    return this.complete({ ...request, lp, ref }, legs, cross, true);
+    return this.complete({ ...request, lp, ref }, legs, cross, true, options?.lookupOnly);
   }
 }
 

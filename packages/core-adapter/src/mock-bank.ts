@@ -3,6 +3,7 @@ import {
   CoreBankingError,
   type CoreAccount,
   type CoreBankingAdapter,
+  type CoreFxTransactionRecord,
   type FxTransactionRequest,
   type FxTransactionResult,
   type Receipt,
@@ -251,6 +252,32 @@ export class MockCoreBank implements CoreBankingAdapter {
   async findFxTransaction(idempotencyKey: string): Promise<FxTransactionResult | undefined> {
     const txn = this.txnsByKey.get(idempotencyKey);
     return txn && this.result(txn);
+  }
+
+  async listFxTransactions(from: Date, to: Date): Promise<CoreFxTransactionRecord[]> {
+    const out: CoreFxTransactionRecord[] = [];
+    for (const t of this.txnsByKey.values()) {
+      const at = new Date(t.postedAt).getTime();
+      if (at < from.getTime() || at >= to.getTime()) continue;
+      const r = t.request;
+      out.push({
+        txnRef: t.txnRef,
+        receiptRef: t.receiptRef,
+        idempotencyKey: r.idempotencyKey,
+        reference: r.reference,
+        leg: r.leg,
+        customerRef: r.customerRef,
+        currency: r.currency,
+        quoteCurrency: r.quoteCurrency,
+        qty: r.qty,
+        customerAmount: r.customerAmount,
+        commission: r.commission,
+        tax: r.tax,
+        postedAt: t.postedAt,
+        reversed: t.reversed,
+      });
+    }
+    return out.sort((a, b) => a.postedAt.localeCompare(b.postedAt));
   }
 
   async reverseFxTransaction(txnRef: string, idempotencyKey: string) {

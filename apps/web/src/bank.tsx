@@ -43,6 +43,8 @@ export function BankRow({ pair }: { pair: PairInfo }) {
       ? t('bank.noPrice')
       : price.reason === 'WIDE_MARKET'
         ? t('bank.wideMarket')
+        : price.reason === 'PRICE_SUSPECT' || price.reason === 'PRICE_JUMP'
+          ? t('bank.priceCheck')
         : price.reason === 'MARKET_CLOSED'
           ? price.nextOpen
             ? t('bank.closedUntil', { at: opensAt(price.nextOpen) })

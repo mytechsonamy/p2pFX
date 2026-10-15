@@ -118,6 +118,40 @@ export type OffHoursConfig = z.infer<typeof OffHoursSchema>;
 
 export const DEFAULT_OFF_HOURS: OffHoursConfig = { enabled: true, extraSpreadBps: 50, positionCapPct: 20, maxCloseAgeHours: 72 };
 
+/**
+ * Price sanity: checks on LP prices beyond freshness and the spread guard. A bad tick from one LP would otherwise
+ * become the best bid or ask; a feed that drifts or jumps would be quoted to customers and hedged against.
+ */
+const PriceSanitySchema = z.object({
+  enabled: z.boolean(),
+  /**
+   * With three or more fresh LPs, an LP whose mid is further than this from the median mid (bps) is left out of the
+   * aggregate for that refresh. The pair keeps its price from the other LPs.
+   */
+  maxLpDeviationBps: z.number().min(1).max(10_000),
+  /** The aggregate mid may be at most this far from the core banking reference rate (bps); beyond it, no bank price. */
+  maxReferenceDeviationBps: z.number().min(1).max(10_000),
+  /**
+   * A reference rate older than this (by its own asOf) is not compared with. A core that publishes a daily board rate
+   * rather than a live one thereby switches the reference check off instead of halting pricing on an intraday move.
+   */
+  referenceMaxAgeMinutes: z.number().int().min(1).max(7 * 24 * 60).default(15),
+  /** A move of the aggregate mid larger than this (bps) from the last accepted price is held back until it is confirmed. */
+  maxJumpBps: z.number().min(1).max(10_000),
+  /** How long a jumped price must hold (within maxJumpBps of itself) before it is accepted as the new level. */
+  jumpConfirmMs: z.number().int().min(0).max(60_000),
+});
+export type PriceSanityConfig = z.infer<typeof PriceSanitySchema>;
+
+export const DEFAULT_PRICE_SANITY: PriceSanityConfig = {
+  enabled: true,
+  maxLpDeviationBps: 50,
+  maxReferenceDeviationBps: 300,
+  referenceMaxAgeMinutes: 15,
+  maxJumpBps: 100,
+  jumpConfirmMs: 3000,
+};
+
 export const DealingSchema = z.object({
   /** How long a firm bank quote can be executed. */
   quoteTtlSeconds: z.number().int().min(1).max(120),
@@ -128,6 +162,7 @@ export const DealingSchema = z.object({
    * no bank price (Direct, ladder and bot stop) until the market narrows. A pair can set its own limit.
    */
   maxSpreadBps: z.number().min(1).max(10_000).default(100),
+  priceSanity: PriceSanitySchema.default(DEFAULT_PRICE_SANITY),
   lpMarket: LpMarketSchema.default(DEFAULT_LP_MARKET),
   offHours: OffHoursSchema.default(DEFAULT_OFF_HOURS),
   /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
@@ -145,6 +180,7 @@ export const DEFAULT_DEALING: DealingConfig = {
   quoteTtlSeconds: 5,
   maxStalenessMs: 3000,
   maxSpreadBps: 100,
+  priceSanity: DEFAULT_PRICE_SANITY,
   lpMarket: DEFAULT_LP_MARKET,
   offHours: DEFAULT_OFF_HOURS,
   margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
@@ -293,6 +329,22 @@ const MarketOrdersSchema = z.object({
   maxSlippageBps: z.number().int().min(1).max(1000),
 });
 
+
+/**
+ * Daily reconciliation of settlements, bank deals and hedges against core banking and the LPs. The run starts at
+ * `dailyAt` (local time in tradingHours.timezone) and covers the `lookbackHours` before it.
+ */
+const ReconciliationSchema = z.object({
+  enabled: z.boolean(),
+  dailyAt: hhmm,
+  lookbackHours: z.number().int().min(1).max(24 * 7),
+  /** A settlement, deal or hedge still unresolved this long after it was created is reported as an open item. */
+  openItemAfterMinutes: z.number().int().min(1).max(24 * 60),
+});
+export type ReconciliationConfig = z.infer<typeof ReconciliationSchema>;
+
+export const DEFAULT_RECONCILIATION: ReconciliationConfig = { enabled: true, dailyAt: '23:30', lookbackHours: 24, openItemAfterMinutes: 30 };
+
 export const BankConfigShape = z.object({
   bank: z.object({ code: z.string().min(1), name: z.string().min(1) }),
   branding: z.object({
@@ -351,6 +403,7 @@ export const BankConfigShape = z.object({
   killSwitch: KillSwitchSchema.default(DEFAULT_KILL_SWITCH),
   inventory: InventorySchema.default(DEFAULT_INVENTORY),
   marketOrders: MarketOrdersSchema.default(DEFAULT_MARKET_ORDERS),
+  reconciliation: ReconciliationSchema.default(DEFAULT_RECONCILIATION),
 });
 
 /** Configuration as stored and edited; older shapes are upgraded on the way in (see `upgradeConfig`). */
@@ -409,6 +462,7 @@ const BASE_CONFIG: BankConfig = {
   killSwitch: DEFAULT_KILL_SWITCH,
   inventory: DEFAULT_INVENTORY,
   marketOrders: DEFAULT_MARKET_ORDERS,
+  reconciliation: DEFAULT_RECONCILIATION,
 };
 
 /** Default configuration used by the prototype and as a template for banks. */
@@ -427,7 +481,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
   { key: 'limits', label: 'Emir ve günlük tutar limitleri', paths: ['limits', 'orderRateLimit'] },
   { key: 'hedging', label: 'Pozisyon limitleri ve otomatik hedge kuralı', paths: ['dealing.positionLimits', 'dealing.autoHedge', 'dealing.hedging'] },
-  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.lpMarket', 'dealing.offHours', 'dealing.maxDealQty'] },
+  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, fiyat tutarlılık kontrolleri, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.priceSanity', 'dealing.lpMarket', 'dealing.offHours', 'dealing.maxDealQty'] },
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler (Bank MM)', paths: ['bankBook'] },
@@ -436,6 +490,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'inventory', label: 'Banka envanter üst sınırları', paths: ['inventory'] },
   { key: 'marketOrders', label: 'Piyasa emri ve fiyat koruması', paths: ['marketOrders'] },
   { key: 'selfTradePrevention', label: 'Kendi kendine işlem önleme davranışı', paths: ['selfTradePrevention'] },
+  { key: 'reconciliation', label: 'Gün sonu mutabakat saati ve kapsamı', paths: ['reconciliation'] },
 ];
 
 export interface ConfigChange {

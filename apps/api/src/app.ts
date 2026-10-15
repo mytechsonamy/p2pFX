@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
-import type { CoreBankingAdapter, LiquidityAdapter } from '@p2p/core-adapter';
-import { formatPrice, type BankConfig } from '@p2p/shared';
+import { CoreBankingError, type CoreBankingAdapter, type LiquidityAdapter } from '@p2p/core-adapter';
+import { formatPrice, parsePrice, type BankConfig } from '@p2p/shared';
 import { createPool, type Db } from './db/pool.js';
 import { migrate } from './db/migrate.js';
 import { AuthService } from './auth.js';
@@ -18,6 +18,7 @@ import { streamRoutes } from './routes/stream.js';
 import { dealingRoutes } from './routes/dealing.js';
 import { PriceEngine, segmentRates } from './dealing/price-engine.js';
 import { PositionKeeper } from './dealing/positions.js';
+import { ReconciliationService } from './reconciliation.js';
 import { DealingService } from './dealing/dealing.js';
 import { BankAccount, BankBook, BotMarketMaker } from './dealing/bank-book.js';
 
@@ -87,6 +88,7 @@ export interface AppContext {
   bankBook: BankBook;
   bot: BotMarketMaker;
   liquidity: LiquidityAdapter;
+  reconciliation: ReconciliationService;
 }
 
 export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance; ctx: AppContext; close: () => Promise<void> }> {
@@ -119,7 +121,17 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const auth = new AuthService(db, { bankPublicKeyPem: opts.bankPublicKeyPem, sessionSecret: opts.sessionSecret, opsToken: opts.opsToken, clock, config });
   await auth.bootstrapAdmin(opts.opsAdminPassword);
   const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
-  const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
+  const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log, async (pair) => {
+    try {
+      const r = await opts.core.getReferenceRate(pair);
+      const asOf = r.asOf ? new Date(r.asOf) : undefined;
+      return { rate: parsePrice(r.rate), asOf: asOf && !isNaN(asOf.getTime()) ? asOf : undefined };
+    } catch (err) {
+      // A pair core banking has no reference rate for (a synthetic cross) is not an error: the check is skipped.
+      if (err instanceof CoreBankingError && err.code === 'NOT_FOUND') return undefined;
+      throw err;
+    }
+  });
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
   // What the bank took on while the LP market was closed is hedged as soon as it opens.
   prices.onReopen((pair) => void positions.afterDeal(pair).catch(() => {}));
@@ -133,7 +145,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const account = new BankAccount(db, opts.core);
   const bankBook = new BankBook(db, config, exchange, prices, account, app.log);
   const bot = new BotMarketMaker(config, exchange, prices, account, app.log, clock);
-  const scheduler = new Scheduler(db, exchange, settlement, dealing, positions, config, clock, app.log);
+  const reconciliation = new ReconciliationService(db, opts.core, opts.liquidity, config, clock, app.log);
+  const scheduler = new Scheduler(db, exchange, settlement, dealing, positions, config, clock, app.log, reconciliation);
 
   // Per-customer order entry rate limit (sliding window, in memory).
   const hits = new Map<string, number[]>();
@@ -148,7 +161,7 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     hits.set(customerId, recent);
   };
 
-  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook, bot, liquidity: opts.liquidity };
+  const ctx: AppContext = { db, core: opts.core, auth, config, events, settlement, exchange, entry, scheduler, clock, rateLimit, prices, positions, dealing, bankBook, bot, liquidity: opts.liquidity, reconciliation };
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof ApiError) {
@@ -187,6 +200,11 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
     if (!events.connected || ((opts.matching ?? true) && !exchange.running)) ok = false;
     const c = config.get().data;
     checks.lpPricesFresh = c.pairs.filter((p) => p.enabled).every((p) => !!prices.fresh(p.symbol));
+    // Informational: the last reconciliation and what it found (breaks do not make the instance unready).
+    const last = await reconciliation.latestForReadiness().catch(() => undefined);
+    checks.reconciliation = last
+      ? { runId: last.id, status: last.status, finishedAt: last.finishedAt, breaks: last.summary?.breaks ?? null, openItems: last.summary?.openItems ?? null }
+      : null;
     return reply.status(ok ? 200 : 503).send({ ok, ...checks });
   });
   // Checked before authentication and the handler, so a refused command has no side effect at all. This also
@@ -223,10 +241,13 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
 
   const close = async () => {
     scheduler.stop();
+    reconciliation.stop();
     prices.stop();
     bankBook.stop();
     bot.stop();
     await app.close();
+    // A daily reconciliation in the background finishes before the database pool closes.
+    await reconciliation.idle();
     await exchange.idle();
     await positions.idle();
     await exchange.stop();

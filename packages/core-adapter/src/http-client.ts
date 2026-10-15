@@ -2,6 +2,7 @@ import {
   CoreBankingError,
   type CoreAccount,
   type CoreBankingAdapter,
+  type CoreFxTransactionRecord,
   type CoreErrorCode,
   type FxTransactionRequest,
   type FxTransactionResult,
@@ -56,7 +57,7 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
     const json = text ? JSON.parse(text) : undefined;
     if (!res.ok) {
       const code = (json?.code as CoreErrorCode) ?? (res.status >= 500 ? 'UNAVAILABLE' : 'INVALID_REQUEST');
-      throw new CoreBankingError(code, json?.message ?? `core banking returned ${res.status}`);
+      throw new CoreBankingError(code, json?.message ?? `core banking returned ${res.status}`, res.status);
     }
     return json as T;
   }
@@ -87,6 +88,17 @@ export class HttpCoreBankingAdapter implements CoreBankingAdapter {
       if (err instanceof CoreBankingError && err.code === 'NOT_FOUND') return undefined;
       throw err;
     }
+  }
+  async listFxTransactions(from: Date, to: Date): Promise<CoreFxTransactionRecord[]> {
+    const q = `from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`;
+    const list = await this.call<Record<string, unknown>[]>('GET', `/fx-transactions/list?${q}`);
+    return list.map((r) => ({
+      ...(r as unknown as CoreFxTransactionRecord),
+      qty: BigInt(r.qty as string),
+      customerAmount: BigInt(r.customerAmount as string),
+      commission: BigInt(r.commission as string),
+      tax: BigInt(r.tax as string),
+    }));
   }
   reverseFxTransaction(txnRef: string, idempotencyKey: string) {
     return this.call<{ reversalRef: string }>('POST', `/fx-transactions/${txnRef}/reverse`, { idempotencyKey });

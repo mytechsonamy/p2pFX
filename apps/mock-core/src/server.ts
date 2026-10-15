@@ -69,6 +69,12 @@ export function buildMockCore(
     if (!found) throw new CoreBankingError('NOT_FOUND', 'no transaction with this idempotency key');
     return found;
   });
+  app.get<{ Querystring: { from?: string; to?: string } }>('/fx-transactions/list', async (req) => {
+    const from = new Date(req.query.from ?? 0);
+    const to = new Date(req.query.to ?? 8.64e15);
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) throw new CoreBankingError('INVALID_REQUEST', 'from/to must be ISO dates');
+    return send(await bank.listFxTransactions(from, to));
+  });
   app.post<{ Params: { ref: string }; Body: { idempotencyKey: string } }>('/fx-transactions/:ref/reverse', async (req) =>
     bank.reverseFxTransaction(req.params.ref, req.body.idempotencyKey),
   );

@@ -12,7 +12,11 @@ export type StreamEvent =
   /** The pair has no bank price any more (no fresh LP price, or the spread guard tripped) until the next 'lp'. */
   | { type: 'lpOff'; pair: string; reason: PriceOffReason; nextOpen?: string };
 
-export type PriceOffReason = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED';
+/**
+ * Why a pair has no bank price. PRICE_SUSPECT: the LP price is too far from the core banking reference rate.
+ * PRICE_JUMP: the LP price moved further than the jump limit and the new level is not confirmed yet.
+ */
+export type PriceOffReason = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED' | 'PRICE_SUSPECT' | 'PRICE_JUMP';
 
 export interface LevelView {
   price: string;

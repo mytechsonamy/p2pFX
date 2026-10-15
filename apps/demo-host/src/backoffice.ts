@@ -271,6 +271,16 @@ const SECTIONS: Section[] = [
           { kind: 'int', path: ['dealing', 'quoteTtlSeconds'], label: 'Kotasyon geçerliliği', unit: 'saniye', min: 1, max: 120 },
           { kind: 'int', path: ['dealing', 'maxStalenessMs'], label: 'LP fiyatı en fazla', unit: 'ms eski', min: 100 },
           { kind: 'number', path: ['dealing', 'maxSpreadBps'], label: 'Spread koruması', unit: 'bps', min: 1, max: 10000, help: 'LP alış-satış farkı bundan genişse (veya fiyatlar ters düşerse) banka fiyat vermez' },
+        ],
+      },
+      {
+        title: 'Fiyat tutarlılık kontrolleri',
+        fields: [
+          { kind: 'bool', path: ['dealing', 'priceSanity', 'enabled'], label: 'Kontroller açık' },
+          { kind: 'number', path: ['dealing', 'priceSanity', 'maxLpDeviationBps'], label: 'LP sapma sınırı', unit: 'bps', min: 1, max: 10000, help: "En az 3 LP varken, orta değeri diğer LP'lerin medyanından bu kadar uzak olan LP o fiyatlamada dışarıda kalır" },
+          { kind: 'number', path: ['dealing', 'priceSanity', 'maxReferenceDeviationBps'], label: 'Referans kur sapma sınırı', unit: 'bps', min: 1, max: 10000, help: 'LP fiyatı Temel Bankacılık referans kurundan bu kadar uzaksa banka fiyat vermez' },
+          { kind: 'number', path: ['dealing', 'priceSanity', 'maxJumpBps'], label: 'Ani hareket sınırı', unit: 'bps', min: 1, max: 10000, help: 'Fiyat son kabul edilen seviyeden bu kadar sıçrarsa, yeni seviye doğrulanana kadar banka fiyat vermez' },
+          { kind: 'int', path: ['dealing', 'priceSanity', 'jumpConfirmMs'], label: 'Sıçrama doğrulama süresi', unit: 'ms', min: 0, max: 60000, help: 'Sıçrayan fiyat bu süre boyunca yerinde kalırsa yeni seviye olarak kabul edilir' },
           ...ccyFields(c, ['dealing', 'maxDealQty'], (ccy) => `Tek işlem üst sınırı ${ccy}`),
         ],
       },
