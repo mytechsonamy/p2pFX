@@ -44,9 +44,9 @@ describe('block mode', () => {
     const sold = await h.req('GET', `/v1/orders/${sell.body.id}`, alice);
     expect(sold.body.status).toBe('FILLED');
 
-    // Seller: 1000 × 49.10 = 49,100.00 − tax 98.20. Buyer: 1000 × 49.20 = 49,200.00 + tax 98.40; excess hold released.
+    // Seller: 1000 × 49.10 = 49,100.00, no kambiyo vergisi on a sale. Buyer: 1000 × 49.20 = 49,200.00 + tax 98.40; excess hold released.
     expect(await h.balance('alice', 'USD')).toEqual({ balance: 0n, available: 0n });
-    expect(await h.balance('alice', 'TRY')).toEqual({ balance: units('49001.80'), available: units('49001.80') });
+    expect(await h.balance('alice', 'TRY')).toEqual({ balance: units('49100.00'), available: units('49100.00') });
     expect(await h.balance('bob', 'USD')).toEqual({ balance: units('1000'), available: units('1000') });
     expect(await h.balance('bob', 'TRY')).toEqual({ balance: units('50701.60'), available: units('50701.60') });
 
@@ -55,7 +55,7 @@ describe('block mode', () => {
       'BANK-POSITION-USD': 0n,
       'BANK-CLEARING-TRY': 0n,
       'BANK-COMMISSION-TRY': units('100.00'),
-      'BANK-TAX-TRY': units('196.60'),
+      'BANK-TAX-TRY': units('98.40'),
     });
 
     const bobFills = await h.req('GET', '/v1/fills', bob);
@@ -65,7 +65,7 @@ describe('block mode', () => {
       commission: '50.00', tax: '98.40', total: '49298.40', settlementStatus: 'SETTLED',
     });
     const aliceFills = await h.req('GET', '/v1/fills', alice);
-    expect(aliceFills.body[0]).toMatchObject({ side: 'SELL', liquidity: 'MAKER', effectivePrice: '49.10', total: '49001.80' });
+    expect(aliceFills.body[0]).toMatchObject({ side: 'SELL', liquidity: 'MAKER', effectivePrice: '49.10', total: '49100.00' });
 
     const receipt = await h.req('GET', `/v1/fills/${bobFills.body[0].id}/receipt`, bob);
     expect(receipt.status).toBe(200);
@@ -74,7 +74,7 @@ describe('block mode', () => {
 
     const revenue = await h.req('GET', '/ops/revenue', OPS);
     expect(revenue.body).toEqual([
-      expect.objectContaining({ pair: 'USDTRY', fills: 1, volume: '1000.00', commission: { buySide: '50.00', sellSide: '50.00', total: '100.00' }, tax: { buyers: '98.40', sellers: '98.20', total: '196.60' } }),
+      expect.objectContaining({ pair: 'USDTRY', fills: 1, volume: '1000.00', commission: { buySide: '50.00', sellSide: '50.00', total: '100.00' }, tax: { buyers: '98.40', sellers: '0.00', total: '98.40' } }),
     ]);
 
     expect(h.bank.notifications.map((n) => `${n.customerRef}:${n.event.type}`).sort()).toEqual(['alice:fill', 'bob:fill']);
@@ -96,7 +96,7 @@ describe('block mode', () => {
 
     // Paid 19,739.40 for 400 at 49.20 (+0.05); 600 more at the limit still need 29,609.10 held.
     expect(await h.balance('bob', 'TRY')).toEqual({ balance: units('80260.60'), available: units('50651.50') });
-    expect(await h.balance('alice', 'TRY')).toEqual({ balance: units('19620.68'), available: units('19620.68') });
+    expect(await h.balance('alice', 'TRY')).toEqual({ balance: units('19660.00'), available: units('19660.00') });
     expect(await h.balance('alice', 'USD')).toEqual({ balance: units('600'), available: units('600') });
 
     const book = await h.req('GET', '/v1/pairs/USDTRY/book', bob);

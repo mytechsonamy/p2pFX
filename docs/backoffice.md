@@ -44,7 +44,7 @@ işlemlerini listeler.
 
 ## Onay bekleyen varsayılanlar
 
-Prototip bazı değerlerle geldi (binde 2 vergi, 7/24 işlem, 500 pip = 0,05 TL komisyon, 1000/400 pip segment marjı vb.).
+Prototip bazı değerlerle geldi (alıcıdan binde 2 vergi, satıcıdan vergi yok, 7/24 işlem, 500 pip = 0,05 TL komisyon, 1000/400 pip segment marjı vb.).
 Genel bakış bunları listeler ve menüde sayı olarak gösterir. Bir varsayılan, adı olan bir kullanıcı onu
 değiştirdiğinde ya da "Mevcut değerleri onayla" ile olduğu gibi onayladığında listeden düşer. Demo betikleri
 gibi servis entegrasyonlarının değişiklikleri onay sayılmaz.
@@ -82,7 +82,7 @@ Pariteler bölümünün başındaki tablo, bankanın likidite sağlayıcıların
 
 - **Parite ekle** (`POST /ops/pairs`, editör): parite yeni bir konfigürasyon versiyonu olarak, gerekçesiyle ve **işleme kapalı** eklenir. Kataloğdaki öneriler gelir: 500 pip komisyon, kura göre pip değeri ve fiyat adımı, en küçük emir, tek işlem üst sınırı, pozisyon limiti, envanter tavanı, hedge parçası, bot emir büyüklükleri ve bankanın tahtadaki kademeleri. Katalogda olmayan bir kur için bu değerler LP kurundan türetilir.
 - **İşleme aç / Kapat**: açık parite müşteri ekranında sekme olarak görünür. Kapatılan paritede yeni emir ve banka kotasyonu alınmaz, bankanın tahtadaki emirleri çekilir; müşterilerin bekleyen emirleri iptal edilene ya da süresi dolana kadar kalır.
-- **Kıymetli madenler** (XAU altın, XAG gümüş, XPT platin) gram üzerinden işlem görür, fiyat TL/gram'dır; müşteri ekranında "Altın (gr)" olarak görünür. Bip değeri metale göre ayarlıdır (altında 1 TL, platinde 0,50 TL, gümüşte 0,01 TL).
-- Kambiyo vergisinin kıymetli madenler için ayrı oranı vardır (Kambiyo vergisi › Kıymetli madenler). Başlangıçta dövizle aynıdır (binde 2); ileride farklılaşırsa sadece bu oran değiştirilir.
+- **Kıymetli madenler** (XAU altın, XAG gümüş, XPT platin) gram üzerinden işlem görür, fiyat TL/gram'dır; müşteri ekranında "Altın (gr)" olarak görünür. Pip değeri metale göre ayarlıdır (altında 0,01 TL, platinde 0,005 TL, gümüşte 0,0001 TL).
+- Kambiyo vergisinin kıymetli madenler için ayrı oranı vardır (Kambiyo vergisi › Kıymetli madenler). Başlangıçta dövizle aynıdır (alıcıdan binde 2, satıcıdan 0); ileride farklılaşırsa sadece bu oran değiştirilir.
 
 Demo LP'leri 18 kur verir: USD, EUR, GBP, CHF, JPY, CAD, AUD, SAR, XAU, XAG, XPT açık gelir; AED, QAR, KWD, DKK, SEK, NOK, CNY "Parite ekle" ile açılabilir.

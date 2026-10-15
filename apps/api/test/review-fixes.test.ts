@@ -57,7 +57,7 @@ describe('settlement with unknown outcomes (F02)', () => {
     expect(rows.map((r) => r.status)).toEqual(['SETTLED', 'SETTLED']);
     expect(bank.booked.filter((k) => k.includes('BANK_BUY'))).toHaveLength(1);
     expect(await h.balance('alice', 'USD')).toMatchObject({ balance: units('1000') });
-    expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49001.80') });
+    expect(await h.balance('alice', 'TRY')).toMatchObject({ balance: units('49100.00') });
   });
 
   it('marks the leg UNKNOWN_OUTCOME when the lookup fails too, reverses nothing, and resolves it on retry', async () => {

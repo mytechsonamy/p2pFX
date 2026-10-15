@@ -87,7 +87,7 @@ describe('instruments and pairs', () => {
     const viewer = await h.login('viewer');
     const pairs = (await h.req('GET', '/v1/config', viewer)).body.pairs;
     expect(pairs.map((p: { symbol: string; tax: unknown }) => [p.symbol, p.tax])).toEqual([
-      ['USDTRY', { buyRate: '0.002', sellRate: '0.002' }],
+      ['USDTRY', { buyRate: '0.002', sellRate: '0' }],
       ['XAUTRY', { buyRate: '0', sellRate: '0.001' }],
     ]);
 
