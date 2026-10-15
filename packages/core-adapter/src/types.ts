@@ -75,6 +75,27 @@ export interface Receipt {
   reversed: boolean;
 }
 
+/** One FX posting as core banking holds it: what reconciliation compares the platform's records with. */
+export interface CoreFxTransactionRecord {
+  txnRef: string;
+  receiptRef: string;
+  /** The key the platform posted it with (fill:…, deal:…). */
+  idempotencyKey: string;
+  /** The platform reference on the receipt (P2P-…, BNK-…). */
+  reference: string;
+  leg: FxLeg;
+  customerRef: string;
+  currency: string;
+  quoteCurrency: string;
+  /** Minor units. */
+  qty: bigint;
+  customerAmount: bigint;
+  commission: bigint;
+  tax: bigint;
+  postedAt: string;
+  reversed: boolean;
+}
+
 export interface ReferenceRate {
   pair: string;
   rate: string;
@@ -96,6 +117,12 @@ export interface CoreBankingAdapter {
    */
   findFxTransaction(idempotencyKey: string): Promise<FxTransactionResult | undefined>;
   reverseFxTransaction(txnRef: string, idempotencyKey: string): Promise<{ reversalRef: string }>;
+  /**
+   * Optional, for reconciliation: every FX posting made through this channel with postedAt in [from, to), reversed
+   * ones included. With it, reconciliation compares amounts and finds postings the platform does not know; without
+   * it, reconciliation can only look each platform record up by its key.
+   */
+  listFxTransactions?(from: Date, to: Date): Promise<CoreFxTransactionRecord[]>;
   getReceipt(receiptRef: string): Promise<Receipt>;
   getReferenceRate(pair: string): Promise<ReferenceRate>;
   notify(customerRef: string, event: { type: string; title: string; body: string; data?: unknown }): Promise<void>;

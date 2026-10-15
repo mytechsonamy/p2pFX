@@ -323,6 +323,22 @@ const MarketOrdersSchema = z.object({
   maxSlippageBps: z.number().int().min(1).max(1000),
 });
 
+
+/**
+ * Daily reconciliation of settlements, bank deals and hedges against core banking and the LPs. The run starts at
+ * `dailyAt` (local time in tradingHours.timezone) and covers the `lookbackHours` before it.
+ */
+const ReconciliationSchema = z.object({
+  enabled: z.boolean(),
+  dailyAt: hhmm,
+  lookbackHours: z.number().int().min(1).max(24 * 7),
+  /** A settlement, deal or hedge still unresolved this long after it was created is reported as an open item. */
+  openItemAfterMinutes: z.number().int().min(1).max(24 * 60),
+});
+export type ReconciliationConfig = z.infer<typeof ReconciliationSchema>;
+
+export const DEFAULT_RECONCILIATION: ReconciliationConfig = { enabled: true, dailyAt: '23:30', lookbackHours: 24, openItemAfterMinutes: 30 };
+
 export const BankConfigShape = z.object({
   bank: z.object({ code: z.string().min(1), name: z.string().min(1) }),
   branding: z.object({
@@ -378,6 +394,7 @@ export const BankConfigShape = z.object({
   killSwitch: KillSwitchSchema.default(DEFAULT_KILL_SWITCH),
   inventory: InventorySchema.default(DEFAULT_INVENTORY),
   marketOrders: MarketOrdersSchema.default(DEFAULT_MARKET_ORDERS),
+  reconciliation: ReconciliationSchema.default(DEFAULT_RECONCILIATION),
 });
 
 /** Configuration as stored and edited; older shapes are upgraded on the way in (see `upgradeConfig`). */
@@ -436,6 +453,7 @@ const BASE_CONFIG: BankConfig = {
   killSwitch: DEFAULT_KILL_SWITCH,
   inventory: DEFAULT_INVENTORY,
   marketOrders: DEFAULT_MARKET_ORDERS,
+  reconciliation: DEFAULT_RECONCILIATION,
 };
 
 /** Default configuration used by the prototype and as a template for banks. */
@@ -463,6 +481,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'inventory', label: 'Banka envanter üst sınırları', paths: ['inventory'] },
   { key: 'marketOrders', label: 'Piyasa emri ve fiyat koruması', paths: ['marketOrders'] },
   { key: 'selfTradePrevention', label: 'Kendi kendine işlem önleme davranışı', paths: ['selfTradePrevention'] },
+  { key: 'reconciliation', label: 'Gün sonu mutabakat saati ve kapsamı', paths: ['reconciliation'] },
 ];
 
 export interface ConfigChange {

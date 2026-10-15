@@ -185,6 +185,29 @@ export function opsRoutes(app: FastifyInstance, ctx: AppContext) {
     return { fillId: rows[0].fill_id, outcome };
   });
 
+  /**
+   * Reconciliation: runs a check of [from, to) now (default: the last 24 hours) against core banking and the LPs.
+   * It only reports; resolving a break is done with the settlement, deal and hedge operations.
+   */
+  app.post<{ Body: { from?: string; to?: string } }>('/ops/reconciliation/runs', async (req) => {
+    const actor = await auth.ops(req, 'editor');
+    const to = req.body?.to ? new Date(req.body.to) : ctx.clock();
+    const from = req.body?.from ? new Date(req.body.from) : new Date(to.getTime() - 24 * 3_600_000);
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) throw badRequest('INVALID_RANGE', 'from/to must be ISO dates');
+    if (to.getTime() - from.getTime() > 31 * 24 * 3_600_000) throw badRequest('INVALID_RANGE', 'a run covers at most 31 days');
+    return ctx.reconciliation.run(from, to, 'MANUAL', actor);
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/ops/reconciliation/runs', async (req) => {
+    await auth.ops(req);
+    return ctx.reconciliation.list(req.query.limit ? Number(req.query.limit) || 30 : 30);
+  });
+
+  app.get<{ Params: { id: string } }>('/ops/reconciliation/runs/:id', async (req) => {
+    await auth.ops(req);
+    return ctx.reconciliation.get(req.params.id);
+  });
+
   /** Commission earned and tax collected on settled fills, per pair. */
   app.get<{ Querystring: { from?: string; to?: string } }>('/ops/revenue', async (req) => {
     await auth.ops(req);

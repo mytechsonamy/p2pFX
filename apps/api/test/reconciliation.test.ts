@@ -1,0 +1,188 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { MockCoreBank, type FxTransactionRequest } from '@p2p/core-adapter';
+import { OPS, startHarness, type Harness } from './helpers.js';
+
+let h: Harness;
+afterEach(async () => {
+  await h?.close();
+  h = undefined as unknown as Harness;
+});
+
+/** The mock core's postings by idempotency key (tests reach in to tamper with core banking's side). */
+type Txn = { txnRef: string; reversed: boolean; request: FxTransactionRequest; postedAt: string };
+const coreTxns = (h: Harness) => (h.bank as unknown as { txnsByKey: Map<string, Txn> }).txnsByKey;
+const lpExecutions = (h: Harness) => (h.liquidity as unknown as { executions: Map<string, { qty: string; rate: string }> }).executions;
+
+/** A P2P fill between alice (seller) and bob (buyer), a bank deal for carol, and a manual hedge. */
+async function day(h: Harness) {
+  h.customer('alice', { USD: '1000', TRY: '0' });
+  h.customer('bob', { USD: '0', TRY: '100000' });
+  h.customer('carol', { USD: '0', TRY: '100000' });
+  const [alice, bob, carol] = await Promise.all(['alice', 'bob', 'carol'].map((r) => h.login(r)));
+  await h.place(alice, { side: 'SELL', qty: '1000', price: '49.15' });
+  await h.place(bob, { side: 'BUY', qty: '1000', price: '49.15' });
+  const q = await h.req('POST', '/v1/bank/quotes', carol, { pair: 'USDTRY', side: 'BUY', qty: '100' });
+  expect((await h.req('POST', '/v1/bank/deals', carol, { quoteId: q.body.id })).status).toBe(201);
+  expect((await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'BUY', qty: '100' })).status).toBe(200);
+  const { rows } = await h.ctx.db.query(`select fill_id::text from settlements limit 1`);
+  return { fillId: rows[0].fill_id as string };
+}
+
+/** A manual run around now (platform rows and mock postings carry the real time, not the harness clock). */
+async function run(h: Harness) {
+  const res = await h.req('POST', '/ops/reconciliation/runs', OPS, {
+    from: new Date(Date.now() - 3_600_000).toISOString(),
+    to: new Date(Date.now() + 60_000).toISOString(),
+  });
+  expect(res.status).toBe(200);
+  return res.body as { id: string; status: string; coreListing: boolean; summary: any; items: { severity: string; kind: string; source: string; ref: string; details: any }[] };
+}
+
+describe('reconciliation', () => {
+  it('finds nothing when the platform, core banking and the LPs agree, and totals match per currency', async () => {
+    h = await startHarness();
+    await day(h);
+    const r = await run(h);
+    expect(r.status).toBe('CLEAN');
+    expect(r.coreListing).toBe(true);
+    expect(r.items).toEqual([]);
+    expect(r.summary.checked).toEqual({ settlementLegs: 2, bankDeals: 1, hedges: 1, corePostings: 3 });
+    // 1,000 USD bought from alice and sold to bob, 100 USD sold to carol: platform and core agree.
+    expect(r.summary.totals.USD).toEqual({ platformBought: '100000', platformSold: '110000', coreBought: '100000', coreSold: '110000' });
+
+    // Listed, readable, and on the readiness check.
+    expect((await h.req('GET', '/ops/reconciliation/runs', OPS)).body[0]).toMatchObject({ id: r.id, status: 'CLEAN', trigger: 'MANUAL' });
+    expect((await h.req('GET', `/ops/reconciliation/runs/${r.id}`, OPS)).body.items).toEqual([]);
+    expect((await h.req('GET', '/ready')).body.reconciliation).toMatchObject({ runId: r.id, status: 'CLEAN', breaks: 0 });
+    const { rows } = await h.ctx.db.query(`select action from audit_log where action = 'reconciliation.run'`);
+    expect(rows).toHaveLength(1);
+  });
+
+  it('reports a core banking posting the platform does not know', async () => {
+    h = await startHarness();
+    await day(h);
+    // Someone posts an FX transaction through the platform's channel by hand.
+    const sample = [...coreTxns(h).values()].find((t) => t.request.leg === 'BANK_SELL')!.request;
+    await h.bank.postFxTransaction({ ...sample, holdIds: [], idempotencyKey: 'manual:1', reference: 'MANUAL-1' });
+    const r = await run(h);
+    expect(r.status).toBe('BREAKS');
+    expect(r.items).toEqual([expect.objectContaining({ severity: 'BREAK', kind: 'UNKNOWN_IN_PLATFORM', source: 'CORE' })]);
+  });
+
+  it('reports an earlier retry round of a leg still booked next to the current one (double posting)', async () => {
+    h = await startHarness();
+    const { fillId } = await day(h);
+    const sell = coreTxns(h).get(`fill:${fillId}:BANK_SELL`)!.request;
+    await h.bank.postFxTransaction({ ...sell, holdIds: [], idempotencyKey: `fill:${fillId}:BANK_SELL:r1` });
+    const r = await run(h);
+    expect(r.items).toEqual([
+      expect.objectContaining({ kind: 'DUPLICATE_POSTING', source: 'CORE', details: expect.objectContaining({ currentKey: `fill:${fillId}:BANK_SELL` }) }),
+    ]);
+  });
+
+  it('reports a leg whose amounts differ in core banking, and one core banking does not have', async () => {
+    h = await startHarness();
+    const { fillId } = await day(h);
+    coreTxns(h).get(`fill:${fillId}:BANK_BUY`)!.request.customerAmount += 100n;
+    coreTxns(h).delete(`fill:${fillId}:BANK_SELL`);
+    const r = await run(h);
+    expect(r.status).toBe('BREAKS');
+    const kinds = r.items.map((i) => [i.kind, i.details.leg]).sort();
+    expect(kinds).toEqual([
+      ['AMOUNT_MISMATCH', 'BANK_BUY'],
+      ['MISSING_IN_CORE', 'BANK_SELL'],
+    ]);
+    const mismatch = r.items.find((i) => i.kind === 'AMOUNT_MISMATCH')!;
+    expect(Object.keys(mismatch.details.diffs)).toEqual(['customerAmount']);
+    expect(r.summary.byKind).toEqual({ AMOUNT_MISMATCH: 1, MISSING_IN_CORE: 1 });
+  });
+
+  it('reports a settled leg core banking reversed and a deal the platform rejected but core banking booked', async () => {
+    h = await startHarness();
+    const { fillId } = await day(h);
+    coreTxns(h).get(`fill:${fillId}:BANK_BUY`)!.reversed = true;
+    await h.ctx.db.query(`update bank_deals set status = 'REJECTED'`);
+    const r = await run(h);
+    expect(r.items.map((i) => i.kind).sort()).toEqual(['BOOKED_BUT_NOT_SETTLED', 'REVERSED_IN_CORE']);
+    expect(r.items.find((i) => i.kind === 'BOOKED_BUT_NOT_SETTLED')!.source).toBe('BANK_DEAL');
+  });
+
+  it('checks hedges against the LP: missing there, or executed although the platform counts it rejected', async () => {
+    h = await startHarness();
+    await day(h);
+    expect((await h.req('POST', '/ops/dealing/hedges', OPS, { pair: 'USDTRY', side: 'SELL', qty: '50' })).status).toBe(200);
+    const { rows } = await h.ctx.db.query(`select id::text, lp, lp_ref from hedges order by seq`);
+    lpExecutions(h).delete(`${rows[0].lp}:${rows[0].lp_ref}`);
+    await h.ctx.db.query(`update hedges set status = 'REJECTED' where id::text = $1`, [rows[1].id]);
+    const r = await run(h);
+    expect(r.items.map((i) => [i.kind, i.ref]).sort()).toEqual(
+      [
+        ['HEDGE_EXECUTED_BUT_REJECTED', rows[1].id],
+        ['HEDGE_MISSING_AT_LP', rows[0].id],
+      ].sort(),
+    );
+  });
+
+  it('reports a hedge whose LP execution differs in quantity or rate', async () => {
+    h = await startHarness();
+    await day(h);
+    const { rows } = await h.ctx.db.query(`select lp, lp_ref from hedges`);
+    const exec = lpExecutions(h).get(`${rows[0].lp}:${rows[0].lp_ref}`)!;
+    exec.qty = '90';
+    exec.rate = '50';
+    const r = await run(h);
+    expect(r.items).toEqual([expect.objectContaining({ kind: 'HEDGE_MISMATCH', details: expect.objectContaining({ fields: ['qty', 'rate'] }) })]);
+  });
+
+  it('lists records still in flight past the grace time as open items, not breaks', async () => {
+    h = await startHarness();
+    await day(h);
+    await h.ctx.db.query(`update settlements set status = 'UNKNOWN_OUTCOME', updated_at = now() - interval '2 hours' where leg = 'BANK_SELL'`);
+    await h.ctx.db.query(`update settlements set status = 'PENDING', updated_at = now() where leg = 'BANK_BUY'`);
+    const r = await run(h);
+    expect(r.status).toBe('OPEN_ITEMS');
+    // The leg stuck for two hours is reported; the one updated a moment ago is still in flight.
+    expect(r.items).toEqual([expect.objectContaining({ severity: 'OPEN_ITEM', kind: 'OPEN_SETTLEMENT', details: expect.objectContaining({ leg: 'BANK_SELL' }) })]);
+  });
+
+  it('without a core banking listing, still finds what is missing by key (and says it could not list)', async () => {
+    const bank = new MockCoreBank();
+    bank.setReferenceRate('USDTRY', '49.15');
+    (bank as unknown as { listFxTransactions?: unknown }).listFxTransactions = undefined;
+    h = await startHarness({ bank });
+    const { fillId } = await day(h);
+    coreTxns(h).delete(`fill:${fillId}:BANK_SELL`);
+    const r = await run(h);
+    expect(r.coreListing).toBe(false);
+    expect(r.summary.checked.corePostings).toBeNull();
+    expect(r.items).toEqual([expect.objectContaining({ kind: 'MISSING_IN_CORE' })]);
+  });
+
+  it('runs once a day after its time, catching up on yesterday when started before it', async () => {
+    h = await startHarness();
+    const runs = async () => (await h.ctx.db.query(`select trigger, window_from, window_to from recon_runs order by started_at`)).rows;
+    // 12:00 in Istanbul, before today's 23:30: yesterday's run is due.
+    await h.ctx.reconciliation.runDailyIfDue();
+    expect(await runs()).toEqual([{ trigger: 'SCHEDULED', window_from: new Date('2026-10-03T20:30:00Z'), window_to: new Date('2026-10-04T20:30:00Z') }]);
+    await h.ctx.reconciliation.runDailyIfDue();
+    expect(await runs()).toHaveLength(1);
+    // After 23:30 today: today's run.
+    h.clock.now = new Date('2026-10-05T20:31:00Z');
+    await h.ctx.scheduler.tick();
+    expect((await runs()).map((r) => r.window_to)).toEqual([new Date('2026-10-04T20:30:00Z'), new Date('2026-10-05T20:30:00Z')]);
+    // Switched off: nothing more.
+    await h.setConfig((c) => ({ ...c, reconciliation: { ...c.reconciliation, enabled: false } }));
+    h.clock.now = new Date('2026-10-06T20:31:00Z');
+    expect(await h.ctx.reconciliation.runDailyIfDue()).toBeUndefined();
+  });
+
+  it('refuses a second run while one is running, and a reversed range', async () => {
+    h = await startHarness();
+    await h.ctx.db.query(`insert into recon_runs (window_from, window_to, trigger, actor, status) values (now(), now(), 'MANUAL', 'x', 'RUNNING')`);
+    const busy = await h.req('POST', '/ops/reconciliation/runs', OPS, {});
+    expect(busy.status).toBe(409);
+    expect(busy.body.error).toBe('RECONCILIATION_RUNNING');
+    const reversed = await h.req('POST', '/ops/reconciliation/runs', OPS, { from: '2026-10-05T10:00:00Z', to: '2026-10-05T09:00:00Z' });
+    expect(reversed.status).toBe(400);
+  });
+});
