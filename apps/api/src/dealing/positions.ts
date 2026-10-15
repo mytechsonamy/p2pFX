@@ -525,7 +525,9 @@ export class PositionKeeper {
       const started = Date.now();
       let exec;
       try {
-        exec = await this.lp.execute({ lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref, limitRate: formatPrice(limit) });
+        exec = await this.lp.execute({
+          lp, pair: pair.symbol, side, qty: formatDecimal(clip.qty, pair.baseDecimals), ref, limitRate: formatPrice(limit), excludeLps: config.killSwitch.disabledLps,
+        });
       } catch (err) {
         const latency = Date.now() - started;
         if (err instanceof LiquidityError) {
@@ -622,10 +624,11 @@ export class PositionKeeper {
     return hedgeView(updated[0], findPair(this.config.get().data, r.pair));
   }
 
-  /** The trade a hedge row was sent to its LP as. */
+  /** The trade a hedge row was sent to its LP as (a lookup that completes it never sends to an LP switched off now). */
   private sent(r: Record<string, any>) {
-    const decimals = findPair(this.config.get().data, r.pair)?.baseDecimals ?? 2;
-    return { pair: r.pair as string, side: r.side as 'BUY' | 'SELL', qty: formatDecimal(BigInt(r.qty), decimals) };
+    const c = this.config.get().data;
+    const decimals = findPair(c, r.pair)?.baseDecimals ?? 2;
+    return { pair: r.pair as string, side: r.side as 'BUY' | 'SELL', qty: formatDecimal(BigInt(r.qty), decimals), excludeLps: c.killSwitch.disabledLps };
   }
 
   /** Base quantity of clips sent but not confirmed by their LP yet (signed: + the bank is buying), per pair. */

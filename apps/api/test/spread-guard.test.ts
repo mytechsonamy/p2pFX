@@ -119,6 +119,44 @@ describe('off-hours bank price', () => {
     expect(rows.every((r: { side: string; status: string }) => r.side === 'BUY' && r.status === 'DONE')).toBe(true);
   });
 
+  it('hedges at the open even when the first price after the open is refused by the spread guard', async () => {
+    h = await startHarness();
+    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, positionLimits: { ...c.dealing.positionLimits, USD: '10000' } } }));
+    h.customer('ayse', { USD: '0', TRY: '10000000' });
+    h.clock.now = new Date('2026-10-09T20:55:00Z');
+    await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'));
+    h.clock.now = new Date('2026-10-10T12:00:00Z');
+    const ayse = await h.login('ayse');
+    const q = await h.req('POST', '/v1/bank/quotes', ayse, { pair: 'USDTRY', side: 'BUY', qty: '20000' });
+    expect((await h.req('POST', '/v1/bank/deals', ayse, { quoteId: q.body.id })).status).toBe(201);
+
+    // Sunday open: the LPs are still wide, so the first live refresh gives no price and nothing is hedged yet.
+    h.clock.now = new Date('2026-10-11T21:00:05Z');
+    quote([['49.00', '50.00']]);
+    await expect(h.ctx.prices.refresh('USDTRY')).rejects.toMatchObject({ code: 'PRICE_UNAVAILABLE' });
+    await h.ctx.positions.idle();
+    expect((await h.ctx.db.query('select count(*)::int as n from hedges')).rows[0].n).toBe(0);
+
+    // Once the spread narrows, the reopening is still known: the weekend position is hedged.
+    quote([['49.14', '49.16'], ['49.13', '49.17'], ['49.12', '49.18']]);
+    await h.ctx.prices.refresh('USDTRY');
+    await h.ctx.positions.idle();
+    const { rows } = await h.ctx.db.query('select side, status from hedges');
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r: { side: string; status: string }) => r.side === 'BUY' && r.status === 'DONE')).toBe(true);
+  });
+
+  it('does not quote off hours from a close set by an LP that has been switched off since', async () => {
+    h = await startHarness();
+    h.clock.now = new Date('2026-10-09T20:55:00Z');
+    expect((await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'))).status).toBe(200);
+    await h.setConfig((c) => ({ ...c, killSwitch: { ...c.killSwitch, disabledLps: ['LP-A', 'LP-B', 'LP-C'] } }));
+    h.clock.now = new Date('2026-10-10T12:00:00Z');
+    const off = await h.req('GET', '/v1/bank/rates/USDTRY', await h.login('ayse'));
+    expect(off.status).toBe(503);
+    expect(off.body.details?.reason).toBe('MARKET_CLOSED');
+  });
+
   it('gives no price when off-hours quoting is switched off or the close is too old', async () => {
     h = await startHarness();
     h.clock.now = new Date('2026-10-09T20:55:00Z');

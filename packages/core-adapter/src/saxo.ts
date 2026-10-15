@@ -1,4 +1,5 @@
 import {
+  beyondLimit,
   LiquidityError,
   LiquidityOutcomeUnknownError,
   type LiquidityAdapter,
@@ -46,6 +47,10 @@ interface OrderActivity {
   ActivityTime?: string;
 }
 
+/** Order activities read per page when a trade is looked up by reference, and how many pages at most. */
+const AUDIT_PAGE = 1000;
+const AUDIT_MAX_PAGES = 20;
+
 /** Saxo prices with up to 8 decimals as plain strings (no exponent). */
 const num = (v: number) => v.toFixed(8).replace(/\.?0+$/, '');
 
@@ -62,6 +67,8 @@ export class SaxoLiquidity implements LiquidityAdapter {
   private uics?: Promise<Map<string, number>>;
   private accountKey?: Promise<string>;
   private cache?: { at: number; quotes: Promise<Map<string, LpQuote>> };
+  /** Saxo order ids of the orders this process placed, by the bank's reference: looked up directly, not searched. */
+  private readonly orderIds = new Map<string, string>();
 
   constructor(private readonly opts: SaxoOptions) {
     this.name = opts.name ?? 'SAXO';
@@ -70,12 +77,17 @@ export class SaxoLiquidity implements LiquidityAdapter {
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
-  /** `trade`: a call that may have traded, so transport failures and 5xx are an unknown outcome. */
-  private async call<T>(method: string, path: string, body?: unknown, opts: { trade?: boolean; requestId?: string } = {}): Promise<T> {
-    const fail = (message: string) => (opts.trade ? new LiquidityOutcomeUnknownError(message) : new LiquidityError(message));
+  /**
+   * `trade`: the call that places an order, so transport failures and 5xx are an unknown outcome (a 401 or 4xx means
+   * Saxo refused the order). `placed`: a call made after an order was accepted (the fill poll), so every failure,
+   * including 401 (the token expired meanwhile) and 429 (rate limit), is an unknown outcome: the order may fill.
+   */
+  private async call<T>(method: string, path: string, body?: unknown, opts: { trade?: boolean; placed?: boolean; requestId?: string } = {}): Promise<T> {
+    const fail = (message: string) => (opts.trade || opts.placed ? new LiquidityOutcomeUnknownError(message) : new LiquidityError(message));
+    const refused = (message: string) => (opts.placed ? new LiquidityOutcomeUnknownError(message) : new LiquidityError(message));
     let res: Response;
     try {
-      res = await this.fetchFn(`${this.base}${path}`, {
+      res = await this.fetchFn(path.startsWith('http') ? path : `${this.base}${path}`, {
         method,
         headers: {
           authorization: `Bearer ${this.opts.token}`,
@@ -89,9 +101,9 @@ export class SaxoLiquidity implements LiquidityAdapter {
       throw fail(`Saxo unreachable: ${(err as Error).message}`);
     }
     const json = (await res.json().catch(() => undefined)) as any;
-    if (res.status === 401) throw new LiquidityError('Saxo rejected the token (expired 24-hour token?)');
+    if (res.status === 401) throw refused('Saxo rejected the token (expired 24-hour token?)');
     if (res.status >= 500) throw fail(`Saxo returned ${res.status}`);
-    if (!res.ok) throw new LiquidityError(`Saxo ${json?.ErrorInfo?.ErrorCode ?? json?.ErrorCode ?? res.status}: ${json?.ErrorInfo?.Message ?? json?.Message ?? ''}`.trim());
+    if (!res.ok) throw refused(`Saxo ${json?.ErrorInfo?.ErrorCode ?? json?.ErrorCode ?? res.status}: ${json?.ErrorInfo?.Message ?? json?.Message ?? ''}`.trim());
     return json as T;
   }
 
@@ -148,7 +160,10 @@ export class SaxoLiquidity implements LiquidityAdapter {
       return out;
     })();
     this.cache = { at: now, quotes };
-    quotes.catch(() => (this.cache = undefined));
+    // Only this fetch's own entry is dropped: a newer one made meanwhile stays.
+    quotes.catch(() => {
+      if (this.cache?.quotes === quotes) this.cache = undefined;
+    });
     return quotes;
   }
 
@@ -160,16 +175,21 @@ export class SaxoLiquidity implements LiquidityAdapter {
 
   async execute(req: LpExecutionRequest): Promise<LpExecution> {
     if (req.lp !== this.name) throw new LiquidityError(`unknown LP ${req.lp}`);
-    const done = await this.findExecution(req.lp, req.ref);
-    if (done) return done;
+    // A reference this process already sent is never sent again: it is filled, or its outcome is still open.
+    // (After a restart the caller looks a reference up before it re-sends it.)
+    if (this.orderIds.has(req.ref)) {
+      const done = await this.findExecution(req.lp, req.ref, req);
+      if (done) return done;
+      throw new LiquidityOutcomeUnknownError(`Saxo order for ${req.ref} was already sent and is not confirmed filled`);
+    }
     const uic = (await this.uicMap()).get(req.pair);
     if (uic === undefined) throw new LiquidityError(`Saxo does not trade ${req.pair}`);
     // Saxo gets a market order; the limit is enforced against its current price before the order is sent.
     if (req.limitRate) {
       this.cache = undefined;
       const [q] = await this.quotes(req.pair);
-      const rate = Number(req.side === 'BUY' ? q.ask : q.bid);
-      if (req.side === 'BUY' ? rate > Number(req.limitRate) : rate < Number(req.limitRate)) {
+      const rate = req.side === 'BUY' ? q.ask : q.bid;
+      if (beyondLimit(req.side, rate, req.limitRate)) {
         throw new LiquidityError(`SAXO price moved: ${rate} is beyond the limit ${req.limitRate}`);
       }
     }
@@ -190,9 +210,10 @@ export class SaxoLiquidity implements LiquidityAdapter {
       { trade: true, requestId: req.ref },
     );
     if (!placed.OrderId) throw new LiquidityOutcomeUnknownError('Saxo accepted the order without an order id');
+    this.orderIds.set(req.ref, placed.OrderId);
     const deadline = Date.now() + (this.opts.fillTimeoutMs ?? 5_000);
     for (;;) {
-      const last = await this.call<{ Data?: OrderActivity[] }>('GET', `/cs/v1/audit/orderactivities?OrderId=${placed.OrderId}&EntryType=Last`, undefined, { trade: true });
+      const last = await this.call<{ Data?: OrderActivity[] }>('GET', `/cs/v1/audit/orderactivities?OrderId=${placed.OrderId}&EntryType=Last`, undefined, { placed: true });
       const a = last.Data?.[0];
       const exec = a && this.toExecution(req, a);
       if (exec) return exec;
@@ -219,13 +240,29 @@ export class SaxoLiquidity implements LiquidityAdapter {
   }
 
   /**
-   * The order activity audit cannot be filtered by reference, so the latest activities are searched for the
-   * bank's reference (the hedge lookup runs soon after the trade, well within that window).
+   * The fill for the bank's reference. An order this process placed is read by its order id. Otherwise the order
+   * activity audit (which cannot be filtered by reference) is searched page by page; "not found" is only answered
+   * once every page was read; a search that hits the page cap fails instead, so the trade stays open.
    */
   async findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>) {
     if (lp !== this.name) return undefined;
-    const r = await this.call<{ Data?: OrderActivity[] }>('GET', '/cs/v1/audit/orderactivities?EntryType=Last&$top=500');
-    const a = r.Data?.find((x) => x.ExternalReference === ref && x.Status === 'FinalFill');
-    return a ? this.toExecution({ lp, ref, ...request }, a) : undefined;
+    const known = this.orderIds.get(ref);
+    if (known) {
+      const r = await this.call<{ Data?: OrderActivity[] }>('GET', `/cs/v1/audit/orderactivities?OrderId=${known}&EntryType=Last`);
+      const a = r.Data?.find((x) => x.Status === 'FinalFill');
+      return a ? this.toExecution({ lp, ref, ...request }, a) : undefined;
+    }
+    let next: string | undefined = `/cs/v1/audit/orderactivities?EntryType=Last&$top=${AUDIT_PAGE}`;
+    for (let page = 0; next; page++) {
+      if (page === AUDIT_MAX_PAGES) throw new LiquidityError(`Saxo lookup of ${ref} stopped after ${AUDIT_MAX_PAGES * AUDIT_PAGE} activities`);
+      const r: { Data?: OrderActivity[]; __next?: string } = await this.call('GET', next);
+      const a = r.Data?.find((x) => x.ExternalReference === ref && x.Status === 'FinalFill');
+      if (a) {
+        this.orderIds.set(ref, a.OrderId);
+        return this.toExecution({ lp, ref, ...request }, a);
+      }
+      next = r.__next;
+    }
+    return undefined;
   }
 }
