@@ -216,7 +216,7 @@ function AmendSheet({ order: o, pair, onClose }: { order: Order; pair: PairInfo;
           <small>{t('rate.bestAsk')}</small>
           <strong>{bestAsk ? formatPrice(bestAsk, locale) : '—'}</strong>
         </div>
-        {bank && (
+        {bank && !bank.unavailable && (
           <div>
             <small>{t(buy ? 'amend.bankBuy' : 'amend.bankSell', { bank: config.bank.name })}</small>
             <strong>{formatPrice(buy ? bank.buy : bank.sell, locale)}</strong>
