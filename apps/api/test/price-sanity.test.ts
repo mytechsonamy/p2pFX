@@ -155,16 +155,29 @@ describe('price sanity', () => {
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
+  /** Makes the LP quotes of the next refresh wait until `release()`: that refresh is the slow one. */
+  function slowQuotes() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const quotes = h.liquidity.quotes.bind(h.liquidity);
+    h.liquidity.quotes = async (pair: string) => {
+      await gate;
+      return quotes(pair);
+    };
+    return release;
+  }
+
   it('a slower refresh that started first does not overwrite the price of a later one', async () => {
     h = await startHarness();
     quote([['49.14', '49.16']]);
     await h.ctx.prices.refresh('USDTRY');
-    h.bank.getReferenceRate = () => new Promise(() => {}); // the next read hangs: its refresh waits 500 ms
-    quote([['49.15', '49.17']], 61_000);
-    const slow = h.ctx.prices.refresh('USDTRY'); // starts the read and waits
+    quote([['49.15', '49.17']], 2000);
+    const release = slowQuotes();
+    const slow = h.ctx.prices.refresh('USDTRY'); // waits for its LP quotes
     quote([['49.16', '49.18']], 10);
-    await h.ctx.prices.refresh('USDTRY'); // started later, does not wait
+    await h.ctx.prices.refresh('USDTRY'); // started later, finishes first
     expect(h.ctx.prices.cached('USDTRY')!.bid).toBe(4_916_000_000n);
+    release();
     await slow;
     expect(h.ctx.prices.cached('USDTRY')!.bid).toBe(4_916_000_000n);
   });
@@ -173,11 +186,12 @@ describe('price sanity', () => {
     h = await startHarness();
     quote([['49.14', '49.16']]);
     await h.ctx.prices.refresh('USDTRY');
-    h.bank.getReferenceRate = () => new Promise(() => {});
-    quote([['49.15', '49.17']], 61_000);
+    quote([['49.15', '49.17']], 2000);
+    const release = slowQuotes();
     const slow = h.ctx.prices.refresh('USDTRY');
     quote([['49.00', '50.00']], 10); // the later refresh sees a wide market
     await expect(h.ctx.prices.refresh('USDTRY')).rejects.toMatchObject({ code: 'PRICE_UNAVAILABLE' });
+    release();
     await expect(slow).rejects.toMatchObject({ code: 'PRICE_UNAVAILABLE', details: { reason: 'WIDE_MARKET' } });
     expect(h.ctx.prices.cached('USDTRY')).toBeUndefined();
     expect(h.ctx.prices.offState('USDTRY')).toEqual({ reason: 'WIDE_MARKET' });
