@@ -386,6 +386,8 @@ describe('4: a market order is bound to the protection price the customer confir
     expect((await h.place(veli, { side: 'BUY', qty: '100', type: 'MARKET', validity: undefined })).status).toBe(400);
 
     // The LP moves up 0.50 after the confirmation: the protection the bank would give now is worse for the buyer.
+    // (A ~100 bps move: the price sanity jump check is widened so this test is about protection, not jumps.)
+    await h.setConfig((c) => ({ ...c, dealing: { ...c.dealing, priceSanity: { ...c.dealing.priceSanity, maxJumpBps: 500 } } }));
     const quotes = h.liquidity.quotes.bind(h.liquidity);
     let shift = 0.5;
     h.liquidity.quotes = async (pair: string) =>

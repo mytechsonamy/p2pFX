@@ -68,7 +68,7 @@ export interface BankRates {
 }
 
 /** Why the bank has no price for a pair: no fresh LP price, or the spread guard (market too wide). */
-export type BankPriceOff = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED';
+export type BankPriceOff = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED' | 'PRICE_SUSPECT' | 'PRICE_JUMP';
 
 /** What the client holds per pair: the latest rates with when they arrived (client clock), or why there are none. */
 export type BankRatesState =

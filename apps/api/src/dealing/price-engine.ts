@@ -23,7 +23,12 @@ export interface Aggregate {
    * It has no LP quotes, so nothing hedges on it.
    */
   offHours?: { closeAt: Date; nextOpen?: Date };
+  /** LPs left out of this aggregate by the price sanity check (mid too far from the other LPs' median). */
+  excludedLps?: string[];
 }
+
+/** Reads the core banking reference rate of a pair (PRICE_SCALE units), or undefined when it has none. */
+export type ReferenceRateSource = (pair: string) => Promise<bigint | undefined>;
 
 export interface SegmentRates {
   /** The customer buys from the bank at this rate. */
@@ -41,6 +46,16 @@ export const OFF_HOURS_LP = 'CLOSE';
 const TICK_EVERY_MS = 5000;
 /** Clock skew tolerated on an LP quote's timestamp. */
 const FUTURE_TOLERANCE_MS = 2000;
+/** How long a core banking reference rate is reused before it is read again. */
+const REFERENCE_TTL_MS = 60_000;
+/** A reference rate older than this is not used for the sanity check (core banking unreachable for long). */
+const REFERENCE_MAX_AGE_MS = 10 * 60_000;
+/** How long the price engine waits for the reference rate before going on with the one it has. */
+const REFERENCE_TIMEOUT_MS = 500;
+/** The jump check compares with the last accepted price only while it is this recent (else any level is accepted). */
+const JUMP_WINDOW_MS = 60_000;
+/** An excluded LP is logged at most this often per pair. */
+const EXCLUDE_LOG_EVERY_MS = 30_000;
 
 /**
  * Price module: pulls quotes from the liquidity providers, drops stale ones, keeps the best bid and ask
@@ -54,6 +69,11 @@ export class PriceEngine {
   /** The last LP price per pair (raw, before any widening): the close price the bank quotes from while closed. */
   private readonly lastLp = new Map<string, { bid: bigint; ask: bigint; at: Date }>();
   private readonly reopenListeners: ((pair: string) => void)[] = [];
+  /** Core banking reference rates, read at most once a minute per pair. */
+  private readonly reference = new Map<string, { rate: bigint | undefined; at: number }>();
+  /** A price that jumped past maxJumpBps, waiting to hold for jumpConfirmMs before it becomes the new level. */
+  private readonly pendingJump = new Map<string, { mid: bigint; since: number }>();
+  private readonly excludeLogged = new Map<string, number>();
   private timer?: NodeJS.Timeout;
 
   constructor(
@@ -63,6 +83,7 @@ export class PriceEngine {
     private readonly events: EventBus,
     private readonly clock: () => Date,
     private readonly log: FastifyBaseLogger,
+    private readonly referenceRate?: ReferenceRateSource,
   ) {}
 
   start(intervalMs: number) {
@@ -153,11 +174,25 @@ export class PriceEngine {
       }
     });
     if (!fresh.length) return this.unavailable(pair, 'NO_PRICE', `no live LP price for ${pair}`);
-    const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => fresh.reduce((a, b) => (pick(a, b) ? a : b));
+    const sanity = c.dealing.priceSanity;
+    // Outliers: with three or more LPs, one whose mid is far from the median is a bad feed, not the market.
+    const { kept: usable, excluded } = sanity.enabled ? dropOutliers(fresh, sanity.maxLpDeviationBps) : { kept: fresh, excluded: [] };
+    if (excluded.length) this.logExcluded(pair, excluded, now);
+    const best = (pick: (a: LpQuote, b: LpQuote) => boolean) => usable.reduce((a, b) => (pick(a, b) ? a : b));
     const bidQ = best((a, b) => parsePrice(a.bid) >= parsePrice(b.bid));
     const askQ = best((a, b) => parsePrice(a.ask) <= parsePrice(b.ask));
     const sourceAt = new Date(Math.min(new Date(bidQ.at).getTime(), new Date(askQ.at).getTime()));
-    const agg: Aggregate = { pair, bid: parsePrice(bidQ.bid), ask: parsePrice(askQ.ask), bidLp: bidQ.lp, askLp: askQ.lp, quotes: fresh, at: now, sourceAt };
+    const agg: Aggregate = {
+      pair,
+      bid: parsePrice(bidQ.bid),
+      ask: parsePrice(askQ.ask),
+      bidLp: bidQ.lp,
+      askLp: askQ.lp,
+      quotes: usable,
+      at: now,
+      sourceAt,
+      ...(excluded.length ? { excludedLps: excluded.map((q) => q.lp) } : {}),
+    };
     // Spread guard: a crossed best price (one LP's bid above another's ask) or a spread wider than the limit is a
     // market the bank does not quote into; the bank's price comes back when the LPs narrow again.
     const limitBps = findPair(c, pair)?.maxSpreadBps ?? c.dealing.maxSpreadBps;
@@ -165,6 +200,34 @@ export class PriceEngine {
     if (agg.bid > agg.ask || spreadBps > limitBps) {
       this.log.warn({ pair, bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), bidLp: agg.bidLp, askLp: agg.askLp, spreadBps, limitBps }, 'spread guard: no bank price');
       return this.unavailable(pair, 'WIDE_MARKET', `${pair} spread ${spreadBps.toFixed(1)} bps is beyond the limit ${limitBps} bps`);
+    }
+    if (sanity.enabled) {
+      const mid = (agg.bid + agg.ask) / 2n;
+      // Against core banking's own rate: a feed that drifts away (all LPs together, or the only LP) is not quoted.
+      const ref = await this.referenceFor(pair, now);
+      if (ref !== undefined) {
+        const off = deviationBps(mid, ref);
+        if (off > sanity.maxReferenceDeviationBps) {
+          this.log.warn({ pair, mid: formatPrice(mid), reference: formatPrice(ref), deviationBps: off, limitBps: sanity.maxReferenceDeviationBps }, 'price sanity: LP price too far from the reference rate');
+          return this.unavailable(pair, 'PRICE_SUSPECT', `${pair} LP price is ${off.toFixed(1)} bps from the reference rate (limit ${sanity.maxReferenceDeviationBps} bps)`);
+        }
+      }
+      // Against the last accepted price: a jump is held back until the new level has held for jumpConfirmMs.
+      const last = this.lastLp.get(pair);
+      if (last && now.getTime() - last.at.getTime() <= JUMP_WINDOW_MS) {
+        const jump = deviationBps(mid, (last.bid + last.ask) / 2n);
+        if (jump > sanity.maxJumpBps) {
+          const pending = this.pendingJump.get(pair);
+          const holding = pending && deviationBps(mid, pending.mid) <= sanity.maxJumpBps;
+          if (!holding) this.pendingJump.set(pair, { mid, since: now.getTime() });
+          if (!holding || now.getTime() - pending.since < sanity.jumpConfirmMs) {
+            if (!holding) this.log.warn({ pair, mid: formatPrice(mid), last: formatPrice((last.bid + last.ask) / 2n), jumpBps: jump, limitBps: sanity.maxJumpBps }, 'price sanity: price jump held back');
+            return this.unavailable(pair, 'PRICE_JUMP', `${pair} LP price moved ${jump.toFixed(1)} bps (limit ${sanity.maxJumpBps} bps); waiting for it to hold`);
+          }
+          this.log.info({ pair, mid: formatPrice(mid), jumpBps: jump }, 'price sanity: jumped price held, accepted as the new level');
+        }
+      }
+      this.pendingJump.delete(pair);
     }
     const reopened = !!this.latest.get(pair)?.offHours;
     this.latest.set(pair, agg);
@@ -191,6 +254,36 @@ export class PriceEngine {
     const close = { bid: parsePrice(String(rows[0].bid)), ask: parsePrice(String(rows[0].ask)), at: new Date(rows[0].at) };
     this.lastLp.set(pair, close);
     return close;
+  }
+
+  /**
+   * The core banking reference rate for the sanity check: read at most once a minute, never waited on for more than
+   * REFERENCE_TIMEOUT_MS, and dropped once it is older than REFERENCE_MAX_AGE_MS. Undefined skips the check.
+   */
+  private async referenceFor(pair: string, now: Date): Promise<bigint | undefined> {
+    if (!this.referenceRate) return undefined;
+    const known = this.reference.get(pair);
+    if (!known || now.getTime() - known.at >= REFERENCE_TTL_MS) {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<'timeout'>((resolve) => (timer = setTimeout(() => resolve('timeout'), REFERENCE_TIMEOUT_MS)));
+      try {
+        const rate = await Promise.race([this.referenceRate(pair), timeout]);
+        if (rate !== 'timeout') this.reference.set(pair, { rate, at: now.getTime() });
+      } catch (err) {
+        this.log.warn({ err, pair }, 'price sanity: reference rate not available');
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    const r = this.reference.get(pair);
+    return r && now.getTime() - r.at <= REFERENCE_MAX_AGE_MS ? r.rate : undefined;
+  }
+
+  private logExcluded(pair: string, excluded: LpQuote[], now: Date) {
+    const key = `${pair}:${excluded.map((q) => q.lp).join(',')}`;
+    if (now.getTime() - (this.excludeLogged.get(key) ?? 0) < EXCLUDE_LOG_EVERY_MS) return;
+    this.excludeLogged.set(key, now.getTime());
+    this.log.warn({ pair, lps: excluded.map((q) => ({ lp: q.lp, bid: q.bid, ask: q.ask })) }, 'price sanity: LP left out, its price is far from the other LPs');
   }
 
   /** Called with the pair when the LP market opens after an off-hours period (the position can be hedged again). */
@@ -265,6 +358,30 @@ export class PriceEngine {
     if (lpDisabled(c.killSwitch.disabledLps, q.lp)) return false;
     return this.clock().getTime() - new Date(q.at).getTime() <= c.dealing.maxStalenessMs;
   }
+}
+
+/** |a − b| in basis points of b. */
+export function deviationBps(a: bigint, b: bigint): number {
+  if (b <= 0n) return Infinity;
+  const d = a > b ? a - b : b - a;
+  return Number((d * 1_000_000n) / b) / 100;
+}
+
+/**
+ * Splits fresh LP quotes into the ones that agree with the market and the outliers: with three or more quotes, a quote
+ * whose mid is more than maxBps from the median mid is an outlier. With one or two quotes nothing is dropped (there is
+ * no majority to tell which one is wrong; the spread guard and the reference check cover that case).
+ */
+export function dropOutliers(quotes: LpQuote[], maxBps: number): { kept: LpQuote[]; excluded: LpQuote[] } {
+  if (quotes.length < 3) return { kept: quotes, excluded: [] };
+  const mid = (q: LpQuote) => (parsePrice(q.bid) + parsePrice(q.ask)) / 2n;
+  const mids = quotes.map(mid).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const n = mids.length;
+  const median = n % 2 ? mids[(n - 1) / 2]! : (mids[n / 2 - 1]! + mids[n / 2]!) / 2n;
+  const kept: LpQuote[] = [];
+  const excluded: LpQuote[] = [];
+  for (const q of quotes) (deviationBps(mid(q), median) > maxBps ? excluded : kept).push(q);
+  return { kept, excluded };
 }
 
 /** (ask − bid) in basis points of the mid; negative when crossed. */

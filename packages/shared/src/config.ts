@@ -118,6 +118,34 @@ export type OffHoursConfig = z.infer<typeof OffHoursSchema>;
 
 export const DEFAULT_OFF_HOURS: OffHoursConfig = { enabled: true, extraSpreadBps: 50, positionCapPct: 20, maxCloseAgeHours: 72 };
 
+/**
+ * Price sanity: checks on LP prices beyond freshness and the spread guard. A bad tick from one LP would otherwise
+ * become the best bid or ask; a feed that drifts or jumps would be quoted to customers and hedged against.
+ */
+const PriceSanitySchema = z.object({
+  enabled: z.boolean(),
+  /**
+   * With three or more fresh LPs, an LP whose mid is further than this from the median mid (bps) is left out of the
+   * aggregate for that refresh. The pair keeps its price from the other LPs.
+   */
+  maxLpDeviationBps: z.number().min(1).max(10_000),
+  /** The aggregate mid may be at most this far from the core banking reference rate (bps); beyond it, no bank price. */
+  maxReferenceDeviationBps: z.number().min(1).max(10_000),
+  /** A move of the aggregate mid larger than this (bps) from the last accepted price is held back until it is confirmed. */
+  maxJumpBps: z.number().min(1).max(10_000),
+  /** How long a jumped price must hold (within maxJumpBps of itself) before it is accepted as the new level. */
+  jumpConfirmMs: z.number().int().min(0).max(60_000),
+});
+export type PriceSanityConfig = z.infer<typeof PriceSanitySchema>;
+
+export const DEFAULT_PRICE_SANITY: PriceSanityConfig = {
+  enabled: true,
+  maxLpDeviationBps: 50,
+  maxReferenceDeviationBps: 300,
+  maxJumpBps: 100,
+  jumpConfirmMs: 3000,
+};
+
 export const DealingSchema = z.object({
   /** How long a firm bank quote can be executed. */
   quoteTtlSeconds: z.number().int().min(1).max(120),
@@ -128,6 +156,7 @@ export const DealingSchema = z.object({
    * no bank price (Direct, ladder and bot stop) until the market narrows. A pair can set its own limit.
    */
   maxSpreadBps: z.number().min(1).max(10_000).default(100),
+  priceSanity: PriceSanitySchema.default(DEFAULT_PRICE_SANITY),
   lpMarket: LpMarketSchema.default(DEFAULT_LP_MARKET),
   offHours: OffHoursSchema.default(DEFAULT_OFF_HOURS),
   /** Pips over the best LP price: customers buy at ask + buyPips, sell at bid − sellPips. */
@@ -145,6 +174,7 @@ export const DEFAULT_DEALING: DealingConfig = {
   quoteTtlSeconds: 5,
   maxStalenessMs: 3000,
   maxSpreadBps: 100,
+  priceSanity: DEFAULT_PRICE_SANITY,
   lpMarket: DEFAULT_LP_MARKET,
   offHours: DEFAULT_OFF_HOURS,
   margins: { default: { buyPips: 1000, sellPips: 1000 }, segments: { premium: { buyPips: 400, sellPips: 400 } } },
@@ -424,7 +454,7 @@ export const ASSUMPTIONS: { key: string; label: string; paths: string[] }[] = [
   { key: 'validity', label: 'Emir geçerlilik seçenekleri ve üst sınırı', paths: ['validity'] },
   { key: 'limits', label: 'Emir ve günlük tutar limitleri', paths: ['limits', 'orderRateLimit'] },
   { key: 'hedging', label: 'Pozisyon limitleri ve otomatik hedge kuralı', paths: ['dealing.positionLimits', 'dealing.autoHedge', 'dealing.hedging'] },
-  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.lpMarket', 'dealing.offHours', 'dealing.maxDealQty'] },
+  { key: 'dealing', label: 'Banka kotasyon süresi, LP fiyat tazeliği, spread koruması, fiyat tutarlılık kontrolleri, LP piyasa saatleri, işlem üst sınırı', paths: ['dealing.quoteTtlSeconds', 'dealing.maxStalenessMs', 'dealing.maxSpreadBps', 'dealing.priceSanity', 'dealing.lpMarket', 'dealing.offHours', 'dealing.maxDealQty'] },
   { key: 'session', label: 'Müşteri oturum süresi', paths: ['session'] },
   { key: 'settlement', label: 'Settlement yeniden deneme politikası', paths: ['settlement'] },
   { key: 'bankBook', label: 'Bankanın tahtaya girdiği kademeli emirler (Bank MM)', paths: ['bankBook'] },

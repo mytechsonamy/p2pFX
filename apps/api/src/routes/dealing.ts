@@ -66,6 +66,10 @@ export function dealingRoutes(app: FastifyInstance, ctx: AppContext) {
       pairs.push({
         pair: pair.symbol,
         lps: agg?.quotes ?? [],
+        /** LPs the price sanity check left out of the aggregate (price far from the other LPs). */
+        excludedLps: agg?.excludedLps ?? [],
+        /** Why the pair has no bank price right now (spread guard, sanity check, market closed), if it has none. */
+        off: prices.offState(pair.symbol) ?? null,
         best: agg ? { bid: formatPrice(agg.bid), ask: formatPrice(agg.ask), bidLp: agg.bidLp, askLp: agg.askLp, at: agg.at.toISOString() } : null,
         segments: agg
           ? Object.fromEntries(
