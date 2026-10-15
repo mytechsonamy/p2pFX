@@ -6,10 +6,12 @@
  *   node scripts/lp-probe.mjs net                         # DNS/TCP/TLS round trips to public LP endpoints
  *   OANDA_TOKEN=… OANDA_ACCOUNT=… node scripts/lp-probe.mjs oanda [--seconds 60] [--instruments USD_TRY,EUR_TRY,XAU_USD] [--trade 5]
  *   SAXO_TOKEN=… node scripts/lp-probe.mjs saxo [--seconds 30] [--symbols USDTRY,EURTRY,XAUUSD]
+ *   LMAX_USER=… LMAX_PASS=… node scripts/lp-probe.mjs lmax [--seconds 60] [--ids 4001,4002]
  *
  * OANDA: free fxTrade Practice account, token from "Manage API Access". Only the practice hosts are used;
  * --trade N places N one-unit market orders and closes each (practice money only).
  * Saxo: free developer account, 24-hour token from the developer portal (SIM environment).
+ * LMAX: London demo account; FIX 4.4 market data session over TLS. --ids are LMAX instrument ids (tag 48).
  */
 import dns from 'node:dns/promises';
 import net from 'node:net';
@@ -37,7 +39,7 @@ const HOSTS = [
   ['OANDA practice REST', 'api-fxpractice.oanda.com'],
   ['OANDA practice stream', 'stream-fxpractice.oanda.com'],
   ['Saxo SIM gateway', 'gateway.saxobank.com'],
-  ['Saxo SIM streaming', 'streaming.saxobank.com'],
+  ['Saxo SIM streaming', 'sim-streaming.saxobank.com'],
   ['LMAX London demo (web)', 'web-order.london-demo.lmax.com'],
   ['LMAX London demo (FIX md)', 'fix-marketdata.london-demo.lmax.com'],
   ['Integral (web)', 'www.integral.com'],
@@ -209,9 +211,120 @@ async function runSaxo() {
   }
 }
 
-const run = { net: runNet, oanda: runOanda, saxo: runSaxo }[mode];
+
+// ---- LMAX demo FIX 4.4 market data ---------------------------------------------------------
+
+const SOH = '\x01';
+const fixTime = (d = new Date()) => d.toISOString().replace(/-/g, '').replace('T', '-').replace('Z', '');
+
+function fixMessage(fields) {
+  const body = fields.map(([t, v]) => `${t}=${v}${SOH}`).join('');
+  const head = `8=FIX.4.4${SOH}9=${Buffer.byteLength(body)}${SOH}`;
+  const sum = [...Buffer.from(head + body)].reduce((a, b) => a + b, 0) % 256;
+  return `${head}${body}10=${String(sum).padStart(3, '0')}${SOH}`;
+}
+
+function parseFix(raw) {
+  const out = [];
+  for (const kv of raw.split(SOH)) {
+    const i = kv.indexOf('=');
+    if (i > 0) out.push([kv.slice(0, i), kv.slice(i + 1)]);
+  }
+  return out;
+}
+
+async function runLmax() {
+  const user = process.env.LMAX_USER;
+  const pass = process.env.LMAX_PASS;
+  if (!user || !pass) throw new Error('set LMAX_USER and LMAX_PASS (London demo account)');
+  const seconds = Number(opt('seconds', '60'));
+  const ids = opt('ids', '4001').split(',');
+  const host = opt('host', 'fix-marketdata.london-demo.lmax.com');
+  const target = opt('target', 'LMXBDM');
+  const port = Number(opt('port', '443'));
+  let seq = 0;
+  const send = (sock, type, fields) =>
+    sock.write(fixMessage([['35', type], ['49', user], ['56', target], ['34', ++seq], ['52', fixTime()], ...fields]));
+
+  const per = Object.fromEntries(ids.map((id) => [id, { ticks: 0, gaps: [], spreadsBps: [], ageMs: [], last: 0, bid: 0, ask: 0 }]));
+  const t0 = performance.now();
+  const sock = tls.connect({ host, port, servername: host });
+  await new Promise((res, rej) => sock.once('secureConnect', res).once('error', rej));
+  const connectMs = performance.now() - t0;
+  const logonAt = performance.now();
+  send(sock, 'A', [['98', '0'], ['108', '30'], ['141', 'Y'], ['553', user], ['554', pass]]);
+  let logonMs;
+  const hb = setInterval(() => send(sock, '0', []), 30_000);
+  let buf = '';
+  const done = new Promise((resolve, reject) => {
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('latin1');
+      for (;;) {
+        const end = buf.search(/\x0110=\d{3}\x01/);
+        if (end < 0) break;
+        const raw = buf.slice(0, end + 8);
+        buf = buf.slice(end + 8);
+        const f = parseFix(raw);
+        const get = (t) => f.find(([k]) => k === t)?.[1];
+        const type = get('35');
+        if (type === 'A') {
+          logonMs = performance.now() - logonAt;
+          console.log(`logged on: TLS connect ${connectMs.toFixed(1)} ms, logon round trip ${logonMs.toFixed(1)} ms`);
+          send(sock, 'V', [
+            ['262', `probe-${Date.now()}`], ['263', '1'], ['264', '1'], ['265', '0'],
+            ['146', ids.length], ...ids.flatMap((id) => [['48', id], ['22', '8']]),
+            ['267', '2'], ['269', '0'], ['269', '1'],
+          ]);
+          console.log(`subscribed to ${ids.join(', ')} for ${seconds}s…`);
+          setTimeout(resolve, seconds * 1000);
+        } else if (type === '1') {
+          send(sock, '0', [['112', get('112') ?? '']]);
+        } else if (type === 'W' || type === 'X') {
+          const id = get('48');
+          const s = per[id];
+          if (!s) continue;
+          let side;
+          for (const [k, v] of f) {
+            if (k === '269') side = v;
+            if (k === '270' && side === '0') s.bid = Number(v);
+            if (k === '270' && side === '1') s.ask = Number(v);
+          }
+          const now = Date.now();
+          s.ticks++;
+          if (s.last) s.gaps.push(now - s.last);
+          s.last = now;
+          const sent = get('52');
+          if (sent) s.ageMs.push(now - Date.parse(`${sent.slice(0, 4)}-${sent.slice(4, 6)}-${sent.slice(6, 8)}T${sent.slice(9)}Z`));
+          if (s.bid && s.ask) s.spreadsBps.push(((s.ask - s.bid) / ((s.ask + s.bid) / 2)) * 1e4);
+        } else if (type === '5' || type === '3' || type === 'Y' || type === 'j') {
+          console.log(`LMAX ${type === '5' ? 'logout' : 'reject'} (35=${type}): ${get('58') ?? raw.replaceAll(SOH, '|')}`);
+          if (type === '5') reject(new Error('logged out'));
+        }
+      }
+    });
+    sock.on('error', reject);
+    sock.on('close', () => reject(new Error('connection closed')));
+  });
+  try {
+    await done;
+  } finally {
+    clearInterval(hb);
+    try {
+      send(sock, '5', []);
+    } catch {}
+    sock.destroy();
+  }
+  for (const [id, s] of Object.entries(per)) {
+    console.log(`\n${id}: ${s.ticks} updates (${(s.ticks / seconds).toFixed(2)}/s), last bid/ask ${s.bid}/${s.ask}`);
+    console.log('  gap between updates ms', stats(s.gaps));
+    console.log('  spread bps            ', stats(s.spreadsBps));
+    console.log('  age on arrival ms (clock-skew sensitive)', stats(s.ageMs));
+  }
+}
+
+const run = { net: runNet, oanda: runOanda, saxo: runSaxo, lmax: runLmax }[mode];
 if (!run) {
-  console.log('usage: node scripts/lp-probe.mjs net|oanda|saxo [options] (see header)');
+  console.log('usage: node scripts/lp-probe.mjs net|oanda|saxo|lmax [options] (see header)');
   process.exit(1);
 }
 run().catch((err) => {

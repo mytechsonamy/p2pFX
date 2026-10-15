@@ -1,3 +1,5 @@
+import { parsePrice } from '@p2p/shared';
+
 /** Liquidity providers (LPs): the banks and venues the bank's FX desk prices from and hedges with. */
 
 export interface LpQuote {
@@ -19,6 +21,16 @@ export interface LpExecutionRequest {
   qty: string;
   /** The bank's reference for the trade (idempotent per LP). */
   ref: string;
+  /**
+   * Worst rate the bank accepts (BUY: highest, SELL: lowest), decimal string. An LP that cannot fill at it or
+   * better rejects the trade (LiquidityError); without it the trade fills at the LP's current price.
+   */
+  limitRate?: string;
+  /**
+   * LPs the bank has switched off (kill switch): an adapter that picks LPs itself (the funding leg of a synthetic
+   * cross) never sends to them. Lookups still search them: a trade may have reached one before it was switched off.
+   */
+  excludeLps?: string[];
 }
 
 export interface LpExecution extends LpExecutionRequest {
@@ -36,8 +48,11 @@ export interface LiquidityAdapter {
    * LiquidityOutcomeUnknownError when the trade may have happened (timeout, lost response).
    */
   execute(req: LpExecutionRequest): Promise<LpExecution>;
-  /** The execution with this reference at the LP, or undefined if the LP has none. */
-  findExecution(lp: string, ref: string): Promise<LpExecution | undefined>;
+  /**
+   * The execution with this reference at the LP, or undefined if the LP has none. `request` is the trade as
+   * it was sent (synthetic crosses need it to rebuild a two-leg trade).
+   */
+  findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>): Promise<LpExecution | undefined>;
 }
 
 export class LiquidityError extends Error {
@@ -147,9 +162,13 @@ export class MockLiquidity implements LiquidityAdapter {
     const quote = (await this.quotes(req.pair)).find((q) => q.lp === req.lp);
     if (!quote) throw new LiquidityError(`unknown LP ${req.lp}`);
     if (this.rejecting.has(req.lp)) throw new LiquidityError(`${req.lp} rejected the order`);
+    const rate = req.side === 'BUY' ? quote.ask : quote.bid;
+    if (req.limitRate && beyondLimit(req.side, rate, req.limitRate)) {
+      throw new LiquidityError(`${req.lp} price moved: ${rate} is beyond the limit ${req.limitRate}`);
+    }
     const exec: LpExecution = {
       ...req,
-      rate: req.side === 'BUY' ? quote.ask : quote.bid,
+      rate,
       tradeRef: `${req.lp}-${String(++this.seq).padStart(6, '0')}`,
       at: quote.at,
     };
@@ -217,4 +236,11 @@ export class HttpLiquidityAdapter implements LiquidityAdapter {
       throw err;
     }
   }
+}
+
+/** Whether an LP rate is worse for the bank than its limit (BUY: above it, SELL: below it), compared exactly. */
+export function beyondLimit(side: 'BUY' | 'SELL', rate: string, limit: string): boolean {
+  const r = parsePrice(rate);
+  const l = parsePrice(limit);
+  return side === 'BUY' ? r > l : r < l;
 }

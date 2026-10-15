@@ -2,27 +2,68 @@ import { useEffect, useRef, useState } from 'react';
 import { useExchange, usePair } from './store';
 import { Row, Segmented, Sheet } from './components';
 import { compareDecimal, currencySymbol, formatDecimal, formatMoney, formatPrice, formatRate, sanitizeAmountInput, toApiDecimal } from './format';
-import type { BankQuote, PairInfo, Side } from './types';
+import type { BankPriceOff, BankQuote, BankRates, PairInfo, Side } from './types';
+
+/**
+ * The bank's price is streamed about every second while it is dealable. One not refreshed for this long is shown as
+ * out of date (the stream or the LPs stalled) and cannot be tapped; the client's own clock measures it.
+ */
+const STALE_AFTER_MS = 5000;
+
+type BankPrice = { state: 'live'; rates: BankRates } | { state: 'stale'; rates: BankRates } | { state: 'off'; reason: BankPriceOff; nextOpen?: string };
+
+/** The pair's bank price and whether it can be dealt on now; re-renders every second so a stalled price greys out. */
+export function useBankPrice(symbol: string): BankPrice {
+  const { bankRates } = useExchange();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const r = bankRates[symbol];
+  if (!r) return { state: 'off', reason: 'NO_PRICE' };
+  if (r.unavailable) return { state: 'off', reason: r.reason, nextOpen: r.nextOpen };
+  return { state: now - r.receivedAt <= STALE_AFTER_MS ? 'live' : 'stale', rates: r };
+}
 
 /** The bank's live rates for this customer, on top of the order book: tap to deal instantly. */
 export function BankRow({ pair }: { pair: PairInfo }) {
-  const { bankRates, config, t, locale, openBankDeal } = useExchange();
-  const r = bankRates[pair.symbol];
+  const { config, t, locale, openBankDeal } = useExchange();
+  const price = useBankPrice(pair.symbol);
   if (!config.dealing?.enabled) return null;
+  // Prices are shown only while they can be dealt on; an out-of-date one stays visible, greyed and not tappable.
+  const r = price.state === 'off' ? undefined : price.rates;
+  const live = price.state === 'live';
+  const closed = price.state === 'off' && price.reason === 'MARKET_CLOSED';
+  const offHours = live ? r?.offHours : undefined;
+  const opensAt = (iso: string) => new Date(iso).toLocaleString(locale, { weekday: 'long', hour: '2-digit', minute: '2-digit' });
+  const pill = offHours ? t('bank.offHours') : live ? t('bank.live') : price.state === 'stale' ? t('bank.stale') : closed ? t('bank.closed') : t('bank.off');
+  const why =
+    price.state !== 'off'
+      ? t('bank.noPrice')
+      : price.reason === 'WIDE_MARKET'
+        ? t('bank.wideMarket')
+        : price.reason === 'MARKET_CLOSED'
+          ? price.nextOpen
+            ? t('bank.closedUntil', { at: opensAt(price.nextOpen) })
+            : t('bank.closedNoTime')
+          : t('bank.noPrice');
   return (
-    <section className="card bank-row">
+    <section className={`card bank-row${live ? '' : ' bank-row-off'}`}>
       <div className="card-head">
         <h3>
-          {t('bank.title', { bank: config.bank.name })} <span className="pill">{t('bank.live')}</span>
+          {t('bank.title', { bank: config.bank.name })} <span className={`pill${offHours ? ' pill-warn' : live ? '' : ' pill-muted'}`}>{pill}</span>
         </h3>
-        <small>{t('bank.hint')}</small>
+        <small>
+          {offHours ? (offHours.nextOpen ? t('bank.offHoursUntil', { at: opensAt(offHours.nextOpen) }) : t('bank.offHoursHint')) : live ? t('bank.hint') : why}
+        </small>
       </div>
       <div className="bank-prices">
-        <button className="bank-price buy" disabled={!r} onClick={() => openBankDeal({ side: 'BUY' })}>
+        <button className="bank-price buy" disabled={!live} onClick={() => openBankDeal({ side: 'BUY' })}>
           <small>{t('bank.buy')}</small>
           <strong>{r ? formatPrice(r.buy, locale) : '—'}</strong>
         </button>
-        <button className="bank-price sell" disabled={!r} onClick={() => openBankDeal({ side: 'SELL' })}>
+        <button className="bank-price sell" disabled={!live} onClick={() => openBankDeal({ side: 'SELL' })}>
           <small>{t('bank.sell')}</small>
           <strong>{r ? formatPrice(r.sell, locale) : '—'}</strong>
         </button>
@@ -33,9 +74,10 @@ export function BankRow({ pair }: { pair: PairInfo }) {
 
 /** UNIFIED presentation: the bank's Direct rates as a quick path on the ticket instead of their own area. */
 export function BankQuick({ pair, side, qty }: { pair: PairInfo; side: Side; qty?: string }) {
-  const { bankRates, config, t, locale, openBankDeal } = useExchange();
-  const r = bankRates[pair.symbol];
-  if (!config.dealing?.enabled || !r) return null;
+  const { config, t, locale, openBankDeal } = useExchange();
+  const price = useBankPrice(pair.symbol);
+  if (!config.dealing?.enabled || price.state !== 'live') return null;
+  const r = price.rates;
   return (
     <button type="button" className="link bank-quick" onClick={() => openBankDeal({ side, qty })}>
       {t('bank.quick', { buy: formatPrice(r.buy, locale), sell: formatPrice(r.sell, locale) })}
@@ -48,9 +90,10 @@ export function BankQuick({ pair, side, qty }: { pair: PairInfo; side: Side; qty
  * buying, the bank's rate is lower; selling, it is higher.
  */
 export function BetterAtBank({ side, effectivePrice, qty }: { side: Side; effectivePrice?: string; qty?: string }) {
-  const { bankRates, config, t, locale, openBankDeal, pair } = useExchange();
-  const r = bankRates[pair];
-  if (!config.dealing?.enabled || !r || !effectivePrice) return null;
+  const { config, t, locale, openBankDeal, pair } = useExchange();
+  const price = useBankPrice(pair);
+  if (!config.dealing?.enabled || price.state !== 'live' || !effectivePrice) return null;
+  const r = price.rates;
   const bank = side === 'BUY' ? r.buy : r.sell;
   const better = side === 'BUY' ? compareDecimal(bank, effectivePrice) < 0 : compareDecimal(bank, effectivePrice) > 0;
   if (!better) return null;
@@ -66,8 +109,9 @@ export function BetterAtBank({ side, effectivePrice, qty }: { side: Side; effect
 
 /** Deal with the bank: amount → firm quote with a countdown → confirm. */
 export function BankDealSheet() {
-  const { api, bankDeal, openBankDeal, bankRates, config, accounts, t, locale, errorText, addFill, track } = useExchange();
+  const { api, bankDeal, openBankDeal, config, accounts, t, locale, errorText, addFill, track } = useExchange();
   const pair = usePair();
+  const price = useBankPrice(pair.symbol);
   const [side, setSide] = useState<Side>(bankDeal?.side ?? 'BUY');
   const [qty, setQty] = useState(bankDeal?.qty ?? '');
   const [quote, setQuote] = useState<BankQuote>();
@@ -80,7 +124,7 @@ export function BankDealSheet() {
   if (!bankDeal) return null;
 
   const buy = side === 'BUY';
-  const live = bankRates[pair.symbol];
+  const live = price.state === 'live' ? price.rates : undefined;
   const amount = toApiDecimal(qty);
   const pay = accounts.find((a) => a.currency === (buy ? pair.quote : pair.base));
   const close = () => {
@@ -166,6 +210,7 @@ export function BankDealSheet() {
         </div>
       )}
       <ul className="fineprint">
+        {quote?.offHours && <li>{t('bank.offHoursQuote')}</li>}
         <li>{t('bank.counterparty', { bank: config.bank.name })}</li>
         <li>{t('bank.noCommission')}</li>
       </ul>

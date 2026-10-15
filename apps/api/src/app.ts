@@ -121,6 +121,8 @@ export async function buildApp(opts: AppOptions): Promise<{ app: FastifyInstance
   const settlement = new SettlementService(db, opts.core, config, app.log, opts.settlement);
   const prices = new PriceEngine(db, opts.liquidity, config, events, clock, app.log);
   const positions = new PositionKeeper(db, opts.liquidity, prices, config, app.log);
+  // What the bank took on while the LP market was closed is hedged as soon as it opens.
+  prices.onReopen((pair) => void positions.afterDeal(pair).catch(() => {}));
   const exchange = new Exchange(db, opts.core, config, settlement, events, app.log, clock, {
     evidence: (pair) => priceEvidence(config, prices, pair),
     headroom: (pair, side, resting) => positions.headroom(pair, side, resting),

@@ -63,7 +63,17 @@ export interface BankRates {
   /** The customer sells to the bank at this rate. */
   sell: string;
   at: string;
+  /** Set while the international market is closed: the price is the last close plus a wider margin. */
+  offHours?: { nextOpen?: string };
 }
+
+/** Why the bank has no price for a pair: no fresh LP price, or the spread guard (market too wide). */
+export type BankPriceOff = 'NO_PRICE' | 'WIDE_MARKET' | 'MARKET_CLOSED';
+
+/** What the client holds per pair: the latest rates with when they arrived (client clock), or why there are none. */
+export type BankRatesState =
+  | (BankRates & { unavailable?: false; receivedAt: number })
+  | { pair: string; unavailable: true; reason: BankPriceOff; nextOpen?: string; receivedAt: number };
 
 /** A firm bank quote, executable until `expiresAt`. */
 export interface BankQuote {
@@ -78,6 +88,8 @@ export interface BankQuote {
   total: string;
   currency: string;
   expiresAt: string;
+  /** Priced from the close while the international market is closed. */
+  offHours?: boolean;
 }
 
 export interface Account {

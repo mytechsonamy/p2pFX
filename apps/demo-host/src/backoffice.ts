@@ -145,6 +145,7 @@ const SECTIONS: Section[] = [
           { kind: 'decimal', path: ['pairs', i, 'tickSize'], label: 'Fiyat adımı', unit: p.quote },
           { kind: 'decimal', path: ['pairs', i, 'minQty'], label: 'En küçük emir', unit: p.base },
           { kind: 'decimal', path: ['pairs', i, 'priceBandPct'], label: 'Fiyat bandı', unit: '%', help: 'Referans kurdan bu kadar uzak emirler reddedilir' },
+          { kind: 'number', path: ['pairs', i, 'maxSpreadBps'], label: 'Spread koruması', unit: 'bps', min: 1, max: 10000, optional: true, placeholder: 'genel ayar', help: 'Boşsa banka genelindeki sınır geçerli' },
         ] as Field[],
       })),
   },
@@ -222,6 +223,29 @@ const SECTIONS: Section[] = [
           { kind: 'list', path: ['tradingHours', 'holidays'], label: 'Tatil günleri', placeholder: '2026-10-29', help: 'Her satıra bir tarih (YYYY-AA-GG)' },
         ],
       },
+      {
+        title: 'LP piyasa saatleri (banka fiyatı)',
+        fields: [
+          { kind: 'bool', path: ['dealing', 'lpMarket', 'enabled'], label: 'Uygula', help: 'Kapalıyken banka fiyat vermez (Direct, merdiven, bot) ve müşteriye açılış saati gösterilir' },
+          { kind: 'text', path: ['dealing', 'lpMarket', 'timezone'], label: 'Saat dilimi', help: 'FX piyasası New York saatine göre açılıp kapanır' },
+          { kind: 'int', path: ['dealing', 'lpMarket', 'weekOpen', 'day'], label: 'Hafta açılış günü', min: 1, max: 7, help: '1 = Pazartesi … 7 = Pazar' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'weekOpen', 'time'], label: 'Açılış saati' },
+          { kind: 'int', path: ['dealing', 'lpMarket', 'weekClose', 'day'], label: 'Hafta kapanış günü', min: 1, max: 7, help: '1 = Pazartesi … 7 = Pazar' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'weekClose', 'time'], label: 'Kapanış saati' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'dailyBreaks', 'metal', 'from'], label: 'Kıymetli maden arası başlangıç' },
+          { kind: 'time', path: ['dealing', 'lpMarket', 'dailyBreaks', 'metal', 'to'], label: 'Kıymetli maden arası bitiş' },
+          { kind: 'list', path: ['dealing', 'lpMarket', 'holidays'], label: 'LP tatil günleri', placeholder: '2026-12-25', help: 'Her satıra bir tarih (YYYY-AA-GG), piyasanın saat diliminde' },
+        ],
+      },
+      {
+        title: 'Piyasa kapalıyken banka fiyatı',
+        fields: [
+          { kind: 'bool', path: ['dealing', 'offHours', 'enabled'], label: 'Fiyat ver', help: 'Kapalıyken son kapanış fiyatından, ek marjla fiyat verilir; kapalıysa banka fiyatı olmaz' },
+          { kind: 'number', path: ['dealing', 'offHours', 'extraSpreadBps'], label: 'Ek marj (her taraf)', unit: 'bps', min: 0, max: 5000 },
+          { kind: 'number', path: ['dealing', 'offHours', 'positionCapPct'], label: 'Pozisyon tavanı', unit: '% (envanter tavanının)', min: 0, max: 100, help: 'Kapalıyken hedge yapılamaz; açılışta otomatik hedge edilir' },
+          { kind: 'number', path: ['dealing', 'offHours', 'maxCloseAgeHours'], label: 'Kapanış fiyatı en fazla', unit: 'saat eski', min: 1, max: 336 },
+        ],
+      },
     ],
   },
   {
@@ -246,6 +270,7 @@ const SECTIONS: Section[] = [
         fields: [
           { kind: 'int', path: ['dealing', 'quoteTtlSeconds'], label: 'Kotasyon geçerliliği', unit: 'saniye', min: 1, max: 120 },
           { kind: 'int', path: ['dealing', 'maxStalenessMs'], label: 'LP fiyatı en fazla', unit: 'ms eski', min: 100 },
+          { kind: 'number', path: ['dealing', 'maxSpreadBps'], label: 'Spread koruması', unit: 'bps', min: 1, max: 10000, help: 'LP alış-satış farkı bundan genişse (veya fiyatlar ters düşerse) banka fiyat vermez' },
           ...ccyFields(c, ['dealing', 'maxDealQty'], (ccy) => `Tek işlem üst sınırı ${ccy}`),
         ],
       },

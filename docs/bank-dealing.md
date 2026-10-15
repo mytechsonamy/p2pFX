@@ -30,6 +30,26 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
 
 - **LP feeds.** Each LP streams bid/ask per pair. The engine drops quotes older than `maxStalenessMs` and
   takes the best bid (highest) and best ask (lowest) across LPs: the aggregated LP price.
+- **Spread guard.** If the aggregated price is crossed (one LP's bid above another's ask), or its spread is
+  wider than `dealing.maxSpreadBps` (default 100 bps of the mid; a pair can set its own `maxSpreadBps`), the pair
+  has no bank price. Direct quotes return `503 PRICE_UNAVAILABLE` with `details.reason = WIDE_MARKET`, and the
+  ladder and bot stop. The price comes back on the first refresh where the LPs are within the limit again. When no
+  LP answers or every quote is stale, the reason is `NO_PRICE`.
+- **LP market hours.** `dealing.lpMarket` follows the LPs' own week (FX: Sunday 17:00 to Friday 17:00 New York,
+  daylight saving included), a daily break per instrument kind (metals 17:00–18:00 New York) and holiday dates.
+  Outside it the pair has no bank price, with `reason = MARKET_CLOSED` and `nextOpen`, and the app says when the
+  bank's price comes back. P2P matching keeps its own `tradingHours`. `enabled: false` turns the calendar off
+  (e.g. for a weekend demo with the simulated LPs).
+- **Off-hours price.** With `dealing.offHours.enabled` (default on), the bank keeps quoting while the LP market is
+  closed. The price is the last raw LP price before the close, widened by `extraSpreadBps` of its mid on each side
+  (default 50), with the segment margin on top. After a restart the close comes from the last price tick. The
+  inventory cap shrinks to `positionCapPct` (default 20 %), and hedges are refused with `LP_MARKET_CLOSED`. When the
+  market opens, auto-hedge runs on every pair at once. A close older than `maxCloseAgeHours` (default 72) is not
+  used. The app labels the row "Kapanış fiyatı", says when the market opens, and the quote sheet repeats it.
+- **What the customer sees.** The stream sends `{ pair, unavailable: true, reason }` on the `bank:<pair>` channel
+  when a pair loses its price, and new subscribers get only a dealable price. The app labels the bank row "Canlı"
+  only while updates keep arriving. After 5 s without one, the last price stays visible but is greyed out and can't
+  be tapped ("Güncel değil"). With no price, the row says why ("Fiyat yok": volatile market, or no price yet).
 - **Segment margin.** `dealing.margins` sets, per segment, pips added on top: the customer buys from the bank
   at `LP ask + buyPips × pipSize` and sells to the bank at `LP bid − sellPips × pipSize`. Unknown segments use
   `default`. Example (USD/TRY, pip 0.0001): LP 49.140 / 49.160, default margin 1000 pips → bank sells at 49.26,
@@ -41,7 +61,7 @@ price history, price alarms and pool (position) manager, with reporting on Oracl
 ## Dealing with the bank (request for quote)
 
 1. `POST /v1/bank/quotes { pair, side, qty }` returns a firm quote for the customer's segment: rate, tax,
-   total, and an expiry (`quoteTtlSeconds`, default 10 s). The ticket shows a countdown.
+   total, and an expiry (`quoteTtlSeconds`, default 5 s; real LP prices move too fast to hold a firm quote longer). The ticket shows a countdown.
 2. `POST /v1/bank/deals { quoteId }` executes it if not expired and the customer's funds cover it: one FX
    transaction in core banking (the bank buys from or sells to the customer), a dekont, and the position
    update. A failed posting leaves the deal `FAILED_NEEDS_REVIEW`, like P2P settlements. The deal is a principal
@@ -109,7 +129,10 @@ and side:
 
 ```jsonc
 "dealing": {
-  "quoteTtlSeconds": 10,
+  "quoteTtlSeconds": 5,
+  "maxSpreadBps": 100,
+  "lpMarket": { "enabled": true, "timezone": "America/New_York", "weekOpen": { "day": 7, "time": "17:00" }, "weekClose": { "day": 5, "time": "17:00" }, "dailyBreaks": { "metal": { "from": "17:00", "to": "18:00" } }, "holidays": [] },
+  "offHours": { "enabled": true, "extraSpreadBps": 50, "positionCapPct": 20, "maxCloseAgeHours": 72 },
   "maxStalenessMs": 3000,
   "margins": { "default": { "buyPips": 1000, "sellPips": 1000 }, "segments": { "premium": { "buyPips": 400, "sellPips": 400 } } },
   "maxDealQty": { "USD": "250000", "EUR": "250000", "GBP": "100000" },
@@ -126,3 +149,14 @@ and side:
 - Positions are computed from deals and hedges in the platform database; a bank would reconcile them with its
   treasury system.
 - Bank quotes are not placed into the P2P book; P2P limit orders never execute against the bank.
+
+## Slippage limit and LP execution quality
+
+Every hedge clip goes to its LP with a **limit rate**: the LP price the clip was sent at, moved against the bank by `dealing.hedging.maxSlippageBps` basis points (default 10). An LP that cannot fill at that rate or better rejects the clip, and the clip moves on to the next LP, which is how last-look rejections of real LPs play out. For synthetic crosses and Saxo the limit is checked against the current price before anything is sent.
+
+The dealer screen's **LP performansı** table covers the hedge clips of the last 24 hours, per LP:
+- clips sent, filled, rejected and still open, and the reject rate,
+- how long the LP took (median and 95th percentile),
+- average slippage of fills against the price sent (basis points, positive = worse for the bank).
+
+The data is in `hedges.expected_rate`, `limit_rate`, `latency_ms` and `reject_reason` (migration 008).
