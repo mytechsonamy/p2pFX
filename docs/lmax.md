@@ -76,5 +76,8 @@ USD/CAD 4013, gold 100637 (10 oz), silver 100639 (500 oz).
   1 000 as a FOK market order (filled at the bid). Both found again by order status and in the trade history, whose
   reports carry the ClOrdID.
 
-Still to see: an order that is not filled (a FOK limit below the market) and quantities that are not multiples of
-the smallest order, both expected to be refused (the adapter already refuses the latter before sending).
+- A FOK limit buy 0.2 % below the bid was not filled: reported as a definite rejection, and "not found" by order
+  status afterwards.
+
+Quantities that are not a whole number of the smallest order are refused by the adapter before sending (not tried
+against LMAX).

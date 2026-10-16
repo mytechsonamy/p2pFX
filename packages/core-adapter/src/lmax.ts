@@ -301,7 +301,8 @@ export class LmaxLiquidity implements LiquidityAdapter {
     if (status === '4' && filled > 0n) {
       throw new LiquidityOutcomeUnknownError(`LMAX order ${clOrdId} was cancelled after a partial fill of ${m.get(14)}`);
     }
-    throw new LiquidityError(`LMAX ${status === '8' ? 'rejected' : 'did not fill'} order ${clOrdId}: ${m.get(58) ?? ''}`.trim());
+    const text = m.get(58);
+    throw new LiquidityError(`LMAX ${status === '8' ? 'rejected' : 'did not fill'} order ${clOrdId}${text ? `: ${text}` : ''}`);
   }
 
   private toExecution(req: Pick<LpExecutionRequest, 'lp' | 'ref'> & Partial<LpExecutionRequest>, m: FixMessage): LpExecution {
