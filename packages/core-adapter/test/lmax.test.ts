@@ -50,8 +50,14 @@ async function fakeLmax(opts: { password?: string; fill?: Fill; history?: { clOr
             else if (state.fill === 'reject') send('8', [...base, [39, 8], [150, 8], [14, 0], [58, 'INSUFFICIENT_LIQUIDITY']]);
           } else if (msg.type === 'H') {
             const st = opts.status?.[msg.get(11)!];
-            send('8', [[11, msg.get(11)!], [790, msg.get(790)!], [37, 'ORDH'], [48, msg.get(48)!], [22, 8], [54, msg.get(54)!], [39, st ?? 8], [150, 'I'], [14, st === '2' ? '0.1' : '0'], [6, st === '2' ? '41.9' : '0'], [60, '20261015-14:00:00.000'], ...(st ? [] : ([[58, 'Unknown order']] as [number, string][]))]);
+            send('8', [[11, msg.get(11)!], [790, msg.get(790)!], [37, 'ORDH'], [48, msg.get(48)!], [22, 8], [54, msg.get(54)!], [39, st ?? 8], [150, 'I'], [14, st === '2' ? '0.1' : '0'], [6, st === '2' ? '41.9' : '0'], [60, '20261015-14:00:00.000'], ...(st ? [] : ([[58, 'UNKNOWN ORDER']] as [number, string][]))]);
           } else if (msg.type === 'AD') {
+            // Like LMAX: a range of 7 days or more is refused.
+            const [from, to] = msg.fields.filter(([t]) => t === 60).map(([, v]) => Date.parse(v.replace(/^(\d{4})(\d{2})(\d{2})-/, '$1-$2-$3T') + 'Z'));
+            if (to! - from! >= 7 * 86_400_000) {
+              send('AQ', [[568, msg.get(568)!], [569, 1], [749, 99], [750, 2], [58, 'TIME_RANGE_REQUESTED_GREATER_THAN_7_DAYS']]);
+              continue;
+            }
             const rows = opts.history ?? [];
             send('AQ', [[568, msg.get(568)!], [569, 1], [749, 0], [750, 0], ...(rows.length ? [] : ([[748, 0]] as [number, number][]))]);
             rows.forEach((r, i) => send('AE', [[568, msg.get(568)!], [912, i === rows.length - 1 ? 'Y' : 'N'], [17, `EX${i}`], [48, '100541'], [22, 8], [32, r.qty], [31, r.px], [75, '20261014'], [60, '20261014-10:00:00.000'], [552, 1], [54, 1], [37, `O${i}`], [11, r.clOrdId]]));

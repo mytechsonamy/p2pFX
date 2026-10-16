@@ -56,7 +56,7 @@ export interface LmaxOptions {
   fillTimeoutMs?: number;
   /** How long a lookup (order status, trade history) may take before it fails. */
   lookupTimeoutMs?: number;
-  /** How far back a lookup without the original request searches the trade history. */
+  /** How far back a lookup without the original request searches the trade history (LMAX refuses 7 days or more). */
   historyDays?: number;
   log?: FixSessionOptions['log'];
 }
@@ -351,7 +351,8 @@ export class LmaxLiquidity implements LiquidityAdapter {
   /** Searches the trade history for fills of the order; their quantities add up, the price is their average. */
   private fromHistory(lp: string, ref: string, clOrdId: string) {
     const reqId = randomBytes(8).toString('hex');
-    const days = this.opts.historyDays ?? 7;
+    // LMAX refuses a range of 7 days or more (TIME_RANGE_REQUESTED_GREATER_THAN_7_DAYS): one minute less by default.
+    const rangeMs = this.opts.historyDays !== undefined ? this.opts.historyDays * 86_400_000 : 7 * 86_400_000 - 60_000;
     const now = new Date();
     return new Promise<LpExecution | undefined>((resolve, reject) => {
       const fills: FixMessage[] = [];
@@ -398,7 +399,7 @@ export class LmaxLiquidity implements LiquidityAdapter {
         [569, 1],
         [263, 0],
         [580, 2],
-        [60, fixTime(new Date(now.getTime() - days * 86_400_000))],
+        [60, fixTime(new Date(now.getTime() - rangeMs))],
         [60, fixTime(now)],
       ]);
       if (sent === false) {

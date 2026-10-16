@@ -53,7 +53,7 @@ already sent is never sent again.
 ## Lookups
 
 With the original request (pair, side) the order's status is asked for (`OrderStatusRequest`). Without it the trade
-history of the last 7 days is searched (`TradeCaptureReportRequest`). A lookup that gets no answer fails, so the clip
+history of just under 7 days (LMAX's limit) is searched (`TradeCaptureReportRequest`). A lookup that gets no answer fails, so the clip
 stays open; "not found" means LMAX shows no fill.
 
 ## Instruments
@@ -62,9 +62,19 @@ Order book ids, contract sizes, smallest orders and ticks come from LMAX's instr
 USD/TRY 100541, EUR/TRY 100537, GBP/TRY 100539, EUR/USD 4001, GBP/USD 4002, USD/JPY 4004, AUD/USD 4007, USD/CHF 4010,
 USD/CAD 4013, gold 100637 (10 oz), silver 100639 (500 oz).
 
-## Not verified against LMAX yet
+## Verified on the LMAX demo account (16 Oct 2026)
 
-The adapter is tested against a fake FIX gateway built from LMAX's specification and sample messages (framing, body
-length and checksum checked against LMAX's own sample). To confirm on the demo account: logon, the price subscription,
-whether quantities must be multiples of the smallest order, how an unknown order is answered to a status request, and
-whether trade history reports carry the ClOrdID.
+- Logon on both gateways (the FIX password is the account's web platform password; no IP whitelisting on demo).
+  A refused logon (`ACCESS_DENIED`, `User not authorized`) stops the session instead of retrying, so failed logins
+  never pile up.
+- Top-of-book prices for USD/TRY, EUR/TRY, EUR/USD, GBP/USD, USD/JPY, gold and silver.
+- An order status request for a ClOrdID never used is answered with an execution report `39=8`, `150=I`,
+  `58=UNKNOWN ORDER`, echoing `790` (which must be a hex 64-bit integer): read as "not found".
+- A trade history request must cover less than 7 days (`TIME_RANGE_REQUESTED_GREATER_THAN_7_DAYS` otherwise); the
+  lookup asks for 7 days less a minute.
+- Two test orders through `execute()`: buy 1 000 USD/TRY as a FOK limit 5 bps above the ask (filled at the ask), sell
+  1 000 as a FOK market order (filled at the bid). Both found again by order status and in the trade history, whose
+  reports carry the ClOrdID.
+
+Still to see: an order that is not filled (a FOK limit below the market) and quantities that are not multiples of
+the smallest order, both expected to be refused (the adapter already refuses the latter before sending).
