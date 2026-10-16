@@ -320,3 +320,6 @@ h2, h3 { margin: 0; }
 .amend-effects li { margin: 2px 0; }
 .amend-effects .better { color: var(--c-buy); }
 .amend-effects .worse { color: var(--c-sell); }
+
+/* Rate card: the bank is better than the board on this side (Direct, segment priced). */
+.bank-better-pill { margin-top: 4px; border: 0; cursor: pointer; font-size: 10px; text-transform: none; letter-spacing: 0; align-self: flex-start; }

@@ -232,6 +232,10 @@ const tr = {
   'error.ORDER_CHANGED': 'Emriniz bu sırada değişti (ör. kısmen gerçekleşti); kontrol edip tekrar deneyin.',
   'error.AMEND_UNAVAILABLE': 'Bu emrin bir işlemi hâlâ onaylanıyor; biraz sonra tekrar deneyin.',
   'error.INVALID_QTY': 'Miktar geçersiz.',
+  'rate.boardBuy': 'Tahtadan al',
+  'rate.boardSell': 'Tahtaya sat',
+  'rate.allInNote': 'Tahtada şu an alabileceğiniz ve satabileceğiniz kurlar, banka komisyonu dahil. Emir defterindeki fiyatlar komisyon hariçtir.',
+  'rate.bankBetter': '{bank} daha iyi: {rate}',
 };
 
 export type StringKey = keyof typeof tr;
@@ -441,6 +445,10 @@ const en: Partial<Record<StringKey, string>> = {
   'error.ORDER_CHANGED': 'Your order changed meanwhile (e.g. it partly filled); check it and try again.',
   'error.AMEND_UNAVAILABLE': 'A trade of this order is still being confirmed; try again shortly.',
   'error.INVALID_QTY': 'The quantity is not valid.',
+  'rate.boardBuy': 'Buy on the board',
+  'rate.boardSell': 'Sell on the board',
+  'rate.allInNote': 'What you can buy and sell at on the board now, bank commission included. Order book prices exclude commission.',
+  'rate.bankBetter': '{bank} is better: {rate}',
 };
 
 export type Translate = (key: StringKey, vars?: Record<string, string | number>) => string;

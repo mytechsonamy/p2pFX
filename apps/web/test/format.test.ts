@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assetName, compareDecimal, currencySymbol, formatDecimal, formatMoney, formatPrice, formatRate, pairLabel, sanitizeAmountInput, toApiDecimal, toInputText } from '../src/format';
+import { allInPrice, assetName, compareDecimal, currencySymbol, formatDecimal, formatMoney, formatPrice, formatRate, pairLabel, sanitizeAmountInput, toApiDecimal, toInputText } from '../src/format';
 import { endOfDay, localDate } from '../src/time';
 import { createTranslator } from '../src/i18n';
 import { mergeBranding, themeVars } from '../src/theme';
@@ -115,5 +115,19 @@ describe('instrument labels', () => {
     expect(currencySymbol('TRY')).toBe('TL');
     expect(formatMoney('150000', 'JPY', 'tr-TR')).toBe('150.000 JPY');
     expect(formatMoney('10.5', 'XAU', 'tr-TR')).toBe('10,50 gr');
+  });
+});
+
+describe('allInPrice', () => {
+  const pips = { commissionPerUnit: { buy: '0.05', sell: '0.05' }, commission: { mode: 'PIPS' as const, buy: 500, sell: 500 } };
+  const bps = { commissionPerUnit: { buy: '0', sell: '0' }, commission: { mode: 'BPS' as const, buy: 5, sell: 5 } };
+  it('adds the buy commission and takes off the sell commission (the customer’s all-in rate)', () => {
+    expect(allInPrice(pips, 'BUY', '49.4667')).toBe('49.51670000');
+    expect(allInPrice(pips, 'SELL', '49.4667')).toBe('49.41670000');
+  });
+  it('works out a share-of-price commission from the book price', () => {
+    // 5 bps of 50.00 = 0.025
+    expect(allInPrice(bps, 'BUY', '50')).toBe('50.02500000');
+    expect(allInPrice(bps, 'SELL', '50')).toBe('49.97500000');
   });
 });
