@@ -4,6 +4,7 @@ import {
   HttpLiquidityAdapter,
   LMAX_DEMO,
   LmaxLiquidity,
+  PairFilterLiquidity,
   SaxoLiquidity,
   SyntheticLiquidity,
   type LiquidityAdapter,
@@ -56,7 +57,25 @@ const lmax =
       })
     : undefined;
 const realLps = [saxo, lmax].filter((lp): lp is SaxoLiquidity | LmaxLiquidity => !!lp);
-const liquidity: LiquidityAdapter = realLps.length ? new CompositeLiquidity([lpGateway, ...realLps]) : lpGateway;
+// Demo (mock core): the mock core's simulated LPs follow the real LPs' mid (below), and step aside on the pairs a real LP
+// prices right now, so simulated and real prices never cross on the board. A pair a real LP stops pricing (session
+// down) gets the simulated LPs back.
+const demoWithRealLps = realLps.length > 0 && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MOCK !== '0';
+// The real LPs alone, with the TRY pairs they can build from their dollar crosses (CHFTRY from USDCHF × USDTRY…).
+const realOnly = realLps.length ? new SyntheticLiquidity(realLps.length === 1 ? realLps[0]! : new CompositeLiquidity(realLps)) : undefined;
+let pricedByRealLps = { at: 0, pairs: new Set<string>() };
+const realPairs = async () => {
+  if (!realOnly || Date.now() - pricedByRealLps.at < 2000) return pricedByRealLps.pairs;
+  const pairs = new Set<string>();
+  const candidates = new Set([...(await lpGateway.instruments().catch(() => [] as string[])), ...(await realOnly.instruments().catch(() => [] as string[]))]);
+  for (const pair of candidates) {
+    if ((await realOnly.quotes(pair).catch(() => [])).length) pairs.add(pair);
+  }
+  pricedByRealLps = { at: Date.now(), pairs };
+  return pairs;
+};
+const gateway: LiquidityAdapter = demoWithRealLps ? new PairFilterLiquidity(lpGateway, realPairs) : lpGateway;
+const liquidity: LiquidityAdapter = realLps.length ? new CompositeLiquidity([gateway, ...realLps]) : lpGateway;
 
 lmax?.start();
 
@@ -82,8 +101,8 @@ await app.listen({ port: Number(process.env.PORT ?? 4000), host: '0.0.0.0' });
 
 // With a real LP (Saxo, LMAX) next to the mock core's simulated LPs, the simulated LPs follow the real mid (else the
 // two markets would be far apart and the best bid would sit above the best ask).
-if (realLps.length && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MOCK !== '0') {
-  const real = new SyntheticLiquidity(realLps.length === 1 ? realLps[0]! : new CompositeLiquidity(realLps));
+if (demoWithRealLps && realOnly) {
+  const real = realOnly;
   const sync = async () => {
     for (const pair of await lpGateway.instruments().catch(() => [] as string[])) {
       try {

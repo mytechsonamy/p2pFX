@@ -236,10 +236,15 @@ export class LmaxLiquidity implements LiquidityAdapter {
     return Object.keys(this.instrumentsByPair);
   }
 
+  /**
+   * The pair's current top of book. LMAX streams a price only when it changes, so in a quiet market the last one stays
+   * the price: it is stamped now while the market data session is logged on (heartbeats prove the stream is alive;
+   * a dropped session clears the prices), not with the time it last changed, which the staleness check would reject.
+   */
   async quotes(pair: string): Promise<LpQuote[]> {
     const q = this.prices.get(pair);
-    if (!q) throw new LiquidityError(`LMAX has no price for ${pair}`);
-    return [q];
+    if (!q || !this.md.loggedOn) throw new LiquidityError(`LMAX has no price for ${pair}`);
+    return [{ ...q, at: new Date().toISOString() }];
   }
 
   /** Contracts for a base quantity, or a rejection when it is not a whole number of the smallest order. */

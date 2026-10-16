@@ -138,7 +138,10 @@ describe('LMAX over FIX', () => {
       quoted = (await env.lmax.quotes('USDTRY').catch(() => [])).length > 0;
       if (!quoted) await new Promise((r) => setTimeout(r, 10));
     }
-    expect(await env.lmax.quotes('USDTRY')).toEqual([{ lp: 'LMAX', pair: 'USDTRY', bid: '41.95012', ask: '41.95233', at: '2026-10-15T14:59:59.500Z' }]);
+    // Stamped when read while the stream is live (LMAX sends a price only when it changes).
+    const [q] = await env.lmax.quotes('USDTRY');
+    expect(q).toMatchObject({ lp: 'LMAX', pair: 'USDTRY', bid: '41.95012', ask: '41.95233' });
+    expect(Date.now() - Date.parse(q!.at)).toBeLessThan(1000);
     await expect(env.lmax.quotes('USDCHF')).rejects.toBeInstanceOf(LiquidityError);
   });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatPrice } from '@p2p/shared';
 import {
+  PairFilterLiquidity,
   beyondLimit,
   LiquidityError,
   LiquidityOutcomeUnknownError,
@@ -201,5 +202,29 @@ describe('synthetic crosses', () => {
     expect(beyondLimit('BUY', '49.15', '49.15')).toBe(false);
     expect(beyondLimit('SELL', '49.14999999', '49.15')).toBe(true);
     expect(beyondLimit('SELL', '0.30000000', '0.3')).toBe(false);
+  });
+
+  it('builds no synthetic from an LP’s own two legs for a pair that LP quotes directly', async () => {
+    const { inner } = setup();
+    const quotes = inner.quotes.bind(inner);
+    // LP-A also has its own XAUTRY book.
+    inner.quotes = async (pair) => (pair === 'XAUTRY' ? [{ lp: 'LP-A', pair, bid: '4120', ask: '4121', at: new Date().toISOString() }] : quotes(pair));
+    const lp = new SyntheticLiquidity(inner);
+    const names = (await lp.quotes('XAUTRY')).map((q) => q.lp);
+    expect(names).toContain('LP-A');
+    expect(names).not.toContain('LP-A+LP-A');
+    expect(names).toContain('LP-A+LP-B');
+    expect(names).toContain('LP-B+LP-B');
+  });
+
+  it('withholds the pairs another connection prices, and gives them back when it stops', async () => {
+    const { inner } = setup();
+    let withheld = new Set(['USDTRY']);
+    const filtered = new PairFilterLiquidity(inner, async () => withheld);
+    expect(await filtered.instruments()).not.toContain('USDTRY');
+    await expect(filtered.quotes('USDTRY')).rejects.toBeInstanceOf(LiquidityError);
+    expect((await filtered.quotes('XAUUSD')).length).toBeGreaterThan(0);
+    withheld = new Set();
+    expect((await filtered.quotes('USDTRY')).length).toBeGreaterThan(0);
   });
 });

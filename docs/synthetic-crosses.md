@@ -53,3 +53,9 @@ SAXO_TOKEN='…' docker compose up
 ```
 
 Varsayılan pariteler: `USDTRY,EURTRY,EURUSD,GBPUSD,USDCHF,USDJPY,XAUUSD,XAGUSD`. Bunlar `SAXO_PAIRS` ile değiştirilebilir. Saxo'da olmayan pariteler sessizce atlanır.
+
+## An LP's own book wins over its own cross
+
+When an LP quotes a pair directly (LMAX's EUR/TRY book), no synthetic is built for that pair from the same LP's two
+legs (LMAX EUR/USD × LMAX USD/TRY): the two can disagree and cross each other on the board. Combinations with another
+LP's leg (`LMAX+SAXO`) are still built.

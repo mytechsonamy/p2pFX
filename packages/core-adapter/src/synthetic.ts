@@ -131,7 +131,14 @@ export class SyntheticLiquidity implements LiquidityAdapter {
       throw err;
     });
     if (!route) return direct;
-    const [own, synthetic] = await Promise.all([direct, this.syntheticQuotes(route).catch(() => [])]);
+    const [own, combos] = await Promise.all([direct, this.syntheticQuotes(route).catch(() => [])]);
+    // An LP that quotes the pair directly has its own price for it: no synthetic from its own two legs as well (the
+    // two can disagree, e.g. a thin EUR/TRY book against EUR/USD × USD/TRY, and cross each other on the board).
+    const directLps = new Set(own.map((q) => q.lp));
+    const synthetic = combos.filter((q) => {
+      const [c, f] = q.lp.split(SEP);
+      return !(c === f && directLps.has(c!));
+    });
     if (!own.length && !synthetic.length) throw new LiquidityError(`no liquidity for ${pair}`);
     return [...own, ...synthetic];
   }

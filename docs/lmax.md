@@ -30,8 +30,17 @@ LMAX are gap-filled (nothing is resent).
 ## Prices
 
 On logon the market data session subscribes to top of book (`MarketDepth=1`, full refresh) for the configured order
-books; every `W` replaces the pair's quote. When the session drops, LMAX's quotes are gone until it is back, so nothing
-prices from a frozen feed.
+books; every `W` replaces the pair's quote. LMAX sends a price only when it changes, so a quote read while the session
+is logged on is stamped with the time it is read (heartbeats prove the stream is alive), not with the time it last
+changed, which the staleness check would reject in a quiet market. When the session drops, LMAX's quotes are gone until
+it is back, so nothing prices from a frozen feed.
+
+## In the demo
+
+With the mock core, the simulated LPs follow the real LPs' mid (synced every minute, and shortly after start) and step
+aside on every pair the real LPs price right now, directly or as a synthetic cross; simulated and real prices never
+meet on the board, where their small differences would cross. A pair the real LPs stop pricing gets the simulated LPs
+back.
 
 ## Orders
 
