@@ -204,15 +204,27 @@ describe('synthetic crosses', () => {
     expect(beyondLimit('SELL', '0.30000000', '0.3')).toBe(false);
   });
 
-  it('builds no synthetic from an LP’s own two legs for a pair that LP quotes directly', async () => {
+  it('offers one price per LP for a pair it quotes directly and as its own cross: the tighter one', async () => {
     const { inner } = setup();
     const quotes = inner.quotes.bind(inner);
-    // LP-A also has its own XAUTRY book.
-    inner.quotes = async (pair) => (pair === 'XAUTRY' ? [{ lp: 'LP-A', pair, bid: '4120', ask: '4121', at: new Date().toISOString() }] : quotes(pair));
     const lp = new SyntheticLiquidity(inner);
-    const names = (await lp.quotes('XAUTRY')).map((q) => q.lp);
+    const crossOfA = (await lp.quotes('XAUTRY')).find((q) => q.lp === 'LP-A+LP-A')!;
+    const mid = (Number(crossOfA.bid) + Number(crossOfA.ask)) / 2;
+    const book = (halfSpread: number) => async (pair: string) =>
+      pair === 'XAUTRY' ? [{ lp: 'LP-A', pair, bid: (mid - halfSpread).toFixed(2), ask: (mid + halfSpread).toFixed(2), at: new Date().toISOString() }] : quotes(pair);
+
+    // LP-A's own XAUTRY book is wider than its cross: the cross is offered, the book is not.
+    inner.quotes = book(50);
+    let names = (await lp.quotes('XAUTRY')).map((q) => q.lp);
+    expect(names).toContain('LP-A+LP-A');
+    expect(names).not.toContain('LP-A');
+
+    // Its book is tighter: the book is offered, its own cross is not.
+    inner.quotes = book(0.01);
+    names = (await lp.quotes('XAUTRY')).map((q) => q.lp);
     expect(names).toContain('LP-A');
     expect(names).not.toContain('LP-A+LP-A');
+    // Combinations with another LP's leg are offered either way.
     expect(names).toContain('LP-A+LP-B');
     expect(names).toContain('LP-B+LP-B');
   });

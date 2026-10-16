@@ -132,15 +132,26 @@ export class SyntheticLiquidity implements LiquidityAdapter {
     });
     if (!route) return direct;
     const [own, combos] = await Promise.all([direct, this.syntheticQuotes(route).catch(() => [])]);
-    // An LP that quotes the pair directly has its own price for it: no synthetic from its own two legs as well (the
-    // two can disagree, e.g. a thin EUR/TRY book against EUR/USD × USD/TRY, and cross each other on the board).
+    // An LP that quotes the pair directly and can also build it from its own two legs offers one price for it, not
+    // both (they can disagree, e.g. a thin GBP/TRY book against GBP/USD × USD/TRY, and cross each other on the board):
+    // the tighter of the two, its direct book on a tie (one trade to hedge instead of two).
+    const ownCross = new Map<string, LpQuote>();
+    for (const q of combos) {
+      const [c, f] = q.lp.split(SEP);
+      if (c === f) ownCross.set(c!, q);
+    }
+    const directKept = own.filter((q) => {
+      const cross = ownCross.get(q.lp);
+      return !cross || spreadOf(q) <= spreadOf(cross);
+    });
     const directLps = new Set(own.map((q) => q.lp));
     const synthetic = combos.filter((q) => {
       const [c, f] = q.lp.split(SEP);
-      return !(c === f && directLps.has(c!));
+      if (c !== f || !directLps.has(c!)) return true;
+      return !directKept.some((d) => d.lp === c);
     });
-    if (!own.length && !synthetic.length) throw new LiquidityError(`no liquidity for ${pair}`);
-    return [...own, ...synthetic];
+    if (!directKept.length && !synthetic.length) throw new LiquidityError(`no liquidity for ${pair}`);
+    return [...directKept, ...synthetic];
   }
 
   private async syntheticQuotes(route: SyntheticRoute): Promise<LpQuote[]> {
@@ -306,6 +317,13 @@ export class SyntheticLiquidity implements LiquidityAdapter {
 function asUnknown(err: unknown, context: string): Error {
   if (err instanceof LiquidityOutcomeUnknownError) return err;
   return new LiquidityOutcomeUnknownError(`${context}; the funding leg failed: ${(err as Error)?.message ?? String(err)}`);
+}
+
+/** A quote's spread as a fraction of its mid (comparable across the direct book and the synthetic cross). */
+function spreadOf(q: Pick<LpQuote, 'bid' | 'ask'>): number {
+  const bid = Number(q.bid);
+  const ask = Number(q.ask);
+  return (ask - bid) / ((ask + bid) / 2);
 }
 
 const cmp = (a: string, b: string) => {
