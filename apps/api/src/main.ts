@@ -2,6 +2,9 @@ import {
   CompositeLiquidity,
   HttpCoreBankingAdapter,
   HttpLiquidityAdapter,
+  LMAX_DEMO,
+  LmaxLiquidity,
+  PairFilterLiquidity,
   SaxoLiquidity,
   SyntheticLiquidity,
   type LiquidityAdapter,
@@ -34,7 +37,47 @@ const saxo = process.env.SAXO_TOKEN
       minPollMs: Number(process.env.SAXO_POLL_MS ?? 1000),
     })
   : undefined;
-const liquidity: LiquidityAdapter = saxo ? new CompositeLiquidity([lpGateway, saxo]) : lpGateway;
+// LMAX_FIX_USERNAME / LMAX_FIX_PASSWORD add LMAX Global over FIX 4.4 (the demo gateways by default) as a real LP.
+const lmax =
+  process.env.LMAX_FIX_USERNAME && process.env.LMAX_FIX_PASSWORD
+    ? new LmaxLiquidity({
+        username: process.env.LMAX_FIX_USERNAME,
+        password: process.env.LMAX_FIX_PASSWORD,
+        pairs: (process.env.LMAX_PAIRS || 'USDTRY,EURTRY,GBPTRY,EURUSD,GBPUSD,USDCHF,USDJPY,XAUUSD,XAGUSD').split(','),
+        marketData: {
+          ...LMAX_DEMO.marketData,
+          ...(process.env.LMAX_MD_HOST ? { host: process.env.LMAX_MD_HOST } : {}),
+          ...(process.env.LMAX_MD_TARGET ? { targetCompId: process.env.LMAX_MD_TARGET } : {}),
+        },
+        trading: {
+          ...LMAX_DEMO.trading,
+          ...(process.env.LMAX_TRADING_HOST ? { host: process.env.LMAX_TRADING_HOST } : {}),
+          ...(process.env.LMAX_TRADING_TARGET ? { targetCompId: process.env.LMAX_TRADING_TARGET } : {}),
+        },
+      })
+    : undefined;
+const realLps = [saxo, lmax].filter((lp): lp is SaxoLiquidity | LmaxLiquidity => !!lp);
+// Demo (mock core): the mock core's simulated LPs follow the real LPs' mid (below), and step aside on the pairs a real LP
+// prices right now, so simulated and real prices never cross on the board. A pair a real LP stops pricing (session
+// down) gets the simulated LPs back.
+const demoWithRealLps = realLps.length > 0 && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MOCK !== '0';
+// The real LPs alone, with the TRY pairs they can build from their dollar crosses (CHFTRY from USDCHF × USDTRY…).
+const realOnly = realLps.length ? new SyntheticLiquidity(realLps.length === 1 ? realLps[0]! : new CompositeLiquidity(realLps)) : undefined;
+let pricedByRealLps = { at: 0, pairs: new Set<string>() };
+const realPairs = async () => {
+  if (!realOnly || Date.now() - pricedByRealLps.at < 2000) return pricedByRealLps.pairs;
+  const pairs = new Set<string>();
+  const candidates = new Set([...(await lpGateway.instruments().catch(() => [] as string[])), ...(await realOnly.instruments().catch(() => [] as string[]))]);
+  for (const pair of candidates) {
+    if ((await realOnly.quotes(pair).catch(() => [])).length) pairs.add(pair);
+  }
+  pricedByRealLps = { at: Date.now(), pairs };
+  return pairs;
+};
+const gateway: LiquidityAdapter = demoWithRealLps ? new PairFilterLiquidity(lpGateway, realPairs) : lpGateway;
+const liquidity: LiquidityAdapter = realLps.length ? new CompositeLiquidity([gateway, ...realLps]) : lpGateway;
+
+lmax?.start();
 
 const { app, close } = await buildApp({
   databaseUrl: env('DATABASE_URL', 'postgres://postgres:postgres@localhost:5432/p2pfx'),
@@ -56,10 +99,10 @@ const { app, close } = await buildApp({
 
 await app.listen({ port: Number(process.env.PORT ?? 4000), host: '0.0.0.0' });
 
-// With Saxo next to the mock core's simulated LPs, the simulated LPs follow Saxo's mid (else the two markets
-// would be far apart and the best bid would sit above the best ask).
-if (saxo && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MOCK !== '0') {
-  const real = new SyntheticLiquidity(saxo);
+// With a real LP (Saxo, LMAX) next to the mock core's simulated LPs, the simulated LPs follow the real mid (else the
+// two markets would be far apart and the best bid would sit above the best ask).
+if (demoWithRealLps && realOnly) {
+  const real = realOnly;
   const sync = async () => {
     for (const pair of await lpGateway.instruments().catch(() => [] as string[])) {
       try {
@@ -75,12 +118,16 @@ if (saxo && /mock-core|localhost:4100/.test(coreUrl) && process.env.SAXO_SYNC_MO
       }
     }
   };
-  await sync().catch((err) => app.log.warn({ err }, 'mock rate sync from Saxo failed'));
-  setInterval(() => sync().catch((err) => app.log.warn({ err }, 'mock rate sync from Saxo failed')), 60_000).unref();
+  const run = () => sync().catch((err) => app.log.warn({ err }, 'mock rate sync from the real LPs failed'));
+  await run();
+  // A FIX LP (LMAX) prices only once its session is logged on: the first sync is repeated shortly after start.
+  for (const ms of [5_000, 15_000]) setTimeout(run, ms).unref();
+  setInterval(run, 60_000).unref();
 }
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
+    lmax?.stop();
     close().finally(() => process.exit(0));
   });
 }

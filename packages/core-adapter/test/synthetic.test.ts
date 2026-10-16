@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatPrice } from '@p2p/shared';
 import {
+  PairFilterLiquidity,
   beyondLimit,
   LiquidityError,
   LiquidityOutcomeUnknownError,
@@ -201,5 +202,41 @@ describe('synthetic crosses', () => {
     expect(beyondLimit('BUY', '49.15', '49.15')).toBe(false);
     expect(beyondLimit('SELL', '49.14999999', '49.15')).toBe(true);
     expect(beyondLimit('SELL', '0.30000000', '0.3')).toBe(false);
+  });
+
+  it('offers one price per LP for a pair it quotes directly and as its own cross: the tighter one', async () => {
+    const { inner } = setup();
+    const quotes = inner.quotes.bind(inner);
+    const lp = new SyntheticLiquidity(inner);
+    const crossOfA = (await lp.quotes('XAUTRY')).find((q) => q.lp === 'LP-A+LP-A')!;
+    const mid = (Number(crossOfA.bid) + Number(crossOfA.ask)) / 2;
+    const book = (halfSpread: number) => async (pair: string) =>
+      pair === 'XAUTRY' ? [{ lp: 'LP-A', pair, bid: (mid - halfSpread).toFixed(2), ask: (mid + halfSpread).toFixed(2), at: new Date().toISOString() }] : quotes(pair);
+
+    // LP-A's own XAUTRY book is wider than its cross: the cross is offered, the book is not.
+    inner.quotes = book(50);
+    let names = (await lp.quotes('XAUTRY')).map((q) => q.lp);
+    expect(names).toContain('LP-A+LP-A');
+    expect(names).not.toContain('LP-A');
+
+    // Its book is tighter: the book is offered, its own cross is not.
+    inner.quotes = book(0.01);
+    names = (await lp.quotes('XAUTRY')).map((q) => q.lp);
+    expect(names).toContain('LP-A');
+    expect(names).not.toContain('LP-A+LP-A');
+    // Combinations with another LP's leg are offered either way.
+    expect(names).toContain('LP-A+LP-B');
+    expect(names).toContain('LP-B+LP-B');
+  });
+
+  it('withholds the pairs another connection prices, and gives them back when it stops', async () => {
+    const { inner } = setup();
+    let withheld = new Set(['USDTRY']);
+    const filtered = new PairFilterLiquidity(inner, async () => withheld);
+    expect(await filtered.instruments()).not.toContain('USDTRY');
+    await expect(filtered.quotes('USDTRY')).rejects.toBeInstanceOf(LiquidityError);
+    expect((await filtered.quotes('XAUUSD')).length).toBeGreaterThan(0);
+    withheld = new Set();
+    expect((await filtered.quotes('USDTRY')).length).toBeGreaterThan(0);
   });
 });

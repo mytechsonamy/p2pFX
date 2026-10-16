@@ -53,3 +53,14 @@ SAXO_TOKEN='…' docker compose up
 ```
 
 Varsayılan pariteler: `USDTRY,EURTRY,EURUSD,GBPUSD,USDCHF,USDJPY,XAUUSD,XAGUSD`. Bunlar `SAXO_PAIRS` ile değiştirilebilir. Saxo'da olmayan pariteler sessizce atlanır.
+
+## One price per LP: its own book or its own cross, whichever is tighter
+
+When an LP quotes a pair directly (LMAX's GBP/TRY book) and can also build it from its own two legs (LMAX GBP/USD ×
+LMAX USD/TRY), it offers only one of the two for the pair: the one with the tighter spread (relative to its mid), its
+direct book on a tie (one trade to hedge instead of two). Offering both let them disagree and cross each other on the
+board. Combinations with another LP's leg (`LMAX+SAXO`) are offered as usual.
+
+The spread the bank still quotes into is set in the back office: globally (Banka satırı fiyatlama › Spread koruması,
+`dealing.maxSpreadBps`) and per pair (Pariteler ve komisyon › Spread koruması, `pairs[].maxSpreadBps`; empty means the
+global limit).

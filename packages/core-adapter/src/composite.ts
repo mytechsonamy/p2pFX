@@ -65,3 +65,37 @@ export class CompositeLiquidity implements LiquidityAdapter {
     return undefined;
   }
 }
+
+/**
+ * An LP connection without some pairs: its quotes for them are withheld (as if it did not price them) and it does not
+ * list them. Used in the demo so that the simulated LPs step aside on the pairs real LPs price.
+ */
+export class PairFilterLiquidity implements LiquidityAdapter {
+  constructor(
+    private readonly inner: LiquidityAdapter,
+    /** Pairs withheld right now (looked up on every call: a real LP's list can grow once it connects). */
+    private readonly withheld: () => Promise<Set<string>>,
+  ) {}
+
+  async instruments() {
+    const out = await this.withheld();
+    return (await this.inner.instruments()).filter((p) => !out.has(p));
+  }
+
+  async quotes(pair: string): Promise<LpQuote[]> {
+    if ((await this.withheld()).has(pair)) throw new LiquidityError(`${pair} is priced by another LP connection`);
+    return this.inner.quotes(pair);
+  }
+
+  execute(req: LpExecutionRequest) {
+    return this.inner.execute(req);
+  }
+
+  findExecution(lp: string, ref: string, request?: Omit<LpExecutionRequest, 'lp' | 'ref'>, options?: FindExecutionOptions) {
+    return this.inner.findExecution(lp, ref, request, options);
+  }
+
+  lookupComplete(lp: string) {
+    return this.inner.lookupComplete?.(lp) ?? true;
+  }
+}

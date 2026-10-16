@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useExchange, usePair } from '../store';
 import { Breakdown, Row, Segmented, Sheet } from '../components';
-import { assetName, compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
+import { allInPrice, assetName, compareDecimal, currencySymbol, formatDateTime, formatDecimal, formatMoney, formatPrice, sanitizeAmountInput, toApiDecimal, toInputText } from '../format';
 import { endOfDay, localDate } from '../time';
 import { ApiError, newIdempotencyKey, type PlaceOrder } from '../api';
-import { BankQuick, BankRow, BetterAtBank } from '../bank';
+import { BankQuick, BankRow, BetterAtBank, useBankPrice } from '../bank';
 import type { BookLevel, OrderType, PairInfo, QuoteBreakdown, Side, Validity } from '../types';
 
 interface Draft {
@@ -54,13 +54,28 @@ export function TradeScreen() {
   );
 }
 
-/** Reference rate and the top of the P2P book, the same prices the order book below shows. */
+/**
+ * Reference rate and what the customer gets on the board right now, commission included: the same basis as the
+ * bank's Direct rates next to it, so the two can be compared at a glance. When the bank pays more (a seller) or
+ * charges less (a buyer), it says so; for a segment with its own margin (premium) that is usually the case, as the
+ * board is one public book priced for everyone.
+ */
 function RateStrip({ pair }: { pair: PairInfo }) {
-  const { rates, books, t, locale } = useExchange();
+  const { rates, books, t, locale, config, openBankDeal } = useExchange();
+  const bank = useBankPrice(pair.symbol);
   const r = rates[pair.symbol];
   const book = books[pair.symbol];
-  const bid = book?.bids[0]?.price;
-  const ask = book?.asks[0]?.price;
+  // Buying takes the best offer, selling hits the best bid.
+  const buy = book?.asks[0]?.price ? allInPrice(pair, 'BUY', book.asks[0].price) : undefined;
+  const sell = book?.bids[0]?.price ? allInPrice(pair, 'SELL', book.bids[0].price) : undefined;
+  const direct = config.dealing?.enabled && bank.state === 'live' ? bank.rates : undefined;
+  const bankBuyBetter = !!direct && (!buy || compareDecimal(direct.buy, buy) < 0);
+  const bankSellBetter = !!direct && (!sell || compareDecimal(direct.sell, sell) > 0);
+  const better = (side: Side, rate: string) => (
+    <button type="button" className="pill bank-better-pill" onClick={() => openBankDeal({ side })}>
+      {t('rate.bankBetter', { bank: config.bank.name, rate: formatPrice(rate, locale) })}
+    </button>
+  );
   return (
     <section className="card rates">
       <div>
@@ -68,14 +83,16 @@ function RateStrip({ pair }: { pair: PairInfo }) {
         <strong>{r ? formatPrice(r.rate, locale) : '—'}</strong>
       </div>
       <div className="buy-text">
-        <small>{t('rate.bestBid')}</small>
-        <strong>{bid ? formatPrice(bid, locale) : '—'}</strong>
+        <small>{t('rate.boardBuy')}</small>
+        <strong>{buy ? formatPrice(buy, locale) : '—'}</strong>
+        {bankBuyBetter && better('BUY', direct!.buy)}
       </div>
       <div className="sell-text">
-        <small>{t('rate.bestAsk')}</small>
-        <strong>{ask ? formatPrice(ask, locale) : '—'}</strong>
+        <small>{t('rate.boardSell')}</small>
+        <strong>{sell ? formatPrice(sell, locale) : '—'}</strong>
+        {bankSellBetter && better('SELL', direct!.sell)}
       </div>
-      <p className="rates-note">{t('rate.p2pNote')}</p>
+      <p className="rates-note">{t('rate.allInNote')}</p>
     </section>
   );
 }

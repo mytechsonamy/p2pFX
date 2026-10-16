@@ -5,3 +5,5 @@ export * from './liquidity.js';
 export * from './synthetic.js';
 export * from './composite.js';
 export * from './saxo.js';
+export * from './fix.js';
+export * from './lmax.js';

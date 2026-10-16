@@ -130,3 +130,26 @@ export function addDecimal(a: string, b: string, decimals: number): string {
   const frac = abs.slice(-SCALE).slice(0, decimals);
   return (neg ? '-' : '') + int + (decimals ? '.' + frac : '');
 }
+
+/**
+ * The rate the customer gets on the board at a book price, commission included (the same basis as the bank's
+ * Direct rates): buying pays the book price plus the buy commission, selling gets it minus the sell commission.
+ */
+export function allInPrice(
+  pair: { commissionPerUnit: { buy: string; sell: string }; commission?: { mode: 'PIPS' | 'BPS'; buy: number; sell: number } },
+  side: 'BUY' | 'SELL',
+  bookPrice: string,
+): string {
+  const fee =
+    pair.commission?.mode === 'BPS'
+      ? fromScaled((scaled(bookPrice) * BigInt(side === 'BUY' ? pair.commission.buy : pair.commission.sell) + 5_000n) / 10_000n)
+      : side === 'BUY'
+        ? pair.commissionPerUnit.buy
+        : pair.commissionPerUnit.sell;
+  return addDecimal(bookPrice, side === 'BUY' ? fee : `-${fee}`, SCALE);
+}
+
+function fromScaled(n: bigint): string {
+  const abs = n.toString().padStart(SCALE + 1, '0');
+  return `${abs.slice(0, -SCALE)}.${abs.slice(-SCALE)}`;
+}
