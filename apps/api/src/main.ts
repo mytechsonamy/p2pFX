@@ -99,8 +99,11 @@ if (realLps.length && /mock-core|localhost:4100/.test(coreUrl) && process.env.SA
       }
     }
   };
-  await sync().catch((err) => app.log.warn({ err }, 'mock rate sync from Saxo failed'));
-  setInterval(() => sync().catch((err) => app.log.warn({ err }, 'mock rate sync from Saxo failed')), 60_000).unref();
+  const run = () => sync().catch((err) => app.log.warn({ err }, 'mock rate sync from the real LPs failed'));
+  await run();
+  // A FIX LP (LMAX) prices only once its session is logged on: the first sync is repeated shortly after start.
+  for (const ms of [5_000, 15_000]) setTimeout(run, ms).unref();
+  setInterval(run, 60_000).unref();
 }
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
