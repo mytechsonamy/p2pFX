@@ -202,6 +202,16 @@ export class FixSession extends EventEmitter {
           this.send('4', [[123, 'Y'], [36, this.outSeq + 1]]);
           break;
         case '5':
+          if (!this.loggedOn) {
+            // Refused at logon (wrong password, access denied): retrying would only add failed logins and can lock the
+            // account, so the session stops until it is started again.
+            this.opts.log?.warn({ host: this.opts.host, text: msg.get(58) }, 'FIX logon refused; not retrying');
+            this.stopped = true;
+            clearTimeout(this.reconnect);
+            this.drop(msg.get(58) ?? 'logon refused');
+            this.emit('refused', msg.get(58) ?? 'logon refused');
+            break;
+          }
           this.opts.log?.warn({ host: this.opts.host, text: msg.get(58) }, 'FIX logout from the counterparty');
           this.drop(msg.get(58) ?? 'logout');
           break;

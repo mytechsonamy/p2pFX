@@ -136,12 +136,14 @@ describe('LMAX over FIX', () => {
     await expect(env.lmax.quotes('USDCHF')).rejects.toBeInstanceOf(LiquidityError);
   });
 
-  it('refuses a wrong password without logging on', async () => {
+  it('refuses a wrong password without logging on, and does not try again (no account lockout)', async () => {
     env = await fakeLmax({ password: 'right' });
     env.lmax.start();
     await until(() => env!.received.some((r) => r.msg.type === 'A'));
-    await new Promise((r) => setTimeout(r, 50));
+    // Reconnects are 50 ms apart in these tests: a session that kept trying would log on again several times.
+    await new Promise((r) => setTimeout(r, 300));
     expect(env.lmax.connected).toBe(false);
+    expect(env.received.filter((r) => r.msg.type === 'A')).toHaveLength(2);
     await expect(env.lmax.execute({ ...order, ref: 'r0' })).rejects.toBeInstanceOf(LiquidityError);
   });
 
